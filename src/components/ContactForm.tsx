@@ -136,7 +136,7 @@ export default function ContactForm() {
             variants={itemVariants}
             type="submit" 
             disabled={isSubmitting}
-            className={`w-full flex justify-center items-center gap-3 bg-accent text-white py-5 mt-4 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-accent/20 transition-all text-sm ${isSubmitting ? 'opacity-70 cursor-not-allowed scale-95' : 'hover:bg-blue-600 hover:-translate-y-1 hover:shadow-accent/40'}`}
+            className={`w-full flex justify-center items-center gap-3 bg-accent text-white py-5 mt-4 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-accent/20 transition-all text-sm ${isSubmitting ? 'opacity-70 cursor-not-allowed scale-95' : 'hover:opacity-90 hover:-translate-y-1 hover:shadow-accent/40'}`}
           >
             {isSubmitting ? 'Envoi en cours...' : 'Lancer mon projet'}
             {!isSubmitting && <Send size={18} />}

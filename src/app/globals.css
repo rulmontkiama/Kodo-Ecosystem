@@ -6,8 +6,8 @@
   --color-foreground: #ffffff;
   --color-primary: #ffffff;
   --color-primary-dark: #e0e0e0;
-  --color-accent: #3b82f6;
-  --color-accent-glow: rgba(59, 130, 246, 0.5);
+  --color-accent: #FF7F7F;
+  --color-accent-glow: rgba(255, 127, 127, 0.5);
   --color-surface: #0a0a0a;
   --color-surface-variant: #121212;
   --color-outline: #262626;
