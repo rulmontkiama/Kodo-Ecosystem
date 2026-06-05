@@ -1,5 +1,7 @@
 'use client';
 import { useState } from 'react';
+import { motion } from 'framer-motion';
+import { Building2, Mail, Send, CheckCircle2 } from 'lucide-react';
 
 export default function ContactForm() {
   const [name, setName] = useState('');
@@ -35,70 +37,121 @@ export default function ContactForm() {
     }
   };
 
+  const containerVariants = {
+    hidden: { opacity: 0 },
+    visible: {
+      opacity: 1,
+      transition: {
+        staggerChildren: 0.1
+      }
+    }
+  };
+
+  const itemVariants = {
+    hidden: { opacity: 0, y: 20 },
+    visible: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 300, damping: 24 } }
+  };
+
   return (
-    <section id="contact" className="py-24 bg-surface-variant/30 flex justify-center px-6">
-      <div className="w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
+    <section id="contact" className="py-32 bg-surface-variant/20 flex justify-center px-6 relative overflow-hidden">
+      {/* Background Glow */}
+      <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-primary/10 blur-[120px] rounded-full pointer-events-none" />
+
+      <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-20 items-center z-10">
         
-        <div className="space-y-6">
-          <h2 className="text-4xl md:text-5xl font-black text-foreground tracking-tight">
-            Prêt à transformer <br/> votre commerce ?
+        <motion.div 
+          initial={{ opacity: 0, x: -30 }}
+          whileInView={{ opacity: 1, x: 0 }}
+          viewport={{ once: true, margin: "-100px" }}
+          transition={{ duration: 0.6 }}
+          className="space-y-8"
+        >
+          <div className="inline-flex items-center gap-2 text-xs font-bold text-primary tracking-widest uppercase bg-primary/10 px-4 py-2 rounded-full">
+            <Building2 size={14} />
+            Contact
+          </div>
+          <h2 className="text-4xl md:text-5xl lg:text-6xl font-black text-foreground tracking-tight leading-[1.1]">
+            Prêt à transformer <br/><span className="text-primary">votre commerce ?</span>
           </h2>
-          <p className="text-lg text-foreground/70 font-medium max-w-md">
+          <p className="text-xl text-foreground/60 font-medium max-w-md leading-relaxed">
             Laissez-nous vos coordonnées et la branche qui vous intéresse. Notre équipe d&apos;experts vous recontactera avec une proposition sur mesure.
           </p>
-        </div>
+          
+          <div className="pt-8 flex flex-col gap-4 text-sm font-bold tracking-wider uppercase text-foreground/40">
+            <p className="flex items-center gap-3"><CheckCircle2 className="text-primary" size={20}/> Devis personnalisé</p>
+            <p className="flex items-center gap-3"><CheckCircle2 className="text-primary" size={20}/> Accompagnement sur mesure</p>
+            <p className="flex items-center gap-3"><CheckCircle2 className="text-primary" size={20}/> Migration de vos données incluse</p>
+          </div>
+        </motion.div>
 
-        <form onSubmit={handleSubmit} className="w-full bg-surface p-8 md:p-10 rounded-[2rem] shadow-xl border border-outline/30 space-y-5">
-          <div className="space-y-1">
-            <label className="text-xs font-bold tracking-wider uppercase text-foreground/50 ml-2">Nom du commerce</label>
+        <motion.form 
+          variants={containerVariants}
+          initial="hidden"
+          whileInView="visible"
+          viewport={{ once: true, margin: "-100px" }}
+          onSubmit={handleSubmit} 
+          className="w-full bg-surface p-8 sm:p-12 rounded-[2.5rem] shadow-2xl shadow-primary/5 border border-outline/20 space-y-6"
+        >
+          <motion.div variants={itemVariants} className="space-y-2">
+            <label className="text-[10px] font-black tracking-widest uppercase text-foreground/40 ml-4 flex items-center gap-2">
+              <Building2 size={12}/> Nom du commerce
+            </label>
             <input 
               type="text" 
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Ex: Café Ciseaux" 
-              className="w-full p-4 rounded-2xl border border-outline bg-surface-variant/20 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all placeholder:text-foreground/30" 
+              className="w-full p-5 rounded-2xl border border-outline/30 bg-surface focus:bg-surface focus:border-primary focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-foreground/20 font-medium text-lg" 
               required 
             />
-          </div>
+          </motion.div>
           
-          <div className="space-y-1">
-            <label className="text-xs font-bold tracking-wider uppercase text-foreground/50 ml-2">Email de contact</label>
+          <motion.div variants={itemVariants} className="space-y-2">
+            <label className="text-[10px] font-black tracking-widest uppercase text-foreground/40 ml-4 flex items-center gap-2">
+              <Mail size={12}/> Email de contact
+            </label>
             <input 
               type="email" 
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="hello@exemple.com" 
-              className="w-full p-4 rounded-2xl border border-outline bg-surface-variant/20 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all placeholder:text-foreground/30" 
+              className="w-full p-5 rounded-2xl border border-outline/30 bg-surface focus:bg-surface focus:border-primary focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-foreground/20 font-medium text-lg" 
               required 
             />
-          </div>
+          </motion.div>
           
-          <div className="space-y-1">
-            <label className="text-xs font-bold tracking-wider uppercase text-foreground/50 ml-2">Service souhaité</label>
+          <motion.div variants={itemVariants} className="space-y-2">
+            <label className="text-[10px] font-black tracking-widest uppercase text-foreground/40 ml-4">Service souhaité</label>
             <select 
               value={service}
               onChange={(e) => setService(e.target.value)}
-              className="w-full p-4 rounded-2xl border border-outline bg-surface-variant/20 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all text-foreground cursor-pointer appearance-none"
+              className="w-full p-5 rounded-2xl border border-outline/30 bg-surface focus:bg-surface focus:border-primary focus:ring-4 focus:ring-primary/10 outline-none transition-all text-foreground cursor-pointer appearance-none font-medium text-lg"
             >
               <option value="POS">Kōdo POS (Retail / Magasins)</option>
               <option value="Bookings">Kōdo Bookings (Services / Salons)</option>
             </select>
-          </div>
+          </motion.div>
           
-          <button 
+          <motion.button 
+            variants={itemVariants}
             type="submit" 
             disabled={isSubmitting}
-            className={`w-full bg-primary text-white py-4 mt-2 rounded-2xl font-bold uppercase tracking-wider shadow-lg transition-all ${isSubmitting ? 'opacity-70 cursor-not-allowed' : 'hover:bg-primary-dark hover:-translate-y-0.5'}`}
+            className={`w-full flex justify-center items-center gap-3 bg-primary text-white py-5 mt-4 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-primary/20 transition-all text-sm ${isSubmitting ? 'opacity-70 cursor-not-allowed scale-95' : 'hover:bg-primary-dark hover:-translate-y-1 hover:shadow-primary/40'}`}
           >
             {isSubmitting ? 'Envoi en cours...' : 'Lancer mon projet'}
-          </button>
+            {!isSubmitting && <Send size={18} />}
+          </motion.button>
           
           {status && (
-            <p className="text-sm text-center font-bold text-primary bg-primary/10 py-3 rounded-xl mt-4 animate-in fade-in slide-in-from-bottom-2">
+            <motion.p 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="text-sm text-center font-bold text-primary bg-primary/10 py-4 rounded-xl mt-4 border border-primary/20"
+            >
               {status}
-            </p>
+            </motion.p>
           )}
-        </form>
+        </motion.form>
 
       </div>
     </section>
