@@ -7,11 +7,11 @@ import { ArrowRight, Sparkles } from 'lucide-react';
 
 export default function Hero() {
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-8 relative overflow-hidden">
+    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-8 relative overflow-hidden bg-grid-pattern">
       {/* Background decoration */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[500px] bg-primary/20 blur-[120px] rounded-full pointer-events-none" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[500px] bg-accent/20 blur-[120px] rounded-full pointer-events-none" />
       
-      <nav className="fixed top-0 left-0 right-0 w-full z-40 bg-background/60 backdrop-blur-2xl border-b border-outline/50 transition-all duration-300">
+      <nav className="fixed top-0 left-0 right-0 w-full z-40 glass border-b border-white/5 transition-all duration-300">
         <div className="max-w-5xl mx-auto px-6 h-20 flex justify-between items-center">
           <motion.h1 
             initial={{ opacity: 0, x: -20 }}
@@ -25,10 +25,10 @@ export default function Hero() {
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.5 }}
-            className="space-x-8 text-sm text-surface-variant font-medium flex items-center"
+            className="space-x-8 text-sm text-foreground/70 font-medium flex items-center"
           >
-            <Link href="#services" className="hover:text-primary transition-colors">Services</Link>
-            <Link href="#contact" className="text-foreground hover:text-primary transition-colors">Demander une démo</Link>
+            <Link href="#services" className="hover:text-white transition-colors">Services</Link>
+            <Link href="#contact" className="text-foreground hover:text-accent transition-colors">Demander une démo</Link>
           </motion.div>
         </div>
       </nav>
@@ -38,9 +38,9 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.1 }}
-          className="flex items-center gap-2 text-xs font-bold text-primary tracking-widest uppercase bg-primary/10 px-5 py-2.5 rounded-full mb-8 border border-primary/20 shadow-sm"
+          className="flex items-center gap-2 text-xs font-bold text-accent tracking-widest uppercase glass px-5 py-2.5 rounded-full mb-8 shadow-sm"
         >
-          <Sparkles size={14} className="text-primary" />
+          <Sparkles size={14} className="text-accent" />
           KŌDO SOLUTIONS
         </motion.div>
         
@@ -48,7 +48,7 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2 }}
-          className="text-5xl md:text-7xl lg:text-8xl font-black tracking-tighter mb-8 text-foreground leading-[1.05]"
+          className="text-5xl md:text-7xl lg:text-8xl font-black tracking-tighter mb-8 text-foreground leading-[1.05] text-glow"
         >
           Le système d&apos;exploitation <br className="hidden md:block" /> de votre commerce.
         </motion.h2>
@@ -68,7 +68,7 @@ export default function Hero() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.4 }}
         >
-          <Link href="#contact" className="group flex items-center gap-3 bg-primary hover:bg-primary-dark text-white px-10 py-5 rounded-full font-bold shadow-2xl shadow-primary/30 hover:shadow-primary/50 hover:-translate-y-1 transition-all text-lg">
+          <Link href="#contact" className="group flex items-center gap-3 bg-white hover:bg-gray-200 text-black px-10 py-5 rounded-full font-bold shadow-2xl shadow-white/10 hover:shadow-white/20 hover:-translate-y-1 transition-all text-lg">
             Lancer mon projet
             <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />
           </Link>

@@ -1,40 +1,51 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap');
 @import "tailwindcss";
 
+@theme {
+  --color-background: #030303;
+  --color-foreground: #ffffff;
+  --color-primary: #ffffff;
+  --color-primary-dark: #e0e0e0;
+  --color-accent: #3b82f6;
+  --color-accent-glow: rgba(59, 130, 246, 0.5);
+  --color-surface: #0a0a0a;
+  --color-surface-variant: #121212;
+  --color-outline: #262626;
+  --font-sans: "Outfit", sans-serif;
+}
+
 :root {
-  --background: #fdfdfc;
-  --foreground: #1c1c1c;
-  --color-primary: #FF7F7F;
-  --color-primary-dark: #e67373;
-  --color-surface: #ffffff;
-  --color-surface-variant: #f4f4f5;
-  --color-outline: #e4e4e7;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-primary: var(--color-primary);
-  --color-primary-dark: var(--color-primary-dark);
-  --color-surface: var(--color-surface);
-  --color-surface-variant: var(--color-surface-variant);
-  --color-outline: var(--color-outline);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #121212;
-    --foreground: #fcfcfc;
-    --color-surface: #1e1e1e;
-    --color-surface-variant: #27272a;
-    --color-outline: #3f3f46;
-  }
+  --background: #030303;
+  --foreground: #ffffff;
 }
 
 body {
-  background: var(--background);
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  font-family: "Outfit", sans-serif;
   -webkit-font-smoothing: antialiased;
+  background-image: 
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.05) 0%, transparent 50%),
+    linear-gradient(to bottom, transparent, #030303);
+}
+
+/* Premium Grid Background */
+.bg-grid-pattern {
+  background-size: 40px 40px;
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  mask-image: radial-gradient(circle at center, black, transparent 80%);
+}
+
+/* Glowing text effect */
+.text-glow {
+  text-shadow: 0 0 30px rgba(255, 255, 255, 0.3);
+}
+
+/* Glassmorphism */
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }

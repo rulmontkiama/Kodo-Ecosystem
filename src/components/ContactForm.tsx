@@ -53,9 +53,9 @@ export default function ContactForm() {
   };
 
   return (
-    <section id="contact" className="py-32 bg-surface-variant/20 flex justify-center px-6 relative overflow-hidden">
+    <section id="contact" className="py-32 flex justify-center px-6 relative overflow-hidden">
       {/* Background Glow */}
-      <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-primary/10 blur-[120px] rounded-full pointer-events-none" />
+      <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-accent/10 blur-[120px] rounded-full pointer-events-none" />
 
       <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-20 items-center z-10">
         
@@ -66,21 +66,21 @@ export default function ContactForm() {
           transition={{ duration: 0.6 }}
           className="space-y-8"
         >
-          <div className="inline-flex items-center gap-2 text-xs font-bold text-primary tracking-widest uppercase bg-primary/10 px-4 py-2 rounded-full">
+          <div className="inline-flex items-center gap-2 text-xs font-bold text-accent tracking-widest uppercase glass px-4 py-2 rounded-full">
             <Building2 size={14} />
             Contact
           </div>
-          <h2 className="text-4xl md:text-5xl lg:text-6xl font-black text-foreground tracking-tight leading-[1.1]">
-            Prêt à transformer <br/><span className="text-primary">votre commerce ?</span>
+          <h2 className="text-4xl md:text-5xl lg:text-6xl font-black text-foreground tracking-tight leading-[1.1] text-glow">
+            Prêt à transformer <br/><span className="text-accent">votre commerce ?</span>
           </h2>
           <p className="text-xl text-foreground/60 font-medium max-w-md leading-relaxed">
             Laissez-nous vos coordonnées et la branche qui vous intéresse. Notre équipe d&apos;experts vous recontactera avec une proposition sur mesure.
           </p>
           
           <div className="pt-8 flex flex-col gap-4 text-sm font-bold tracking-wider uppercase text-foreground/40">
-            <p className="flex items-center gap-3"><CheckCircle2 className="text-primary" size={20}/> Devis personnalisé</p>
-            <p className="flex items-center gap-3"><CheckCircle2 className="text-primary" size={20}/> Accompagnement sur mesure</p>
-            <p className="flex items-center gap-3"><CheckCircle2 className="text-primary" size={20}/> Migration de vos données incluse</p>
+            <p className="flex items-center gap-3"><CheckCircle2 className="text-accent" size={20}/> Devis personnalisé</p>
+            <p className="flex items-center gap-3"><CheckCircle2 className="text-accent" size={20}/> Accompagnement sur mesure</p>
+            <p className="flex items-center gap-3"><CheckCircle2 className="text-accent" size={20}/> Migration de vos données incluse</p>
           </div>
         </motion.div>
 
@@ -90,7 +90,7 @@ export default function ContactForm() {
           whileInView="visible"
           viewport={{ once: true, margin: "-100px" }}
           onSubmit={handleSubmit} 
-          className="w-full bg-surface p-8 sm:p-12 rounded-[2.5rem] shadow-2xl shadow-primary/5 border border-outline/20 space-y-6"
+          className="w-full glass p-8 sm:p-12 rounded-[2.5rem] shadow-2xl space-y-6"
         >
           <motion.div variants={itemVariants} className="space-y-2">
             <label className="text-[10px] font-black tracking-widest uppercase text-foreground/40 ml-4 flex items-center gap-2">
@@ -101,7 +101,7 @@ export default function ContactForm() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Ex: Café Ciseaux" 
-              className="w-full p-5 rounded-2xl border border-outline/30 bg-surface focus:bg-surface focus:border-primary focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-foreground/20 font-medium text-lg" 
+              className="w-full p-5 rounded-2xl border border-white/10 bg-white/5 focus:bg-white/10 focus:border-accent focus:ring-4 focus:ring-accent/20 outline-none transition-all placeholder:text-foreground/20 font-medium text-lg text-white" 
               required 
             />
           </motion.div>
@@ -115,7 +115,7 @@ export default function ContactForm() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="hello@exemple.com" 
-              className="w-full p-5 rounded-2xl border border-outline/30 bg-surface focus:bg-surface focus:border-primary focus:ring-4 focus:ring-primary/10 outline-none transition-all placeholder:text-foreground/20 font-medium text-lg" 
+              className="w-full p-5 rounded-2xl border border-white/10 bg-white/5 focus:bg-white/10 focus:border-accent focus:ring-4 focus:ring-accent/20 outline-none transition-all placeholder:text-foreground/20 font-medium text-lg text-white" 
               required 
             />
           </motion.div>
@@ -125,10 +125,10 @@ export default function ContactForm() {
             <select 
               value={service}
               onChange={(e) => setService(e.target.value)}
-              className="w-full p-5 rounded-2xl border border-outline/30 bg-surface focus:bg-surface focus:border-primary focus:ring-4 focus:ring-primary/10 outline-none transition-all text-foreground cursor-pointer appearance-none font-medium text-lg"
+              className="w-full p-5 rounded-2xl border border-white/10 bg-white/5 focus:bg-white/10 focus:border-accent focus:ring-4 focus:ring-accent/20 outline-none transition-all cursor-pointer appearance-none font-medium text-lg text-white"
             >
-              <option value="POS">Kōdo POS (Retail / Magasins)</option>
-              <option value="Bookings">Kōdo Bookings (Services / Salons)</option>
+              <option value="POS" className="bg-[#121212]">Kōdo POS (Retail / Magasins)</option>
+              <option value="Bookings" className="bg-[#121212]">Kōdo Bookings (Services / Salons)</option>
             </select>
           </motion.div>
           
@@ -136,7 +136,7 @@ export default function ContactForm() {
             variants={itemVariants}
             type="submit" 
             disabled={isSubmitting}
-            className={`w-full flex justify-center items-center gap-3 bg-primary text-white py-5 mt-4 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-primary/20 transition-all text-sm ${isSubmitting ? 'opacity-70 cursor-not-allowed scale-95' : 'hover:bg-primary-dark hover:-translate-y-1 hover:shadow-primary/40'}`}
+            className={`w-full flex justify-center items-center gap-3 bg-accent text-white py-5 mt-4 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-accent/20 transition-all text-sm ${isSubmitting ? 'opacity-70 cursor-not-allowed scale-95' : 'hover:bg-blue-600 hover:-translate-y-1 hover:shadow-accent/40'}`}
           >
             {isSubmitting ? 'Envoi en cours...' : 'Lancer mon projet'}
             {!isSubmitting && <Send size={18} />}
@@ -146,7 +146,7 @@ export default function ContactForm() {
             <motion.p 
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="text-sm text-center font-bold text-primary bg-primary/10 py-4 rounded-xl mt-4 border border-primary/20"
+              className="text-sm text-center font-bold text-accent bg-accent/10 py-4 rounded-xl mt-4 border border-accent/20"
             >
               {status}
             </motion.p>
