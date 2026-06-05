@@ -13,14 +13,16 @@ export default function Hero() {
       
       <nav className="fixed top-0 left-0 right-0 w-full z-40 glass border-b border-white/5 transition-all duration-300">
         <div className="max-w-5xl mx-auto px-6 h-20 flex justify-between items-center">
-          <motion.h1 
+          <motion.div 
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.5 }}
-            className="text-2xl font-black tracking-widest text-foreground uppercase"
           >
-            KŌDO
-          </motion.h1>
+            <Link href="/" className="flex items-center gap-3">
+              <img src="/logo-light.png" alt="KŌDO Logo" className="h-8 w-auto drop-shadow-md" />
+              <span className="text-xl font-black tracking-widest text-foreground uppercase mt-1">KŌDO</span>
+            </Link>
+          </motion.div>
           <motion.div 
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
