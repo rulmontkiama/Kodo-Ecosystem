@@ -19,11 +19,11 @@ export default function Hero() {
           KŌDO SOLUTIONS
         </span>
         <h2 className="text-5xl md:text-7xl font-black tracking-tighter mb-8 text-foreground leading-[1.1]">
-          Le système d'exploitation <br className="hidden md:block" /> de votre commerce.
+          Le système d&apos;exploitation <br className="hidden md:block" /> de votre commerce.
         </h2>
         <p className="text-lg md:text-xl text-foreground/60 mb-12 max-w-2xl font-medium leading-relaxed">
           POS moderne, réservations intelligentes et présence digitale. 
-          Propulsé par l'IA pour les commerçants ambitieux de toute la région.
+          Propulsé par l&apos;IA pour les commerçants ambitieux de toute la région.
         </p>
         <Link href="#contact" className="bg-primary hover:bg-primary-dark text-white px-10 py-5 rounded-full font-bold shadow-lg shadow-primary/20 hover:shadow-primary/40 hover:-translate-y-1 transition-all text-lg">
           Lancer mon projet

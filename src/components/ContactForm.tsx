@@ -42,7 +42,7 @@ export default function ContactForm() {
             Prêt à transformer <br/> votre commerce ?
           </h2>
           <p className="text-lg text-foreground/70 font-medium max-w-md">
-            Laissez-nous vos coordonnées et la branche qui vous intéresse. Notre équipe d'experts vous recontactera avec une proposition sur mesure.
+            Laissez-nous vos coordonnées et la branche qui vous intéresse. Notre équipe d&apos;experts vous recontactera avec une proposition sur mesure.
           </p>
         </div>
 
