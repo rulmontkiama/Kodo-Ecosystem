@@ -74,7 +74,7 @@ export default function Services() {
                 <li className="flex items-center gap-3"><CheckCircle2 size={18} className="text-accent" /> Fidélisation client</li>
               </ul>
 
-              <Link href="#contact" className="inline-flex items-center gap-2 text-accent font-black uppercase tracking-widest text-sm hover:gap-4 transition-all mt-auto">
+              <Link href="/services/pos" className="inline-flex items-center gap-2 text-accent font-black uppercase tracking-widest text-sm hover:gap-4 transition-all mt-auto">
                 Découvrir le POS <ArrowRight size={16} />
               </Link>
             </div>
@@ -103,7 +103,7 @@ export default function Services() {
                 <li className="flex items-center gap-3"><CheckCircle2 size={18} className="text-accent shrink-0" /> Plannings collaborateurs</li>
               </ul>
 
-              <Link href="#contact" className="inline-flex items-center gap-2 text-accent font-black uppercase tracking-widest text-sm hover:gap-4 transition-all">
+              <Link href="/services/bookings" className="inline-flex items-center gap-2 text-accent font-black uppercase tracking-widest text-sm hover:gap-4 transition-all">
                 Voir Bookings <ArrowRight size={16} />
               </Link>
             </div>
@@ -132,7 +132,7 @@ export default function Services() {
                 <li className="flex items-center gap-3"><CheckCircle2 size={18} className="text-accent shrink-0" /> Hébergement cloud Vercel</li>
               </ul>
 
-              <Link href="#contact" className="inline-flex items-center gap-2 text-accent font-black uppercase tracking-widest text-sm hover:gap-4 transition-all">
+              <Link href="/services/web" className="inline-flex items-center gap-2 text-accent font-black uppercase tracking-widest text-sm hover:gap-4 transition-all">
                 Créer mon site <ArrowRight size={16} />
               </Link>
             </div>
