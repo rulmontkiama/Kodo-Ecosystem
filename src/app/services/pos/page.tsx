@@ -4,13 +4,11 @@ import { motion } from 'framer-motion';
 import { ArrowLeft, CheckCircle2, Store, CreditCard, PieChart, ShieldCheck } from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
-import Navbar from '@/components/layout/Navbar';
-import Footer from '@/components/layout/Footer';
+
 
 export default function KodoPOSPage() {
   return (
     <div className="min-h-screen flex flex-col relative z-10">
-      <Navbar />
       
       {/* Background Glows */}
       <div className="fixed top-20 left-10 w-[500px] h-[500px] bg-accent/5 blur-[120px] rounded-full pointer-events-none -z-10" />
@@ -151,7 +149,11 @@ export default function KodoPOSPage() {
         </div>
       </main>
       
-      <Footer />
+      <footer className="bg-foreground text-background py-8 text-center mt-auto">
+        <p className="text-sm font-medium opacity-80">
+          &copy; {new Date().getFullYear()} Kōdo Solutions. Tous droits réservés.
+        </p>
+      </footer>
     </div>
   );
 }
