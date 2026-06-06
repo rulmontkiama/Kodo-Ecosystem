@@ -41,7 +41,10 @@ export async function POST(request: Request) {
             select: { name: service }
           },
           "Statut": {
-            status: { name: "Lead Entrant" }
+            status: { name: "Client potentiel" }
+          },
+          "Source": {
+            select: { name: "Inbound (Kōdo Web)" }
           },
           "Date de demande": {
             date: { start: new Date().toISOString() }

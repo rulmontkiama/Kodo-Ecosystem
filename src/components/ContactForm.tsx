@@ -129,6 +129,7 @@ export default function ContactForm() {
             >
               <option value="POS" className="bg-[#121212]">Kōdo POS (Retail / Magasins)</option>
               <option value="Bookings" className="bg-[#121212]">Kōdo Bookings (Services / Salons)</option>
+              <option value="Web" className="bg-[#121212]">Kōdo Web (Sites Vitrines & E-commerce)</option>
             </select>
           </motion.div>
           
