@@ -15,10 +15,10 @@ export default async function ReservationPage({ params }: { params: { slug: stri
 
   // 2. Fetch services and staff
   const servicesSnapshot = await adminDb.collection(`salons/${salonId}/services`).get();
-  const services = servicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  const services = servicesSnapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
 
   const staffSnapshot = await adminDb.collection(`salons/${salonId}/staff`).get();
-  const staffList = staffSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  const staffList = staffSnapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] text-gray-900 pb-20">
