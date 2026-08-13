@@ -1,0 +1,4 @@
+﻿Code Journal;Période;Date;Document;Compte;Libellé;Sens;Montant;Code TVA
+VEN;202606;05/06/2026;TCK-2026-0001;580000;Recette Bancontact;D;217,8;
+VEN;202606;05/06/2026;TCK-2026-0001;700000;Vente Marchandises;C;180,0;21
+VEN;202606;05/06/2026;TCK-2026-0001;451000;TVA à payer;C;37,8;

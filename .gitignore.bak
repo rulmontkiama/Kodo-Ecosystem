@@ -1,0 +1,28 @@
+# PyInstaller / Python build output
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.spec
+
+# Base de données locales et fichiers temporaires WAL SQLite
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Fichiers de secrets et identifiants sensibles
+*firebase-adminsdk*.json
+.env
+license_cache.json
+
+# Fichiers système macOS et artefacts exFAT
+.DS_Store
+._*
+*.dmg
+
+# Backups et exports de test
+Backups_*/
+Exports_*/
+Tickets_*/

@@ -1,0 +1,77 @@
+============================================================
+              MANUEL D'UTILISATION - KŌDO POS
+============================================================
+
+Bienvenue sur Kōdo POS, votre logiciel de caisse nouvelle génération.
+Ce document explique les fonctionnalités de base de votre logiciel, 
+ainsi que ses limites (ce qu'il fait et ce qu'il ne fait pas).
+
+------------------------------------------------------------
+1. CE QUE LE LOGICIEL SAIT FAIRE (Fonctionnalités)
+------------------------------------------------------------
+✅ ENCAISSEMENT RAPIDE :
+- Scanner des codes-barres avec une douchette USB classique (Low Budget ou Pro).
+- Taper le code d'un produit manuellement si le code-barre est illisible.
+- Gérer plusieurs moyens de paiement (Bancontact, Espèces, QR Code).
+- Appliquer une remise globale en pourcentage sur le panier.
+
+✅ GESTION DE STOCK :
+- Créer, modifier et supprimer des produits (nom, catégorie, prix achat HT, prix vente TTC, TVA, quantité).
+- Gérer des variantes simples (Tailles S, M, L, XL, etc.) pour les vêtements.
+- Créer et supprimer des catégories (T-shirts, Vestes, Pantalons...).
+- Générer et imprimer des étiquettes code-barres pour vos produits.
+
+✅ RAPPORTS ET COMPTABILITÉ :
+- Module "Statistiques" en temps réel (Chiffre d'Affaires, Ventes, etc.).
+- Sorties de Caisse (Dépenses) pour justifier un retrait d'espèces (ex: achat de café).
+- Module Comptable Pro : Exporter vos données de vente en PDF, Excel (XLSX) et CSV.
+- Clôture de Caisse (Z de caisse) journalière avec un récapitulatif comptable officiel.
+
+✅ SAUVEGARDE & SÉCURITÉ :
+- Tout fonctionne 100% hors-ligne (Aucun Cloud, pas besoin d'Internet).
+- Système de sauvegarde automatique en arrière-plan à chaque vente ou modification de stock.
+- Les sauvegardes sont chiffrées et protégées par une clé secrète.
+
+✅ MATÉRIEL EXTERNE (PLUG & PLAY) :
+- Compatible avec les douchette/scanners de code-barre (mode clavier virtuel).
+- Compatible avec les imprimantes thermiques de ticket de caisse (ESC/POS USB).
+
+------------------------------------------------------------
+2. CE QUE LE LOGICIEL NE SAIT PAS FAIRE (Limites Actuelles)
+------------------------------------------------------------
+❌ MULTI-CAISSES SYNCHRONISÉES :
+- Le logiciel fonctionne sur UN SEUL ordinateur à la fois. Si vous l'installez sur un deuxième Mac, les deux caisses ne communiqueront pas entre elles (car il n'y a pas de cloud).
+  
+❌ PAIEMENT DIRECT PAR CARTE (TPE INTÉGRÉ) :
+- Le logiciel enregistre qu'un client a payé par "Bancontact" ou "QR Code", mais il ne déclenchera pas la transaction sur votre terminal de paiement. Vous devez taper le montant sur votre terminal Bancontact à la main.
+
+❌ FICHIER CLIENTÈLE COMPLEXE :
+- Il est possible d'attribuer une vente à un client ("+ Client"), mais il n'y a pas de système de fidélité complexe, d'envoi de newsletters ou de gestion de crédit client.
+
+❌ RÉSEAU & CLOUD :
+- Impossible d'accéder à vos statistiques depuis votre téléphone à distance. La donnée reste ultra-sécurisée sur la machine physique de la boutique.
+
+------------------------------------------------------------
+3. PREMIERS PAS & DÉPANNAGE
+------------------------------------------------------------
+
+▶︎ LANCER L'APPLICATION
+- Double-cliquez sur "Kodo_POS" dans le dossier "Applications" de votre Mac.
+
+▶︎ L'IMPRIMANTE NE FONCTIONNE PAS ?
+- Assurez-vous que l'imprimante thermique est bien branchée en USB.
+- Si le logiciel ne détecte pas l'imprimante, allez dans le dossier "Applications", faites un clic-droit sur "Kodo_POS" et vérifiez qu'aucune permission USB n'est bloquée par macOS.
+- Le logiciel est configuré pour détecter automatiquement la majorité des imprimantes thermiques génériques "low budget".
+
+▶︎ LA DOUCHETTE FAIT DES ERREURS DE LECTURE ?
+- Assurez-vous que votre douchette (Scanner) est configurée en "Clavier AZERTY Français/Belge" et non en "QWERTY". Vous pouvez généralement scanner un code spécifique fourni dans le manuel de la douchette pour la configurer.
+
+▶︎ COMMENT RÉCUPÉRER MES SAUVEGARDES ?
+- Les sauvegardes sont automatiquement stockées dans le dossier :
+  /Users/VotreNom/Documents/Kodo_Backups/
+- Ce dossier contient vos bases de données compressées jour par jour. 
+- En cas de panne de votre ordinateur principal, il suffit de copier le dernier fichier backup sur un nouveau Mac et de réinstaller le logiciel.
+
+============================================================
+KŌDO POS - Conçu pour être robuste, rapide, et fiable.
+============================================================

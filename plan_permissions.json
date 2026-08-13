@@ -1,0 +1,100 @@
+{
+  "plans": {
+    "STARTER": {
+      "name": "Starter",
+      "price_range": "39 €",
+      "max_catalog_size": 500,
+      "max_users": 1,
+      "features": {
+        "caisse_basic": true,
+        "stock_management": true,
+        "variants_size_color": false,
+        "returns_and_refunds": false,
+        "nf525_compliance": false,
+        "shopify_sync": false,
+        "multi_cashier_pin": false,
+        "advanced_analytics": false,
+        "multi_store": false,
+        "custom_api_access": false
+      }
+    },
+    "PRO": {
+      "name": "Pro",
+      "price_range": "79 €",
+      "max_catalog_size": -1,
+      "max_users": 10,
+      "features": {
+        "caisse_basic": true,
+        "stock_management": true,
+        "variants_size_color": true,
+        "returns_and_refunds": true,
+        "nf525_compliance": true,
+        "shopify_sync": true,
+        "multi_cashier_pin": true,
+        "advanced_analytics": true,
+        "multi_store": false,
+        "custom_api_access": false
+      }
+    },
+    "MAX": {
+      "name": "Max",
+      "price_range": "149 €",
+      "max_catalog_size": -1,
+      "max_users": -1,
+      "features": {
+        "caisse_basic": true,
+        "stock_management": true,
+        "variants_size_color": true,
+        "returns_and_refunds": true,
+        "nf525_compliance": true,
+        "shopify_sync": true,
+        "multi_cashier_pin": true,
+        "advanced_analytics": true,
+        "multi_store": true,
+        "custom_api_access": true
+      }
+    }
+  },
+  "upsell_modals": {
+    "default": {
+      "title": "Fonctionnalité Verrouillée 🔒",
+      "message": "Cette fonctionnalité nécessite une licence supérieure. Cliquez ici pour mettre à niveau votre abonnement.",
+      "button_text": "Mettre à niveau"
+    },
+    "shopify_sync": {
+      "title": "Synchronisation Shopify 🔒",
+      "message": "Vendez en omnicanal ! La synchronisation en temps réel avec votre boutique Shopify nécessite la licence KŌDO POS Pro.",
+      "button_text": "Découvrir le plan PRO"
+    },
+    "multi_cashier_pin": {
+      "title": "Gestion Multi-Caissiers 🔒",
+      "message": "Gérez votre équipe avec des codes PIN individuels et suivez les performances par vendeur avec la licence KŌDO POS Pro.",
+      "button_text": "Passer au plan PRO"
+    },
+    "variants_size_color": {
+      "title": "Déclinaisons Avancées 🔒",
+      "message": "Gérez les tailles, couleurs et matières de vos produits avec précision grâce à la licence KŌDO POS Pro.",
+      "button_text": "Passer au plan PRO"
+    },
+    "returns_and_refunds": {
+      "title": "Retours & Avoirs 🔒",
+      "message": "Proposez des retours et générez des avoirs personnalisés avec la licence KŌDO POS Pro.",
+      "button_text": "Passer au plan PRO"
+    },
+    "nf525_compliance": {
+      "title": "Clôture & Comptabilité 🔒",
+      "message": "L'export comptable et le module de clôture (type NF525) nécessitent la licence KŌDO POS Pro.",
+      "button_text": "Mettre à niveau vers PRO"
+    },
+    "multi_store": {
+      "title": "Gestion Multi-Boutiques 🔒",
+      "message": "Gérez plusieurs points de vente et transférez vos stocks facilement avec la licence KŌDO POS Max.",
+      "button_text": "Mettre à niveau vers MAX"
+    },
+    "custom_api_access": {
+      "title": "Accès API 🔒",
+      "message": "Intégrez KŌDO POS avec vos propres outils grâce à notre API (inclus dans la licence Max).",
+      "button_text": "Mettre à niveau vers MAX"
+    }
+  }
+}
