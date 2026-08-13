@@ -259,26 +259,17 @@ class UpdateNotificationModal(ctk.CTkToplevel):
         self.btn_primary.pack(side="right", padx=(10, 0), expand=True, fill="x")
 
     def _start_install(self):
-        self.btn_primary.configure(state="disabled", text="Installation...")
+        self.btn_primary.configure(state="disabled", text="Ouverture du navigateur...")
         self.btn_secondary.configure(state="disabled")
 
-        self.progress_frame.pack(fill="x", padx=25, pady=(0, 10))
-        self.progress_bar.pack(fill="x", pady=5)
-        self.progress_bar.set(0.1)
-        self.lbl_progress.pack()
+        import webbrowser
+        url = self.update_info.get("download_url", "https://github.com/rulmontkiama/Kodo-Ecosystem/releases/latest")
+        webbrowser.open(url)
+        
+        self.lbl_progress.configure(text=f"Veuillez télécharger et installer la nouvelle version depuis votre navigateur.")
+        self.lbl_progress.pack(pady=10)
 
-        def _worker():
-            for i in range(1, 11):
-                time.sleep(0.15)
-                self.progress_bar.set(i / 10.0)
-                self.lbl_progress.configure(text=f"Mise à jour v{self.update_info.get('version')}... {i*10}%")
-
-            self.after(500, self._finish_install)
-
-        threading.Thread(target=_worker, daemon=True).start()
+        self.after(3000, self._finish_install)
 
     def _finish_install(self):
-        ToastNotification(self.master, f"Mise à jour {self.update_info.get('version')} installée avec succès !", type="success")
-        if self.on_install_callback:
-            self.on_install_callback()
         self.destroy()
