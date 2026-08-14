@@ -4,7 +4,7 @@ Toutes les modifications notables apportées au projet Kōdo POS sont documenté
 
 ---
 
-## [1.0.4] - 2026-08-14
+## [1.0.18] - 2026-08-14
 
 ### 🐛 Correctifs de Bugs Critiques (Hotfixes)
 - **Persistance Défaillante (Ghost Data) :**

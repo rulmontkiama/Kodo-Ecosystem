@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import ssl
 
-CURRENT_VERSION = "1.0.4"
+CURRENT_VERSION = "1.0.18"
 VERSION_URL = "https://kodo-solutions.vercel.app/api/version"
 
 def get_installed_version():
