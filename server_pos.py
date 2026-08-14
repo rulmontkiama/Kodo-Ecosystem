@@ -30,6 +30,16 @@ import ticket_printer
 initialiser_db()
 
 def get_dist_dir():
+    # 1. En mode développement / source, prioriser le dist du projet local
+    if not getattr(sys, 'frozen', False):
+        local_dist = os.path.join(BASE_DIR, "dist")
+        if os.path.exists(local_dist) and os.path.exists(os.path.join(local_dist, 'index.html')):
+            return local_dist
+        desktop_dist = os.path.expanduser("~/Desktop/kōdo-pos-3/dist")
+        if os.path.exists(desktop_dist) and os.path.exists(os.path.join(desktop_dist, 'index.html')):
+            return desktop_dist
+
+    # 2. En mode exécutable / production, vérifier le cache de mise à jour dynamique
     candidates = [
         os.path.expanduser("~/Library/Caches/KodoPOS/dist"),
         os.path.expanduser("~/.kodo_pos/dist"),
@@ -38,13 +48,11 @@ def get_dist_dir():
     for c in candidates:
         if os.path.exists(c) and os.path.exists(os.path.join(c, 'index.html')):
             return c
+
     if getattr(sys, 'frozen', False):
         return os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
     else:
-        d = os.path.join(BASE_DIR, "dist")
-        if not os.path.exists(d) or not os.path.exists(os.path.join(d, 'index.html')):
-            d = os.path.expanduser("~/Desktop/kōdo-pos-3/dist")
-        return d
+        return os.path.join(BASE_DIR, "dist")
 
 
 class POSRequestHandler(BaseHTTPRequestHandler):
