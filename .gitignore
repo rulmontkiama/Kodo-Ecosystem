@@ -1,7 +1,7 @@
 *.dmg
 *.zip
 __pycache__/
-dist/
+
 build/
 .agents/
 .DS_Store
@@ -9,3 +9,4 @@ build/
 node_modules/
 .npm-cache/
 zih5Ix5L
+kodo-pos-firebase-adminsdk-*.json

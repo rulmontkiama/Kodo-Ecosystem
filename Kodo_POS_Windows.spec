@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('logo.png', '.'), ('logo_ticket.png', '.'), ('instagram_block.png', '.'), ('kodo_pos.db', '.'), ('ladresse_b.db', '.'), ('dist', 'dist')]
 binaries = []
-hiddenimports = ['openpyxl.cell._writer', 'views.modals', 'views.stats_view', 'firebase_sync', 'shopify_sync', 'license_manager', 'backup_manager', 'core.rollback_manager', 'core.crash_watcher', 'server_pos']
+hiddenimports = ['openpyxl.cell._writer', 'views.modals', 'views.stats_view', 'firebase_sync', 'shopify_sync', 'license_manager', 'backup_manager', 'core.rollback_manager', 'core.crash_watcher', 'core.updater', 'services.update_checker', 'server_pos']
 datas += collect_data_files('pandas')
 datas += collect_data_files('openpyxl')
 datas += collect_data_files('PIL')

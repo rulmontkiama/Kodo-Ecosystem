@@ -747,11 +747,11 @@ class POSRequestHandler(BaseHTTPRequestHandler):
                     return
                 ticket_id = ticket_ids[0]
 
-                db_id = ticket_id
-                if ticket_id.startswith('ht_'):
-                    db_id = ticket_id[3:]
-
-                database_manager.supprimer_panier_en_attente(int(db_id))
+                import re
+                digits = re.findall(r'\d+', ticket_id)
+                if digits:
+                    db_id = int(digits[0])
+                    database_manager.supprimer_panier_en_attente(db_id)
                 self._send_json({"success": True})
 
             else:

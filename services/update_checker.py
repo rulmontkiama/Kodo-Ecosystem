@@ -7,7 +7,11 @@ import shutil
 import tempfile
 import ssl
 
+CURRENT_VERSION = "1.0.4"
 VERSION_URL = "https://kodo-solutions.vercel.app/api/version"
+
+def get_installed_version():
+    return CURRENT_VERSION
 
 def check_for_updates_sync():
     try:
@@ -21,13 +25,25 @@ def check_for_updates_sync():
     except Exception as e:
         return {"error": str(e), "has_update": False}
 
+def get_target_dist_dir():
+    try:
+        import server_pos
+        return server_pos.get_dist_dir()
+    except Exception:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        target = os.path.join(base_dir, "dist")
+        if os.path.exists(target) and os.access(os.path.dirname(target), os.W_OK):
+            return target
+        fallback = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
 def apply_remote_update_sync(patch_url, target_ver):
     try:
         if not patch_url:
             return {"success": False, "error": "No patch URL provided"}
             
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        dist_dir = os.path.join(base_dir, "dist")
+        dist_dir = get_target_dist_dir()
         
         ctx = ssl.create_default_context()
         ctx.check_hostname = False

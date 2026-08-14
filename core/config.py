@@ -20,9 +20,14 @@ class ShopConfig:
     
     @staticmethod
     def get_base_data_dir() -> str:
-        """Retourne le chemin racine du dossier de données utilisateur avec fallback local en cas de restriction de permissions."""
-        try:
+        """Retourne le chemin racine du dossier de données utilisateur avec support Windows et fallback local."""
+        if sys.platform == "win32":
+            app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
+            doc_dir = os.path.join(app_data, "Kodo_POS")
+        else:
             doc_dir = os.path.expanduser("~/Documents/Kodo_POS")
+
+        try:
             os.makedirs(doc_dir, exist_ok=True)
             test_file = os.path.join(doc_dir, ".perm_check")
             with open(test_file, "a") as f:
@@ -30,7 +35,10 @@ class ShopConfig:
             return doc_dir
         except Exception:
             try:
-                fallback_dir = os.path.expanduser("~/Library/Application Support/Kodo_POS")
+                if sys.platform == "win32":
+                    fallback_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Kodo_POS")
+                else:
+                    fallback_dir = os.path.expanduser("~/Library/Application Support/Kodo_POS")
                 os.makedirs(fallback_dir, exist_ok=True)
                 return fallback_dir
             except Exception:
