@@ -56,8 +56,8 @@ def handle_stats_request(method: str, path: str, query: Dict[str, Any], data: Di
         }
         return 200, pdf_bytes, headers
 
-    # 4. Export CSV (Comptabilité Belge / WinBooks / Z)
-    elif method == "GET" and path == "/api/export/csv":
+    # 4. Export CSV / FEC (Comptabilité Belge / WinBooks / Z)
+    elif method == "GET" and (path == "/api/export/csv" or path == "/api/export/fec"):
         fmt = query.get('format', ['belge'])[0]
         if fmt == 'winbooks':
             mois = query.get('mois', [None])[0]

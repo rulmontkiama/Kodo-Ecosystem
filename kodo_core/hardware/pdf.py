@@ -104,14 +104,25 @@ def generer_rapport_pdf(type_rapport, date_val, save_path):
         end_date = f"{date_val} 23:59:59"
         titre_periode = f"du {datetime.datetime.strptime(date_val, '%Y-%m-%d').strftime('%d/%m/%Y')}"
     elif type_rapport == "mois":
-        start_date = f"{date_val}-01 00:00:00"
-        y, m = map(int, date_val.split("-"))
+        parts = date_val.split("-")
+        if len(parts) == 3:  # YYYY-MM-DD
+            y, m = int(parts[0]), int(parts[1])
+        elif len(parts) == 2:
+            if len(parts[0]) == 4:  # YYYY-MM
+                y, m = int(parts[0]), int(parts[1])
+            else:  # MM-YYYY
+                m, y = int(parts[0]), int(parts[1])
+        else:
+            now = datetime.datetime.now()
+            y, m = now.year, now.month
+
+        start_date = f"{y:04d}-{m:02d}-01 00:00:00"
         if m == 12:
             y_next, m_next = y + 1, 1
         else:
             y_next, m_next = y, m + 1
         end_date = f"{y_next:04d}-{m_next:02d}-01 00:00:00"
-        titre_periode = f"de {datetime.datetime(y, m, 1).strftime('%B %Y')}"
+        titre_periode = f"du mois {m:02d}/{y:04d}"
     elif type_rapport == "annee":
         start_date = f"{date_val}-01-01 00:00:00"
         end_date = f"{int(date_val)+1:04d}-01-01 00:00:00"
