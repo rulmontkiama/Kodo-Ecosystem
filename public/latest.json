@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.36",
-  "latest_version": "1.0.36",
-  "version": "1.0.36",
+  "latestVersion": "1.0.37",
+  "latest_version": "1.0.37",
+  "version": "1.0.37",
   "releaseDate": "2026-08-19",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.36.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.36.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.36.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.37.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.37.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.37.zip",
   "has_update": true,
-  "changelog": "v1.0.36 : Refonte minimaliste Apple de la fiche produit (suppression de tous les emojis, sélection par menu déroulant épuré et alignement ergonomique)."
+  "changelog": "v1.0.37 : Pack Ultime Kōdo POS (Spotlight ⌘K, Générateur d'étiquettes codes-barres A4/Rouleau, Cartes cadeaux & Avoirs numérisés, Mode Écran Client iPad)."
 }
