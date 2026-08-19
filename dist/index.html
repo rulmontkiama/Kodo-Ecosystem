@@ -6,12 +6,23 @@
     <title>KŌDO POS - Caisse & Stocks</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <script type="module" crossorigin src="/assets/index-C5ck8cSA.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DlyiDzrl.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <script type="module" crossorigin src="/assets/index-Bvn2uq3V.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BY7a4NkF.css">
   </head>
   <body>
+    <!-- SVG Liquid Glass Optical Refraction Shader Defs (Apple WWDC 2025 Spec) -->
+    <svg style="position: absolute; width: 0; height: 0; pointer-events: none; overflow: hidden;" aria-hidden="true">
+      <defs>
+        <filter id="kodo-liquid-lens" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="1" result="noise" />
+          <feDisplacementMap in="SourceGraphic" in2="noise" scale="3" xChannelSelector="R" yChannelSelector="G" result="displaced" />
+          <feColorMatrix in="displaced" type="saturate" values="1.5" result="saturated" />
+          <feGaussianBlur in="saturated" stdDeviation="0.2" result="smooth" />
+        </filter>
+      </defs>
+    </svg>
+
     <div id="root"></div>
   </body>
 </html>
-
