@@ -60,22 +60,55 @@ def parse_version(v_str: str) -> tuple:
 
 def get_installed_version() -> str:
     """Renvoie la version actuellement installée du logiciel."""
+    # 1. Vérifier le fichier version.json dans le cache / documents
+    version_files = [
+        os.path.expanduser("~/Library/Caches/KodoPOS/version.json"),
+        os.path.expanduser("~/.kodo_pos/version.json"),
+        os.path.expanduser("~/Documents/Kodo_POS/version.json"),
+    ]
+    for vf in version_files:
+        if os.path.exists(vf):
+            try:
+                with open(vf, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("version"):
+                        return str(data["version"]).lstrip("v")
+            except Exception:
+                pass
+
+    # 2. Vérifier dans la base SQLite Parametres
+    try:
+        from kodo_core.db.connection import get_connection
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT valeur FROM Parametres WHERE cle='app_version'")
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0]:
+            return str(row[0]).lstrip("v")
+    except Exception:
+        pass
+
     return CURRENT_VERSION
 
 
 def get_target_dist_dir() -> str:
-    """Détermine le dossier dist cible pour l'application des assets IHM/Web."""
-    try:
-        import server_pos
-        return server_pos.get_dist_dir()
-    except Exception:
+    """Détermine le dossier dist cible inscriptible pour l'application des assets IHM/Web."""
+    # 1. En mode développement source (si dist/ local est inscriptible)
+    if not getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         target = os.path.join(base_dir, "dist")
         if os.path.exists(target) and os.access(os.path.dirname(target), os.W_OK):
             return target
-        fallback = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
+
+    # 2. En mode exécutable / production macOS ou Windows
+    if sys.platform.startswith("win"):
+        target_dir = os.path.expanduser("~/.kodo_pos/dist")
+    else:
+        target_dir = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
+    
+    os.makedirs(target_dir, exist_ok=True)
+    return target_dir
 
 
 def check_for_updates_sync(current_version: str = None) -> dict:
@@ -121,7 +154,7 @@ def check_for_updates_sync(current_version: str = None) -> dict:
 
     latest = data.get("latestVersion") or data.get("latest_version") or data.get("version") or data.get("tag_name")
     if latest:
-        data["latest_version"] = latest
+        data["latest_version"] = str(latest).lstrip("v")
         data["has_update"] = parse_version(latest) > parse_version(curr_ver)
     else:
         data["has_update"] = bool(data.get("has_update", False))
@@ -138,7 +171,8 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
     if not patch_url:
         return {"success": False, "error": "URL de patch/release manquante."}
 
-    logger.info(f"Début du téléchargement et installation de la mise à jour v{target_ver} depuis {patch_url}...")
+    clean_ver = str(target_ver).lstrip("v")
+    logger.info(f"Début du téléchargement et installation de la mise à jour v{clean_ver} depuis {patch_url}...")
     dist_dir = get_target_dist_dir()
 
     ctx = ssl.create_default_context()
@@ -149,10 +183,9 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
     extract_dir = None
     # 1. Téléchargement avec headers navigateur réel et fallbacks automatiques
     urls_to_try = [patch_url]
-    clean_ver = str(target_ver).lstrip("v")
     fallback_urls = [
         f"https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v{clean_ver}.zip",
-        f"https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.19.zip",
+        f"https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.20.zip",
         f"https://github.com/rulmontkiama/Kodo-Ecosystem/raw/main/public/dist_v{clean_ver}.zip",
         f"https://kodo-solutions-web.vercel.app/dist_v{clean_ver}.zip",
         f"https://kodo-solutions.vercel.app/dist_v{clean_ver}.zip",
@@ -207,10 +240,40 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
         shutil.copytree(dist_src, dist_dir, dirs_exist_ok=True)
         logger.info(f"Overlay in-place appliqué avec succès dans : {dist_dir}")
 
+        # 5. Enregistrement persistant de la version installée
+        ver_info = {
+            "version": clean_ver,
+            "installed_at": datetime.datetime.now().isoformat(),
+            "patch_url": patch_url,
+            "dist_dir": dist_dir
+        }
+        for vf in [
+            os.path.expanduser("~/Library/Caches/KodoPOS/version.json"),
+            os.path.expanduser("~/.kodo_pos/version.json"),
+            os.path.expanduser("~/Documents/Kodo_POS/version.json"),
+        ]:
+            try:
+                os.makedirs(os.path.dirname(vf), exist_ok=True)
+                with open(vf, "w", encoding="utf-8") as f:
+                    json.dump(ver_info, f, indent=2)
+            except Exception:
+                pass
+
+        try:
+            from kodo_core.db.connection import get_connection
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('app_version', ?)", (clean_ver,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
         return {
             "success": True,
-            "message": f"Mise à jour v{target_ver} installée avec succès dans {dist_dir} !",
-            "dist_dir": dist_dir
+            "message": f"Mise à jour v{clean_ver} installée avec succès dans {dist_dir} !",
+            "dist_dir": dist_dir,
+            "version": clean_ver
         }
     except Exception as e:
         logger.error(f"Erreur durant l'application de la mise à jour : {e}")
