@@ -82,12 +82,12 @@ def _get_db_stats(db_path: str) -> Dict[str, Any]:
             except Exception:
                 return 0
 
-        stats["products_count"] = count_table("products")
-        stats["clients_count"] = count_table("clients")
-        stats["sales_count"] = count_table("sales")
-        stats["users_count"] = count_table("users")
-        stats["held_tickets_count"] = count_table("held_tickets")
-        stats["categories_count"] = count_table("categories")
+        stats["products_count"] = count_table("produits") or count_table("products") or count_table("Produits")
+        stats["clients_count"] = count_table("clients") or count_table("Clients")
+        stats["sales_count"] = count_table("ventes") or count_table("sales") or count_table("Ventes")
+        stats["users_count"] = count_table("utilisateurs") or count_table("users") or count_table("Utilisateurs")
+        stats["held_tickets_count"] = count_table("tickets_en_attente") or count_table("held_tickets")
+        stats["categories_count"] = count_table("categories") or count_table("Categories")
 
         conn.close()
     except Exception as e:
@@ -400,8 +400,19 @@ def restaurer_pack_migration(zip_input: Any) -> Dict[str, Any]:
             return {"success": False, "error": "Le fichier SQLite extrait a échoué au test d'intégrité."}
 
         # 5. Remplacement atomique de la base active
-        os.makedirs(os.path.dirname(DB_NAME), exist_ok=True)
+        db_dir = os.path.dirname(DB_NAME)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         shutil.copy2(temp_extracted_path, DB_NAME)
+
+        # Nettoyage des journaux WAL résiduels pour garantir la cohérence immédiate
+        for wal_ext in ["-wal", "-shm"]:
+            wal_file = f"{DB_NAME}{wal_ext}"
+            if os.path.exists(wal_file):
+                try:
+                    os.remove(wal_file)
+                except Exception:
+                    pass
 
         # Nettoyage temporaire
         if os.path.exists(temp_extracted_path):
