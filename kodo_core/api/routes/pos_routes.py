@@ -97,10 +97,26 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
                 "taille": item.get('size', '')
             })
 
+        # Support Split Payment (Paiements multiples CB/Espèces/QR)
+        split_details = data.get('splitDetails')
+        payments = []
+        if split_details and isinstance(split_details, dict):
+            if float(split_details.get('cb', 0)) > 0:
+                payments.append(('CB', float(split_details['cb'])))
+            if float(split_details.get('especes', 0)) > 0:
+                payments.append(('Espèces', float(split_details['especes'])))
+            if float(split_details.get('qr', 0)) > 0:
+                payments.append(('QR', float(split_details['qr'])))
+        elif data.get('payments') and isinstance(data.get('payments'), list):
+            payments = [(p[0], float(p[1])) for p in data['payments'] if float(p[1]) > 0]
+        
+        if not payments:
+            payments = [(mode_paiement, total_ttc)]
+
         res = process_sale_transaction(
             cart_items=cart_items,
             total_tvac=total_ttc,
-            payments=[(mode_paiement, total_ttc)],
+            payments=payments,
             client_id=id_client,
             cashier_name=vendeur,
             caisse_id="POS-01",
