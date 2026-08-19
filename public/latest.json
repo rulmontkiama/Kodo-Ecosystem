@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.27",
-  "latest_version": "1.0.27",
-  "version": "1.0.27",
+  "latestVersion": "1.0.28",
+  "latest_version": "1.0.28",
+  "version": "1.0.28",
   "releaseDate": "2026-08-19",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.27.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.27.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.27.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.28.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.28.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.28.zip",
   "has_update": true,
-  "changelog": "v1.0.27 : Intégration Phase 1 Boss Final (Onglets Multi-Paniers Flottants, Moteur Fast-Scan Global, Split-Payment Mixte et Fidélité VIP Client)."
+  "changelog": "v1.0.28 : Agrandissement ergonomique des touches du pavé numérique et des coupures d'espèces pour un confort tactile optimal."
 }
