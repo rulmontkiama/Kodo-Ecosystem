@@ -147,14 +147,42 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
 
     tmp_path = None
     extract_dir = None
-    try:
-        # 1. Téléchargement avec headers navigateur réel
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-            req = urllib.request.Request(patch_url, headers=DEFAULT_HEADERS)
-            with urllib.request.urlopen(req, context=ctx, timeout=45) as response:
-                shutil.copyfileobj(response, tmp)
-            tmp_path = tmp.name
+    # 1. Téléchargement avec headers navigateur réel et fallbacks automatiques
+    urls_to_try = [patch_url]
+    clean_ver = str(target_ver).lstrip("v")
+    fallback_urls = [
+        f"https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v{clean_ver}.zip",
+        f"https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.19.zip",
+        f"https://github.com/rulmontkiama/Kodo-Ecosystem/raw/main/public/dist_v{clean_ver}.zip",
+        f"https://kodo-solutions-web.vercel.app/dist_v{clean_ver}.zip",
+        f"https://kodo-solutions.vercel.app/dist_v{clean_ver}.zip",
+    ]
+    for fb in fallback_urls:
+        if fb not in urls_to_try:
+            urls_to_try.append(fb)
 
+    downloaded = False
+    last_dl_err = None
+
+    for candidate_url in urls_to_try:
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                req = urllib.request.Request(candidate_url, headers=DEFAULT_HEADERS)
+                with urllib.request.urlopen(req, context=ctx, timeout=45) as response:
+                    shutil.copyfileobj(response, tmp)
+                tmp_path = tmp.name
+                downloaded = True
+                logger.info(f"Téléchargement réussi depuis : {candidate_url}")
+                break
+        except Exception as dl_e:
+            last_dl_err = dl_e
+            logger.warning(f"Échec téléchargement depuis {candidate_url} ({dl_e}), tentative suivante...")
+            continue
+
+    if not downloaded or not tmp_path:
+        return {"success": False, "error": f"Impossible de télécharger la mise à jour ({last_dl_err})"}
+
+    try:
         # 2. Extraction dans un répertoire temporaire
         extract_dir = tempfile.mkdtemp()
         with zipfile.ZipFile(tmp_path, "r") as zip_ref:
