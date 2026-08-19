@@ -2,16 +2,14 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
   return NextResponse.json({
-    latestVersion: "1.0.20",
-    latest_version: "1.0.20",
-    version: "1.0.20",
+    latestVersion: "1.0.21",
+    latest_version: "1.0.21",
+    version: "1.0.21",
     releaseDate: "2026-08-19",
-    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/Installation_Kodo_POS.dmg",
-    dmgUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/Installation_Kodo_POS.dmg",
-    dmg_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/Installation_Kodo_POS.dmg",
-    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.20.zip",
-    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.20.zip",
+    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.21.zip",
+    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.21.zip",
+    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.21.zip",
     has_update: true,
-    changelog: "v1.0.20 : Correctif persistance des articles créés à l'enregistrement et redémarrage, URLs directes CDN et synchronisation base SQLite.",
+    changelog: "v1.0.21 : Refonte responsive paramètres, support fiscalité Belgique (BCE / TVA 21%), bouton enregistrer en en-tête.",
   });
 }
