@@ -31,14 +31,38 @@ from kodo_core.api.app import kodo_app
 initialiser_db()
 
 
+import re
+import shutil
+
+def is_dist_valid(dist_path: str) -> bool:
+    """Vérifie qu'un dossier dist contient bien un index.html et son bundle JS existant."""
+    if not dist_path or not os.path.exists(dist_path):
+        return False
+    index_file = os.path.join(dist_path, 'index.html')
+    if not os.path.exists(index_file):
+        return False
+    try:
+        with open(index_file, 'r', encoding='utf-8') as f:
+            html = f.read()
+        match = re.search(r'src=["\']([^"\']+\.js)["\']', html)
+        if match:
+            js_rel = match.group(1).lstrip('/')
+            full_js_path = os.path.join(dist_path, js_rel)
+            if not os.path.exists(full_js_path):
+                return False
+        return True
+    except Exception:
+        return True
+
+
 def get_dist_dir():
     # 1. En mode développement / source, prioriser le dist local
     if not getattr(sys, 'frozen', False):
         local_dist = os.path.join(BASE_DIR, "dist")
-        if os.path.exists(local_dist) and os.path.exists(os.path.join(local_dist, 'index.html')):
+        if is_dist_valid(local_dist):
             return local_dist
         desktop_dist = os.path.expanduser("~/Desktop/kōdo-pos-3/dist")
-        if os.path.exists(desktop_dist) and os.path.exists(os.path.join(desktop_dist, 'index.html')):
+        if is_dist_valid(desktop_dist):
             return desktop_dist
 
     # 2. En mode exécutable / production
@@ -48,11 +72,15 @@ def get_dist_dir():
         os.path.expanduser("~/Documents/Kodo_POS/dist"),
     ]
     for c in candidates:
-        if os.path.exists(c) and os.path.exists(os.path.join(c, 'index.html')):
+        if is_dist_valid(c):
             return c
 
+    # 3. Fallback bundled PyInstaller ou BASE_DIR
     if getattr(sys, 'frozen', False):
-        return os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
+        meipass_dist = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
+        if is_dist_valid(meipass_dist):
+            return meipass_dist
+        return meipass_dist
     else:
         return os.path.join(BASE_DIR, "dist")
 
