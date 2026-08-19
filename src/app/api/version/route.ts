@@ -2,14 +2,14 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
   return NextResponse.json({
-    latestVersion: "1.0.38",
-    latest_version: "1.0.38",
-    version: "1.0.38",
+    latestVersion: "1.0.39",
+    latest_version: "1.0.39",
+    version: "1.0.39",
     releaseDate: "2026-08-19",
-    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.38.zip",
-    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.38.zip",
-    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.38.zip",
+    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.39.zip",
+    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.39.zip",
+    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.39.zip",
     has_update: true,
-    changelog: "v1.0.38 : Réorganisation harmonieuse de la barre supérieure de caisse (alignement parfait sur une ligne, boutons compacts sans coupure de texte).",
+    changelog: "v1.0.39 : Sauvegarde permanente du nom de votre boutique dans la base de données locale (suppression définitive des mentions L'Adresse B par défaut).",
   });
 }

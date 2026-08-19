@@ -169,4 +169,41 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             conn.close()
             return 400, {"success": False, "error": "L'ancien code PIN est incorrect."}
 
+
+    # 12. Récupérer les paramètres de l'établissement (Nom, Adresse, BCE/TVA, Imprimante)
+    elif method == "GET" and path == "/api/settings":
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT cle, valeur FROM Parametres")
+        rows = cursor.fetchall()
+        conn.close()
+        params = {r[0]: r[1] for r in rows}
+        return 200, {
+            "storeName": params.get("shop_name", "KŌDO POS"),
+            "address": params.get("shop_address", ""),
+            "bceNumber": params.get("shop_bce", params.get("shop_siret", "")),
+            "tvaNumber": params.get("shop_tva", ""),
+            "printerIP": params.get("printer_ip", "192.168.1.150")
+        }
+
+    # 13. Enregistrer les paramètres de l'établissement
+    elif method == "POST" and path == "/api/settings":
+        store_name = data.get("storeName") or data.get("shop_name")
+        address = data.get("address") or data.get("shop_address", "")
+        bce = data.get("bceNumber") or data.get("shop_bce", "")
+        tva = data.get("tvaNumber") or data.get("shop_tva", "")
+        printer_ip = data.get("printerIP") or data.get("printer_ip", "192.168.1.150")
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        if store_name:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_name, ?)", (store_name,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_address, ?)", (address,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_bce, ?)", (bce,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_tva, ?)", (tva,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (printer_ip, ?)", (printer_ip,))
+        conn.commit()
+        conn.close()
+        return 200, {"success": True, "message": "Paramètres enregistrés avec succès dans SQLite"}
+
     return None
