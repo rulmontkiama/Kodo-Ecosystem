@@ -2,14 +2,14 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
   return NextResponse.json({
-    latestVersion: "1.0.37",
-    latest_version: "1.0.37",
-    version: "1.0.37",
+    latestVersion: "1.0.38",
+    latest_version: "1.0.38",
+    version: "1.0.38",
     releaseDate: "2026-08-19",
-    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.37.zip",
-    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.37.zip",
-    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.37.zip",
+    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.38.zip",
+    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.38.zip",
+    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.38.zip",
     has_update: true,
-    changelog: "v1.0.37 : Pack Ultime Kōdo POS (Spotlight ⌘K, Générateur d'étiquettes codes-barres A4/Rouleau, Cartes cadeaux & Avoirs numérisés, Mode Écran Client iPad).",
+    changelog: "v1.0.38 : Réorganisation harmonieuse de la barre supérieure de caisse (alignement parfait sur une ligne, boutons compacts sans coupure de texte).",
   });
 }
