@@ -145,7 +145,7 @@ def validate_license_online(key: str, fingerprint: str) -> dict:
         payload = json.dumps({
             "license_key": key,
             "hardware_id": fingerprint,
-            "app_version": "1.0.19"
+            "app_version": "1.0.20"
         }).encode("utf-8")
 
         req = urllib.request.Request(

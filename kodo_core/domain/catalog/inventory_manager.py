@@ -184,32 +184,37 @@ class InventoryManager:
             if brand:
                 cursor.execute("INSERT OR IGNORE INTO Marques (nom) VALUES (?)", (brand,))
 
-            if prod_id:
+            existing_id = None
+            if prod_id is not None:
+                try:
+                    pid_int = int(prod_id)
+                    cursor.execute("SELECT id FROM Produits WHERE id = ?", (pid_int,))
+                    row = cursor.fetchone()
+                    if row:
+                        existing_id = row[0]
+                except (ValueError, TypeError):
+                    existing_id = None
+
+            if not existing_id and barcode:
+                cursor.execute("SELECT id FROM Produits WHERE code_barre = ?", (barcode,))
+                row = cursor.fetchone()
+                if row:
+                    existing_id = row[0]
+
+            if existing_id:
                 cursor.execute("""
                     UPDATE Produits
                     SET code_barre=?, nom=?, categorie=?, prix_achat_htva=?, 
                         prix_vente_tvac=?, taux_tva=?, en_solde=?, prix_solde_tvac=?, marque=?
                     WHERE id=?
-                """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, prod_id))
+                """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, existing_id))
+                prod_id = existing_id
             else:
-                if barcode:
-                    cursor.execute("SELECT id FROM Produits WHERE code_barre=?", (barcode,))
-                    existing = cursor.fetchone()
-                    if existing:
-                        prod_id = existing[0]
-                        cursor.execute("""
-                            UPDATE Produits
-                            SET nom=?, categorie=?, prix_achat_htva=?, prix_vente_tvac=?, 
-                                taux_tva=?, en_solde=?, prix_solde_tvac=?, marque=?
-                            WHERE id=?
-                        """, (name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, prod_id))
-
-                if not prod_id:
-                    cursor.execute("""
-                        INSERT INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, taux_tva, en_solde, prix_solde_tvac, marque)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand))
-                    prod_id = cursor.lastrowid
+                cursor.execute("""
+                    INSERT INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, taux_tva, en_solde, prix_solde_tvac, marque)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand))
+                prod_id = cursor.lastrowid
 
             if sizes_str:
                 active_sizes = []
