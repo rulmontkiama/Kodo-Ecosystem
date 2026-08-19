@@ -1,8 +1,11 @@
 *.dmg
 *.zip
+!public/*.zip
 __pycache__/
 
 build/
+Installation_Pack/
+data/
 .agents/
 .DS_Store
 *.db
@@ -10,3 +13,4 @@ node_modules/
 .npm-cache/
 zih5Ix5L
 kodo-pos-firebase-adminsdk-*.json
+test_res.txt

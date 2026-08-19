@@ -1,9 +1,9 @@
 {
-  "latestVersion": "1.0.18",
-  "releaseDate": "2026-08-14",
+  "latestVersion": "1.0.19",
+  "releaseDate": "2026-08-19",
   "downloadUrl": "https://kodo-solutions.vercel.app/Installation_Kodo_POS.dmg",
-  "windowsDownloadUrl": "https://kodo-solutions.vercel.app/Kodo_POS_v1.0.18_Windows_Portable.zip",
-  "distPatchUrl": "https://kodo-solutions.vercel.app/dist_v1.0.18.zip",
+  "windowsDownloadUrl": "https://kodo-solutions.vercel.app/Kodo_POS_v1.0.19_Windows_Portable.zip",
+  "distPatchUrl": "https://kodo-solutions.vercel.app/dist_v1.0.19.zip",
   "has_update": true,
-  "changelog": "v1.0.18 : Nouveau Design Moderne, Résolution des bugs de persistance (Ghost Data), correctif de l'auto-updater et compatibilité Windows."
+  "changelog": "v1.0.19 : Suppression complète des données fictives, version vierge d'usine, statistiques dynamiques en temps réel, nouvel export et transfert de pack de données ZIP."
 }

@@ -56,6 +56,7 @@ def open_native_window():
             url=URL,
             width=1280,
             height=800,
+            min_size=(1024, 700),
             resizable=True,
             text_select=True,
             confirm_close=True

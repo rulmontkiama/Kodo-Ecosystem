@@ -18,7 +18,7 @@ class DataSanitizer:
 
     # Patterns de masquage PII et données financières
     EMAIL_REGEX = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+')
-    PHONE_REGEX = re.compile(r'(\+?\d{1,3}[\s.-]?)?\(?\d{2,4}\)?[\s.-]?\d{2,4}[\s.-]?\d{2,4}')
+    PHONE_REGEX = re.compile(r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b')
     AMOUNT_REGEX = re.compile(r'\b\d+(?:[\.,]\d{1,2})?\s*(?:€|\$|EUR|USD)\b', re.IGNORECASE)
     PIN_TOKEN_REGEX = re.compile(r'(pin|token|password|secret|key)["\s:=]+["\']?([a-zA-Z0-9_\-]+)["\']?', re.IGNORECASE)
 
@@ -30,14 +30,14 @@ class DataSanitizer:
         
         # Masquage des Emails
         text = cls.EMAIL_REGEX.sub("[MASKED_EMAIL]", text)
-        
+
         # Masquage des Montants Financiers
         text = cls.AMOUNT_REGEX.sub("[MASKED_AMOUNT]", text)
 
         # Masquage des Clés & PINs
         text = cls.PIN_TOKEN_REGEX.sub(r'\1: "[MASKED_SECRET]"', text)
 
-        # Masquage des numéros de téléphone potentiels (si > 8 chiffres)
+        # Masquage des numéros de téléphone potentiels
         text = cls.PHONE_REGEX.sub("[MASKED_PHONE]", text)
 
         return text
@@ -56,7 +56,6 @@ class TelemetryEngine:
         """Récupère les informations système sans données nominatives."""
         total, used, free = shutil.disk_usage(ShopConfig.get_base_data_dir())
         
-        # Interroger la version de schéma BDD si disponible
         db_version = "Inconnue"
         try:
             db_path = ShopConfig.get_db_path()
@@ -123,9 +122,7 @@ class TelemetryEngine:
             diag_dir = cls.get_diagnostics_dir()
             reports = [f for f in os.listdir(diag_dir) if f.endswith(".json")]
             for r in reports:
-                # Simulation d'envoi chiffré vers Sentry / Télémetrie Custom
                 time.sleep(0.1)
-                # Une fois transmis, supprimer ou archiver le rapport
                 try: os.remove(os.path.join(diag_dir, r))
                 except Exception: pass
 

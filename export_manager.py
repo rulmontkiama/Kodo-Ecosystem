@@ -2,7 +2,7 @@
 Module d'exportation comptable pour L'ADRESSE B.
 Toutes les requêtes SQL utilisent des prepared statements.
 """
-import pandas as pd
+import csv
 import datetime
 import os
 import json
@@ -54,18 +54,24 @@ def export_comptable_belge():
             "Numéro Ticket":     ticket,
             "Code Article":      code,
             "Nom Article":       nom,
-            "Montant TVAC (€)":  float(tvac_d),
-            "Base HTVA (€)":     float(htva),
-            "Montant TVA (€)":   float(tva),
+            "Montant TVAC (€)":  str(tvac_d).replace(".", ","),
+            "Base HTVA (€)":     str(htva).replace(".", ","),
+            "Montant TVA (€)":   str(tva).replace(".", ","),
             "Taux TVA":          f"{float(taux_d)*100:.0f}%",
             "Moyen de Paiement": methode,
         })
 
-    df = pd.DataFrame(records)
     _ensure_dir()
     ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(EXPORT_DIR, f"export_comptable_{ts}.csv")
-    df.to_csv(path, index=False, sep=";", decimal=",", encoding="utf-8-sig")
+    fieldnames = [
+        "Date", "Numéro Ticket", "Code Article", "Nom Article",
+        "Montant TVAC (€)", "Base HTVA (€)", "Montant TVA (€)", "Taux TVA", "Moyen de Paiement"
+    ]
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        writer.writerows(records)
     return path
 
 
@@ -115,7 +121,7 @@ def export_winbooks_csv(mois=None, annee=None):
             "Compte": compte_debit,
             "Libellé": f"Recette {methode}",
             "Sens": "D",
-            "Montant": float(Decimal(str(tvac))),
+            "Montant": str(Decimal(str(tvac))).replace(".", ","),
             "Code TVA": ""
         })
         
@@ -128,7 +134,7 @@ def export_winbooks_csv(mois=None, annee=None):
             "Compte": "700000",
             "Libellé": "Vente Marchandises",
             "Sens": "C",
-            "Montant": float(Decimal(str(htva))),
+            "Montant": str(Decimal(str(htva))).replace(".", ","),
             "Code TVA": "21"
         })
         
@@ -142,15 +148,20 @@ def export_winbooks_csv(mois=None, annee=None):
                 "Compte": "451000",
                 "Libellé": "TVA à payer",
                 "Sens": "C",
-                "Montant": float(Decimal(str(tva))),
+                "Montant": str(Decimal(str(tva))).replace(".", ","),
                 "Code TVA": ""
             })
 
-    df = pd.DataFrame(records)
     _ensure_dir()
     ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(EXPORT_DIR, f"export_winbooks_{ts}.csv")
-    df.to_csv(path, index=False, sep=";", decimal=",", encoding="utf-8-sig")
+    fieldnames = [
+        "Code Journal", "Période", "Date", "Document", "Compte", "Libellé", "Sens", "Montant", "Code TVA"
+    ]
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        writer.writerows(records)
     return path
 
 
@@ -210,71 +221,73 @@ def export_synthese_gerant(comptage_details=None):
     detail = c.fetchall()
     conn.close()
 
-    # ── Construction des DataFrames
-    df_rep = pd.DataFrame(repartition, columns=[
-        "Méthode","Nb Tickets","Total TVAC (€)","Total HTVA (€)","Total TVA (€)"
-    ])
-    # Totaux
-    totaux = pd.DataFrame([{
-        "Méthode": "TOTAL",
-        "Nb Tickets":     df_rep["Nb Tickets"].sum(),
-        "Total TVAC (€)": df_rep["Total TVAC (€)"].sum(),
-        "Total HTVA (€)": df_rep["Total HTVA (€)"].sum(),
-        "Total TVA (€)":  df_rep["Total TVA (€)"].sum(),
-    }])
-    df_rep = pd.concat([df_rep, totaux], ignore_index=True)
+    _ensure_dir()
+    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(EXPORT_DIR, f"cloture_journaliere_{ts}.xlsx")
 
-    df_top = pd.DataFrame(top5, columns=["Article","Catégorie","Qté Vendue","CA Généré (€)"])
+    import openpyxl
+    wb = openpyxl.Workbook()
 
-    df_det = pd.DataFrame(detail, columns=[
-        "Date/Heure","Ticket","Article","Code Barre","Prix TVAC (€)","Paiement"
-    ])
+    # Feuille 1 — Synthèse
+    ws1 = wb.active
+    ws1.title = "Synthèse"
+    ws1.append(["CLÔTURE DE CAISSE — L'ADRESSE B"])
+    ws1.append([f"Date : {datetime.date.today().strftime('%d/%m/%Y')}"])
+    ws1.append([])
+    headers1 = ["Méthode", "Nb Tickets", "Total TVAC (€)", "Total HTVA (€)", "Total TVA (€)"]
+    ws1.append(headers1)
 
-    df_comptage = None
+    tot_nb = 0
+    tot_tvac = Decimal("0.00")
+    tot_htva = Decimal("0.00")
+    tot_tva = Decimal("0.00")
+    for row in repartition:
+        meth = row[0] or "Autre"
+        nb = row[1] or 0
+        tvac = Decimal(str(row[2] or 0))
+        htva = Decimal(str(row[3] or 0))
+        tva = Decimal(str(row[4] or 0))
+        tot_nb += nb
+        tot_tvac += tvac
+        tot_htva += htva
+        tot_tva += tva
+        ws1.append([meth, nb, float(tvac), float(htva), float(tva)])
+    ws1.append(["TOTAL", tot_nb, float(tot_tvac), float(tot_htva), float(tot_tva)])
+    _style_header(ws1, row=4, ncols=5)
+
+    # Feuille 2 — Top 5
+    ws2 = wb.create_sheet(title="Top 5 Articles")
+    ws2.append(["Article", "Catégorie", "Qté Vendue", "CA Généré (€)"])
+    for row in top5:
+        ws2.append([row[0], row[1], row[2], float(Decimal(str(row[3] or 0)))])
+    _style_header(ws2, row=1, ncols=4)
+
+    # Feuille 3 — Détail
+    ws3 = wb.create_sheet(title="Détail Ventes")
+    ws3.append(["Date/Heure", "Ticket", "Article", "Code Barre", "Prix TVAC (€)", "Paiement"])
+    for row in detail:
+        ws3.append([row[0], row[1], row[2], row[3], float(Decimal(str(row[4] or 0))), row[5]])
+    _style_header(ws3, row=1, ncols=6)
+
+    # Feuille 4 — Comptage
     if comptage_details:
         records_comptage = []
         for val_str, qte in comptage_details.items():
             if qte > 0:
                 val_num = float(val_str)
-                records_comptage.append({
-                    "val_sort": val_num,
-                    "Dénomination": f"{val_num:.2f} €" if val_num < 5 else f"{int(val_num)} €",
-                    "Quantité": qte,
-                    "Sous-Total (€)": qte * val_num
-                })
+                records_comptage.append((val_num, f"{val_num:.2f} €" if val_num < 5 else f"{int(val_num)} €", qte, qte * val_num))
         if records_comptage:
-            df_comptage = pd.DataFrame(records_comptage)
-            df_comptage = df_comptage.sort_values(by='val_sort', ascending=False).drop(columns=['val_sort'])
-            tot_comptage = df_comptage['Sous-Total (€)'].sum()
-            df_comptage = pd.concat([df_comptage, pd.DataFrame([{"Dénomination": "TOTAL COMPTÉ", "Quantité": "", "Sous-Total (€)": tot_comptage}])], ignore_index=True)
+            records_comptage.sort(key=lambda x: x[0], reverse=True)
+            ws4 = wb.create_sheet(title="Comptage Caisse")
+            ws4.append(["Dénomination", "Quantité", "Sous-Total (€)"])
+            tot_c = 0.0
+            for r in records_comptage:
+                ws4.append([r[1], r[2], r[3]])
+                tot_c += r[3]
+            ws4.append(["TOTAL COMPTÉ", "", tot_c])
+            _style_header(ws4, row=1, ncols=3)
 
-    _ensure_dir()
-    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(EXPORT_DIR, f"cloture_journaliere_{ts}.xlsx")
-
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        # Feuille 1 — Synthèse
-        df_rep.to_excel(writer, sheet_name="Synthèse", index=False)
-        ws = writer.sheets["Synthèse"]
-        # Titre en A1
-        ws.insert_rows(1, 3)
-        ws["A1"] = f"CLÔTURE DE CAISSE — L'ADRESSE B"
-        ws["A2"] = f"Date : {datetime.date.today().strftime('%d/%m/%Y')}"
-        _style_header(ws, row=4, ncols=5)
-
-        # Feuille 2 — Top 5
-        df_top.to_excel(writer, sheet_name="Top 5 Articles", index=False)
-        _style_header(writer.sheets["Top 5 Articles"], row=1, ncols=4)
-
-        # Feuille 3 — Détail
-        df_det.to_excel(writer, sheet_name="Détail Ventes", index=False)
-        _style_header(writer.sheets["Détail Ventes"], row=1, ncols=6)
-        
-        # Feuille 4 — Comptage
-        if df_comptage is not None:
-            df_comptage.to_excel(writer, sheet_name="Comptage Caisse", index=False)
-            _style_header(writer.sheets["Comptage Caisse"], row=1, ncols=3)
-
+    wb.save(path)
     return path
 
 
@@ -656,8 +669,6 @@ def export_comptable_mensuel(mois, annee, format_type="excel"):
             json.dump(res_obj, f, ensure_ascii=False, indent=2)
         return path
         
-    df = pd.DataFrame(records)
-    
     # Ligne de total
     total_row = {
         "Date": "TOTAL MENSUEL",
@@ -675,22 +686,39 @@ def export_comptable_mensuel(mois, annee, format_type="excel"):
         "Écart de Caisse (€)": float(totaux["ecart"]),
         "Statut": ""
     }
-    df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
     
     _ensure_dir()
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    headers = [
+        "Date", "Séquence Début", "Séquence Fin", "CA Total TTC (€)", "Base HTVA 21% (€)",
+        "TVA 21% (€)", "Base HTVA 6% (€)", "TVA 6% (€)", "Bancontact/Visa (€)", "Espèces (€)",
+        "Autres Paiements (€)", "Remboursements (€)", "Écart de Caisse (€)", "Statut"
+    ]
     
     if format_type == "csv":
         path = os.path.join(EXPORT_DIR, f"export_mensuel_{annee_str}_{mois_str}_{ts}.csv")
-        df.to_csv(path, index=False, sep=";", decimal=",", encoding="utf-8-sig")
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=headers, delimiter=";")
+            writer.writeheader()
+            for r in records:
+                r_copy = {k: str(v).replace(".", ",") if isinstance(v, float) else v for k, v in r.items()}
+                writer.writerow(r_copy)
+            t_copy = {k: str(v).replace(".", ",") if isinstance(v, float) else v for k, v in total_row.items()}
+            writer.writerow(t_copy)
         return path
     else:
         path = os.path.join(EXPORT_DIR, f"export_mensuel_{annee_str}_{mois_str}_{ts}.xlsx")
-        with pd.ExcelWriter(path, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Rapport Mensuel", index=False)
-            ws = writer.sheets["Rapport Mensuel"]
-            ws.insert_rows(1, 3)
-            ws["A1"] = "RAPPORT COMPTABLE MENSUEL — L'ADRESSE B"
-            ws["A2"] = f"Période : {mois_str}/{annee_str}"
-            _style_header(ws, row=4, ncols=14)
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Rapport Mensuel"
+        ws.append(["RAPPORT COMPTABLE MENSUEL — L'ADRESSE B"])
+        ws.append([f"Période : {mois_str}/{annee_str}"])
+        ws.append([])
+        ws.append(headers)
+        for r in records:
+            ws.append([r[h] for h in headers])
+        ws.append([total_row[h] for h in headers])
+        _style_header(ws, row=4, ncols=len(headers))
+        wb.save(path)
         return path

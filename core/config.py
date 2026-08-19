@@ -47,9 +47,10 @@ class ShopConfig:
                     os.makedirs(bulletproof_dir, exist_ok=True)
                     return bulletproof_dir
                 except Exception:
-                    fallback_dir = os.path.join(os.path.abspath("."), "data")
+                    fallback_dir = os.path.join(os.path.abspath("."), "data", "Kodo_POS")
                     os.makedirs(fallback_dir, exist_ok=True)
                     return fallback_dir
+
     @classmethod
     def get_db_dir(cls) -> str:
         """Chemin dédié à la base de données de production."""
@@ -97,7 +98,6 @@ class ShopConfig:
         if env_path and os.path.exists(env_path):
             return env_path
         
-        # Fallback local hors-git ou bundle
         base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
         local_secret = os.path.join(base_path, "kodo-pos-firebase-adminsdk-fbsvc-c56ff45f8c.json")
         if os.path.exists(local_secret):
