@@ -55,16 +55,24 @@ def is_dist_valid(dist_path: str) -> bool:
         return True
 
 
+# Purge des anciens caches obsolètes pour garantir le chargement du bundle propre
+try:
+    for old_cache in [os.path.expanduser("~/Library/Caches/KodoPOS/dist"), os.path.expanduser("~/.kodo_pos/dist")]:
+        if os.path.exists(old_cache):
+            shutil.rmtree(old_cache, ignore_errors=True)
+except Exception:
+    pass
+
+
 def get_dist_dir():
-    # 1. En mode exécutable / production (PyInstaller gelé)
+    # 1. En mode exécutable / production (PyInstaller gelé) -> TOUJOURS prioriser le bundle propre embarqué
     if getattr(sys, 'frozen', False):
         meipass_dist = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
-        cache_dist = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
-        cache_version_file = os.path.expanduser("~/Library/Caches/KodoPOS/version.json")
-        if os.path.exists(cache_version_file) and is_dist_valid(cache_dist):
-            return cache_dist
         if is_dist_valid(meipass_dist):
             return meipass_dist
+        cache_dist = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
+        if is_dist_valid(cache_dist):
+            return cache_dist
         return meipass_dist
 
     # 2. En mode développement / source, prioriser le dist local
