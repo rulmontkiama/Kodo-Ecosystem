@@ -87,6 +87,15 @@ def get_dist_dir():
     return os.path.join(BASE_DIR, "dist")
 
 
+def json_serial(obj):
+    """JSON serializer pour datetime, date, Decimal et objets complexes."""
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return str(obj)
+
+
 class POSRequestHandler(BaseHTTPRequestHandler):
     """Gestionnaire de requêtes HTTP déléguant à la couche kodo_core API REST."""
 
@@ -96,7 +105,10 @@ class POSRequestHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 
     def _send_json(self, data, code=200):
-        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        try:
+            body = json.dumps(data, ensure_ascii=False, default=json_serial).encode('utf-8')
+        except Exception:
+            body = json.dumps({"error": "Erreur sérialisation"}, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
         self._set_cors_headers()
         self.send_header('Content-Type', 'application/json; charset=utf-8')
