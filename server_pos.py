@@ -55,42 +55,31 @@ def is_dist_valid(dist_path: str) -> bool:
         return True
 
 
-# Purge des anciens caches obsolètes pour garantir le chargement du bundle propre
-try:
-    for old_cache in [os.path.expanduser("~/Library/Caches/KodoPOS/dist"), os.path.expanduser("~/.kodo_pos/dist")]:
-        if os.path.exists(old_cache):
-            shutil.rmtree(old_cache, ignore_errors=True)
-except Exception:
-    pass
-
-
 def get_dist_dir():
-    # 1. En mode exécutable / production (PyInstaller gelé) -> TOUJOURS prioriser le bundle propre embarqué
+    # 1. Priorité aux mises à jour dynamiques installées dans le cache utilisateur
+    cache_dist = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
+    if is_dist_valid(cache_dist):
+        return cache_dist
+
+    win_cache = os.path.expanduser("~/.kodo_pos/dist")
+    if is_dist_valid(win_cache):
+        return win_cache
+
+    # 2. En mode exécutable / production (PyInstaller gelé) -> bundle propre embarqué
     if getattr(sys, 'frozen', False):
         meipass_dist = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
         if is_dist_valid(meipass_dist):
             return meipass_dist
-        cache_dist = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
-        if is_dist_valid(cache_dist):
-            return cache_dist
         return meipass_dist
 
-    # 2. En mode développement / source, prioriser le dist local
-    local_dist = os.path.join(BASE_DIR, "dist")
-    if is_dist_valid(local_dist):
-        return local_dist
+    # 3. En mode développement / source, prioriser le dist local ou Desktop
     desktop_dist = os.path.expanduser("~/Desktop/kōdo-pos-3/dist")
     if is_dist_valid(desktop_dist):
         return desktop_dist
 
-    candidates = [
-        os.path.expanduser("~/Library/Caches/KodoPOS/dist"),
-        os.path.expanduser("~/.kodo_pos/dist"),
-        os.path.expanduser("~/Documents/Kodo_POS/dist"),
-    ]
-    for c in candidates:
-        if is_dist_valid(c):
-            return c
+    local_dist = os.path.join(BASE_DIR, "dist")
+    if is_dist_valid(local_dist):
+        return local_dist
 
     return os.path.join(BASE_DIR, "dist")
 
