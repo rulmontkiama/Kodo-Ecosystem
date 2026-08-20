@@ -222,11 +222,25 @@ class POSRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
+class ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True
+
 def run_server(port=8765):
-    server_address = ('0.0.0.0', port)
-    httpd = HTTPServer(server_address, POSRequestHandler)
-    print(f"🚀 [KODO POS SERVER] REST API kodo_core & Web App en ligne sur http://localhost:{port}")
-    httpd.serve_forever()
+    try:
+        server_address = ('0.0.0.0', port)
+        httpd = ReusableHTTPServer(server_address, POSRequestHandler)
+        print(f"🚀 [KODO POS SERVER] REST API kodo_core & Web App en ligne sur http://localhost:{port}")
+        httpd.serve_forever()
+    except OSError as e:
+        print(f"⚠️ [KODO POS SERVER] Conflit de port {port} ({e}). Tentative de libération...")
+        try:
+            import subprocess
+            subprocess.run(f"lsof -ti:{port} | xargs kill -9", shell=True, check=False)
+            time.sleep(0.5)
+            httpd = ReusableHTTPServer(('0.0.0.0', port), POSRequestHandler)
+            httpd.serve_forever()
+        except Exception as ex:
+            print(f"❌ [KODO POS SERVER] Échec: {ex}")
 
 
 if __name__ == '__main__':
