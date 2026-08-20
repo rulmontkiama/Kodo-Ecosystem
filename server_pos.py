@@ -56,16 +56,25 @@ def is_dist_valid(dist_path: str) -> bool:
 
 
 def get_dist_dir():
-    # 1. En mode développement / source, prioriser le dist local
-    if not getattr(sys, 'frozen', False):
-        local_dist = os.path.join(BASE_DIR, "dist")
-        if is_dist_valid(local_dist):
-            return local_dist
-        desktop_dist = os.path.expanduser("~/Desktop/kōdo-pos-3/dist")
-        if is_dist_valid(desktop_dist):
-            return desktop_dist
+    # 1. En mode exécutable / production (PyInstaller gelé)
+    if getattr(sys, 'frozen', False):
+        meipass_dist = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
+        cache_dist = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
+        cache_version_file = os.path.expanduser("~/Library/Caches/KodoPOS/version.json")
+        if os.path.exists(cache_version_file) and is_dist_valid(cache_dist):
+            return cache_dist
+        if is_dist_valid(meipass_dist):
+            return meipass_dist
+        return meipass_dist
 
-    # 2. En mode exécutable / production
+    # 2. En mode développement / source, prioriser le dist local
+    local_dist = os.path.join(BASE_DIR, "dist")
+    if is_dist_valid(local_dist):
+        return local_dist
+    desktop_dist = os.path.expanduser("~/Desktop/kōdo-pos-3/dist")
+    if is_dist_valid(desktop_dist):
+        return desktop_dist
+
     candidates = [
         os.path.expanduser("~/Library/Caches/KodoPOS/dist"),
         os.path.expanduser("~/.kodo_pos/dist"),
@@ -75,14 +84,7 @@ def get_dist_dir():
         if is_dist_valid(c):
             return c
 
-    # 3. Fallback bundled PyInstaller ou BASE_DIR
-    if getattr(sys, 'frozen', False):
-        meipass_dist = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
-        if is_dist_valid(meipass_dist):
-            return meipass_dist
-        return meipass_dist
-    else:
-        return os.path.join(BASE_DIR, "dist")
+    return os.path.join(BASE_DIR, "dist")
 
 
 class POSRequestHandler(BaseHTTPRequestHandler):
