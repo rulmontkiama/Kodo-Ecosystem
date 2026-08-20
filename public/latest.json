@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.41",
-  "latest_version": "1.0.41",
-  "version": "1.0.41",
+  "latestVersion": "1.0.42",
+  "latest_version": "1.0.42",
+  "version": "1.0.42",
   "releaseDate": "2026-08-21",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.41.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.41.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.41.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.42.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.42.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.42.zip",
   "has_update": true,
-  "changelog": "v1.0.41 : Gestion complète des prestations (CRUD, recherche, persistance), filtre temporel des graphiques et clôtures (jour, semaine, mois, année, tout), détachement client synchronisé du panier et barre de recherche d'étiquettes/codes-barres."
+  "changelog": "v1.0.42 : Gestion complète des prestations (CRUD, recherche, persistance), filtre temporel des graphiques (jour/semaine/mois/année), détachement client synchronisé du panier, barre de recherche d'étiquettes/codes-barres et mise à jour en direct dans la barre de navigation."
 }
