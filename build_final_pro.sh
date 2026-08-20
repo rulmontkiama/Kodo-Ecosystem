@@ -48,7 +48,7 @@ fi
 
 # 1.5 COMPILATION & COPIE DU FRONTEND REACT (VITE)
 echo "⚡ Copie du frontend React Vite..."
-cp -XR "/Users/kiamarulmont/Desktop/kōdo-pos-3/dist" "$SRC_DIR/dist" 2>/dev/null || true
+python3 -c "import shutil, glob; src = glob.glob('/Users/kiamarulmont/Desktop/*k*do-pos-3*/dist')[0]; shutil.rmtree('$SRC_DIR/dist', ignore_errors=True); shutil.copytree(src, '$SRC_DIR/dist')" 2>/dev/null || true
 
 # 2. PRÉPARATION DU DOSSIER DE BUILD APFS
 echo "📦 Copie miroir vers APFS pour la compilation PyInstaller..."

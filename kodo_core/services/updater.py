@@ -240,6 +240,18 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
         shutil.copytree(dist_src, dist_dir, dirs_exist_ok=True)
         logger.info(f"Overlay in-place appliqué avec succès dans : {dist_dir}")
 
+        # Si exécutable macOS .app, overlay direct dans Resources/dist
+        try:
+            for app_cand in [
+                "/Applications/Kodo_POS.app/Contents/Resources/dist",
+                os.path.join(os.path.dirname(sys.executable), "..", "Resources", "dist"),
+            ]:
+                norm_cand = os.path.normpath(app_cand)
+                if os.path.exists(norm_cand) and os.access(norm_cand, os.W_OK):
+                    shutil.copytree(dist_src, norm_cand, dirs_exist_ok=True)
+        except Exception:
+            pass
+
         # 5. Enregistrement persistant de la version installée
         ver_info = {
             "version": clean_ver,
