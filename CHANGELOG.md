@@ -4,6 +4,17 @@ Toutes les modifications notables apportées au projet Kōdo POS sont documenté
 
 ---
 
+## [1.0.43] - 2026-08-24
+
+### 🐛 Correctifs & Améliorations IHM
+- **Stabilisation des Modales de Modification & Déclinaisons :**
+  - Correction de la synchronisation réactive dans `DeclinationBuilder.tsx` avec écoute dynamique de `sizesString`.
+  - Intégration d'un parseur robuste multi-formats tolérant les formats avec/sans espaces et virgules.
+  - Cycle de vie sécurisé de `EditProductModal` avec clé d'instance unique `key` basée sur l'ID du produit.
+  - Réinitialisation systématique des sous-vues à l'ouverture pour `NewProductModal`, `ClientModal`, `UsersModal` et `CategoriesModal`.
+
+---
+
 ## [1.0.18] - 2026-08-14
 
 ### 🐛 Correctifs de Bugs Critiques (Hotfixes)
