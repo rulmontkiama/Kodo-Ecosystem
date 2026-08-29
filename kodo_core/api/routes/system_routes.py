@@ -170,7 +170,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             return 400, {"success": False, "error": "L'ancien code PIN est incorrect."}
 
 
-    # 12. Récupérer les paramètres de l'établissement (Nom, Adresse, BCE/TVA, Imprimante)
+    # 12. Récupérer les paramètres de l'établissement et de synchronisation
     elif method == "GET" and path == "/api/settings":
         conn = get_connection()
         cursor = conn.cursor()
@@ -183,27 +183,109 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "address": params.get("shop_address", ""),
             "bceNumber": params.get("shop_bce", params.get("shop_siret", "")),
             "tvaNumber": params.get("shop_tva", ""),
-            "printerIP": params.get("printer_ip", "192.168.1.150")
+            "printerIP": params.get("printer_ip", "192.168.1.150"),
+            "shopifyDomain": params.get("shopify_store_url", ""),
+            "shopifyToken": params.get("shopify_access_token", ""),
+            "shopifyConnected": bool(params.get("shopify_store_url") and params.get("shopify_access_token")),
+            "autoSyncStock": params.get("shopify_auto_sync", "1") == "1",
+            "syncOrders": params.get("shopify_sync_orders", "1") == "1"
         }
 
-    # 13. Enregistrer les paramètres de l'établissement
+    # 13. Enregistrer les paramètres de l'établissement et de synchronisation
     elif method == "POST" and path == "/api/settings":
         store_name = data.get("storeName") or data.get("shop_name")
         address = data.get("address") or data.get("shop_address", "")
         bce = data.get("bceNumber") or data.get("shop_bce", "")
         tva = data.get("tvaNumber") or data.get("shop_tva", "")
         printer_ip = data.get("printerIP") or data.get("printer_ip", "192.168.1.150")
+        shopify_domain = data.get("shopifyDomain") or data.get("shopify_store_url")
+        shopify_token = data.get("shopifyToken") or data.get("shopify_access_token")
+        auto_sync = data.get("autoSyncStock")
+        sync_orders = data.get("syncOrders")
 
         conn = get_connection()
         cursor = conn.cursor()
         if store_name:
-            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_name, ?)", (store_name,))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_address, ?)", (address,))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_bce, ?)", (bce,))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (shop_tva, ?)", (tva,))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (printer_ip, ?)", (printer_ip,))
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_name', ?)", (store_name,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_address', ?)", (address,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_bce', ?)", (bce,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_tva', ?)", (tva,))
+        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('printer_ip', ?)", (printer_ip,))
+
+        if shopify_domain is not None:
+            clean_domain = str(shopify_domain).replace("https://", "").replace("http://", "").strip("/")
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_store_url', ?)", (clean_domain,))
+        if shopify_token is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_access_token', ?)", (str(shopify_token).strip(),))
+        if auto_sync is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_auto_sync', ?)", ("1" if auto_sync else "0",))
+        if sync_orders is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_sync_orders', ?)", ("1" if sync_orders else "0",))
+
         conn.commit()
         conn.close()
         return 200, {"success": True, "message": "Paramètres enregistrés avec succès dans SQLite"}
+
+    # 14. Tester la connexion Shopify
+    elif method == "POST" and path == "/api/shopify/test":
+        raw_url = str(data.get("domain") or data.get("store_url") or "").strip()
+        token = str(data.get("token") or data.get("access_token") or "").strip()
+        
+        # Fallback sur les paramètres stockés si non fournis
+        if not raw_url or not token:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT cle, valeur FROM Parametres WHERE cle IN ('shopify_store_url', 'shopify_access_token')")
+            db_params = dict(cursor.fetchall())
+            conn.close()
+            raw_url = raw_url or db_params.get("shopify_store_url", "")
+            token = token or db_params.get("shopify_access_token", "")
+
+        if not raw_url or not token:
+            return 400, {"success": False, "error": "URL et Jeton d'accès Shopify requis pour le test."}
+
+        clean_url = raw_url.replace("https://", "").replace("http://", "").strip("/")
+        
+        try:
+            import urllib.request
+            import json as json_lib
+            import ssl
+
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            api_url = f"https://{clean_url}/admin/api/2025-01/locations.json"
+            req = urllib.request.Request(api_url, headers={
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token": token,
+                "User-Agent": "KodoPOS-Engine/1.0"
+            })
+            with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
+                resp_data = json_lib.loads(resp.read().decode())
+                if "locations" in resp_data:
+                    locations = [l.get("name", "Dépôt") for l in resp_data.get("locations", [])]
+                    return 200, {
+                        "success": True,
+                        "message": f"Connexion Shopify Réussie ! Dépôts : {', '.join(locations)}",
+                        "locations": locations
+                    }
+                return 200, {"success": True, "message": "Connexion établie avec succès.", "locations": []}
+        except Exception as e:
+            return 400, {"success": False, "error": f"Erreur de communication Shopify: {str(e)}"}
+
+    # 15. Lancer l'importation du catalogue Shopify
+    elif method == "POST" and path == "/api/shopify/import":
+        try:
+            from kodo_core.sync.shopify import ShopifySync
+            sync_engine = ShopifySync()
+            count = sync_engine.import_catalog()
+            return 200, {
+                "success": True,
+                "message": f"Importation réussie : {count} variantes de produits synchronisées.",
+                "imported_count": count
+            }
+        except Exception as e:
+            return 500, {"success": False, "error": f"Erreur lors de l'importation du catalogue: {str(e)}"}
 
     return None

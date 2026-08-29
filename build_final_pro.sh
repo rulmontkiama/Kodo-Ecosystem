@@ -6,7 +6,7 @@
 
 APP_NAME="Kodo_POS"
 DMG_NAME="Installation_Kodo_POS.dmg"
-WIN_ZIP="Kodo_POS_v1.0.18_Windows_Pack.zip"
+WIN_ZIP="Kodo_POS_v1.0.44_Windows_Pack.zip"
 SRC_DIR="$(pwd)"
 APFS_BUILD="/tmp/kodo_build"
 

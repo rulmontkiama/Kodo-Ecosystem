@@ -18,7 +18,7 @@ import sqlite3
 import urllib.request
 import urllib.error
 
-CURRENT_VERSION = "1.0.40"
+CURRENT_VERSION = "1.0.44"
 
 BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 DEFAULT_HEADERS = {
@@ -60,6 +60,8 @@ def parse_version(v_str: str) -> tuple:
 
 def get_installed_version() -> str:
     """Renvoie la version actuellement installée du logiciel."""
+    installed = CURRENT_VERSION
+
     # 1. Vérifier le fichier version.json dans le cache / documents
     version_files = [
         os.path.expanduser("~/Library/Caches/KodoPOS/version.json"),
@@ -72,7 +74,9 @@ def get_installed_version() -> str:
                 with open(vf, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if data.get("version"):
-                        return str(data["version"]).lstrip("v")
+                        v_candidate = str(data["version"]).lstrip("v")
+                        if parse_version(v_candidate) >= parse_version(installed):
+                            installed = v_candidate
             except Exception:
                 pass
 
@@ -83,13 +87,19 @@ def get_installed_version() -> str:
         cursor = conn.cursor()
         cursor.execute("SELECT valeur FROM Parametres WHERE cle='app_version'")
         row = cursor.fetchone()
-        conn.close()
         if row and row[0]:
-            return str(row[0]).lstrip("v")
+            v_db = str(row[0]).lstrip("v")
+            if parse_version(v_db) >= parse_version(installed):
+                installed = v_db
+        else:
+            # Enregistrer la version courante dans la base si absente
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('app_version', ?)", (installed,))
+            conn.commit()
+        conn.close()
     except Exception:
         pass
 
-    return CURRENT_VERSION
+    return installed
 
 
 def get_target_dist_dir() -> str:

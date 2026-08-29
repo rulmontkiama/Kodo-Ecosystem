@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.43",
-  "latest_version": "1.0.43",
-  "version": "1.0.43",
-  "releaseDate": "2026-08-24",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.43.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.43.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.43.zip",
+  "latestVersion": "1.0.44",
+  "latest_version": "1.0.44",
+  "version": "1.0.44",
+  "releaseDate": "2026-08-29",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.44.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.44.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.44.zip",
   "has_update": true,
-  "changelog": "v1.0.43 : Stabilisation complète des modales de modification de produits et déclinaisons, synchronisation réactive des tailles et reset automatique des sous-vues."
+  "changelog": "v1.0.44 : Intégration en direct Shopify (Admin API 2025-01, gestion SSL macOS), persistance complète des paramètres SQLite et correctif du moteur d'auto-update."
 }

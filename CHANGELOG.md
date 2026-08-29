@@ -4,6 +4,20 @@ Toutes les modifications notables apportées au projet Kōdo POS sont documenté
 
 ---
 
+## [1.0.44] - 2026-08-29
+
+### 🚀 Intégrations & Correctifs Majeurs
+- **Synchronisation Shopify Live (Admin API 2025-01) :**
+  - Ajout du support de contexte SSL universel (`get_ssl_context()`) contournant le blocage de certificats racine sur macOS.
+  - Détection automatique et temps réel des dépôts et inventaires (`locations.json`).
+  - Déduction de stock bidirectionnelle magasin <-> web et import de catalogue direct.
+  - Résolution des requêtes SQL d'enregistrement des paramètres SQLite (`shop_name`, `shopify_store_url`, `shopify_access_token`).
+- **Stabilisation du Moteur d'Auto-Update :**
+  - Correction de la boucle d'alerte de version et comparaison SemVer ascendante.
+  - Persistance de la version installée dans la base SQLite locale et dans les caches de session.
+
+---
+
 ## [1.0.43] - 2026-08-24
 
 ### 🐛 Correctifs & Améliorations IHM

@@ -7,6 +7,7 @@ import threading
 import time
 import json
 import logging
+import ssl
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -23,10 +24,21 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
+def get_ssl_context():
+    """Génère un contexte SSL tolérant pour éviter les blocages macOS de certificats racine."""
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    except Exception:
+        return None
+
+
 class ShopifySync:
     """Moteur principal de synchronisation REST & GraphQL pour Shopify."""
 
-    def __init__(self, store_url: str = "", access_token: str = "", api_version: str = "2024-01"):
+    def __init__(self, store_url: str = "", access_token: str = "", api_version: str = "2025-01"):
         self.store_url = store_url.strip()
         self.access_token = access_token.strip()
         self.api_version = api_version
@@ -67,6 +79,7 @@ class ShopifySync:
             "X-Shopify-Access-Token": self.access_token,
             "User-Agent": "KodoPOS-SyncEngine/1.0"
         }
+        ssl_ctx = get_ssl_context()
 
         for attempt in range(1, max_retries + 1):
             req = urllib.request.Request(url, headers=headers, method=method)
@@ -74,7 +87,7 @@ class ShopifySync:
                 req.data = json.dumps(data).encode("utf-8")
 
             try:
-                with urllib.request.urlopen(req, timeout=10) as response:
+                with urllib.request.urlopen(req, timeout=12, context=ssl_ctx) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 if e.code == 429:

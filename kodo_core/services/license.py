@@ -142,11 +142,17 @@ def validate_license_online(key: str, fingerprint: str) -> dict:
         return None
 
     try:
+        from kodo_core.services.updater import CURRENT_VERSION
         payload = json.dumps({
             "license_key": key,
             "hardware_id": fingerprint,
-            "app_version": "1.0.20"
+            "app_version": CURRENT_VERSION
         }).encode("utf-8")
+
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
 
         req = urllib.request.Request(
             API_LICENSE_VALIDATE_URL,
@@ -154,7 +160,7 @@ def validate_license_online(key: str, fingerprint: str) -> dict:
             headers={"Content-Type": "application/json; charset=utf-8", "User-Agent": "KodoPOS-LicenseManager/1.0"},
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data

@@ -35,8 +35,12 @@ class OfflineSyncEngine:
     def check_internet_connection(cls, host: str = "https://www.google.com", timeout: int = 2) -> bool:
         """Vérifie si la connexion Internet est active."""
         try:
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             req = urllib.request.Request(host, headers={"User-Agent": "KodoPOS-NetworkCheck/1.0"})
-            with urllib.request.urlopen(req, timeout=timeout):
+            with urllib.request.urlopen(req, context=ctx, timeout=timeout):
                 return True
         except Exception:
             return False

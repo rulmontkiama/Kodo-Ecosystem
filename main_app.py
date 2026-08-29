@@ -293,18 +293,24 @@ class MainApp(ctk.CTk):
 
     def _get_param(self, key, default):
         try:
-            conn = get_connection(); c = conn.cursor()
+            conn = get_connection()
+            c = conn.cursor()
             c.execute("SELECT valeur FROM Parametres WHERE cle=?", (key,))
             res = c.fetchone()
+            conn.close()
             return res[0] if res else default
-        except: return default
+        except:
+            return default
 
     def _set_param(self, key, val):
         try:
-            conn = get_connection(); c = conn.cursor()
+            conn = get_connection()
+            c = conn.cursor()
             c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)", (key, str(val)))
             conn.commit()
-        except Exception as e: print(f"Error saving param {key}: {e}")
+            conn.close()
+        except Exception as e:
+            print(f"Error saving param {key}: {e}")
 
     def _show_toast(self, text, bg_color="#18181A", text_color="#FFFFFF"):
         """Affiche une mini-notification 'Toast' flottante en bas à droite."""
@@ -1660,13 +1666,20 @@ class MainApp(ctk.CTk):
         def run_test():
             import urllib.request
             import json
-            api_url = f"https://{clean_url}/admin/api/2024-01/locations.json"
+            import ssl
+            
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            api_url = f"https://{clean_url}/admin/api/2025-01/locations.json"
             req = urllib.request.Request(api_url, headers={
                 "Content-Type": "application/json",
-                "X-Shopify-Access-Token": token
+                "X-Shopify-Access-Token": token,
+                "User-Agent": "KodoPOS-Engine/1.0"
             })
             try:
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
                     data = json.loads(resp.read().decode())
                     if "locations" in data:
                         locs = [l["name"] for l in data["locations"]]

@@ -121,8 +121,8 @@ app = BUNDLE(
     info_plist={
         'NSHighResolutionCapable': 'True',
         'LSBackgroundOnly': 'False',
-        'CFBundleShortVersionString': '1.0.18',
-        'CFBundleVersion': '1.0.18',
+        'CFBundleShortVersionString': '1.0.44',
+        'CFBundleVersion': '1.0.44',
         'NSAppTransportSecurity': {
             'NSAllowsArbitraryLoads': True,
             'NSAllowsLocalNetworking': True,
