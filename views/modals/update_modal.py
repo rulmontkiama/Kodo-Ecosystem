@@ -259,17 +259,42 @@ class UpdateNotificationModal(ctk.CTkToplevel):
         self.btn_primary.pack(side="right", padx=(10, 0), expand=True, fill="x")
 
     def _start_install(self):
-        self.btn_primary.configure(state="disabled", text="Ouverture du navigateur...")
+        self.btn_primary.configure(state="disabled", text="Installation...")
         self.btn_secondary.configure(state="disabled")
 
-        import webbrowser
-        url = self.update_info.get("download_url", "https://github.com/rulmontkiama/Kodo-Ecosystem/releases/latest")
-        webbrowser.open(url)
-        
-        self.lbl_progress.configure(text=f"Veuillez télécharger et installer la nouvelle version depuis votre navigateur.")
-        self.lbl_progress.pack(pady=10)
+        self.progress_frame.pack(fill="x", padx=25, pady=(0, 15))
+        self.lbl_progress.configure(text="Téléchargement et application du patch de mise à jour...")
+        self.lbl_progress.pack(pady=5)
+        self.progress_bar.pack(fill="x", pady=5)
+        self.progress_bar.set(0.3)
 
-        self.after(3000, self._finish_install)
+        def _worker():
+            try:
+                from kodo_core.services.updater import apply_remote_update_sync
+                patch_url = self.update_info.get("dist_patch_url") or self.update_info.get("distPatchUrl") or self.update_info.get("download_url") or self.update_info.get("downloadUrl")
+                ver = self.update_info.get("latest_version") or self.update_info.get("latestVersion") or self.update_info.get("version") or "1.0.44"
+                res = apply_remote_update_sync(patch_url, ver)
+                if res.get("success"):
+                    self.after(0, lambda: self._on_install_success(ver))
+                else:
+                    self.after(0, lambda: self._on_install_error(res.get("error", "Échec d'application du patch.")))
+            except Exception as e:
+                self.after(0, lambda: self._on_install_error(str(e)))
 
-    def _finish_install(self):
-        self.destroy()
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_install_success(self, version):
+        self.progress_bar.set(1.0)
+        self.lbl_progress.configure(text=f"✅ Mise à jour v{version} installée avec succès !", text_color=GRN)
+        if self.on_install_callback:
+            try:
+                self.on_install_callback()
+            except Exception:
+                pass
+        self.after(1500, self.destroy)
+
+    def _on_install_error(self, error_msg):
+        self.progress_bar.set(0.0)
+        self.lbl_progress.configure(text=f"⚠️ {error_msg}", text_color=RED)
+        self.btn_primary.configure(state="normal", text="Réessayer")
+        self.btn_secondary.configure(state="normal", text="Fermer")
