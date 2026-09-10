@@ -133,7 +133,7 @@ rm -rf /tmp/dmg_build "$DIST_DIR" "$WORK_DIR" "$BUILD_DIR" "$APFS_BUILD"
 # 7. GÉNÉRATION DU PACK WINDOWS (Kodo_POS_v1.0.18_Windows_Pack.zip)
 echo "🪟 Préparation du pack de build Windows ($WIN_ZIP)..."
 rm -f "$SRC_DIR/$WIN_ZIP" ~/Desktop/"$WIN_ZIP"
-cd "$SRC_DIR" && zip -r -1 "$SRC_DIR/$WIN_ZIP" launch_app.py server_pos.py database_manager.py audit_trail.py backup_manager.py ticket_printer.py pdf_generator.py license_manager.py shopify_sync.py firebase_sync.py Kodo_POS_Windows.spec build_windows.bat logo.png logo_ticket.png instagram_block.png dist kodo_pos.db ladresse_b.db plan_permissions.json kodo_core core services views 2>/dev/null || true
+cd "$SRC_DIR" && zip -r -1 "$SRC_DIR/$WIN_ZIP" launch_app.py Lancer_Kodo.bat server_pos.py database_manager.py audit_trail.py backup_manager.py ticket_printer.py pdf_generator.py license_manager.py shopify_sync.py firebase_sync.py Kodo_POS_Windows.spec build_windows.bat logo.png logo_ticket.png instagram_block.png dist kodo_pos.db ladresse_b.db plan_permissions.json kodo_core core services views 2>/dev/null || true
 cp "$SRC_DIR/$WIN_ZIP" ~/Desktop/"$WIN_ZIP" 2>/dev/null || true
 
 echo "----------------------------------------------------"
