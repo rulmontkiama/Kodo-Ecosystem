@@ -231,7 +231,7 @@ class MigrationManager:
                 "ALTER TABLE Produits ADD COLUMN marque TEXT DEFAULT NULL",
                 "ALTER TABLE Produits ADD COLUMN attributs_json TEXT DEFAULT NULL",
                 """INSERT INTO ShopInfo (nom_magasin, adresse, siret_tva, type_commerce, devise)
-                   SELECT "L'Adresse B", "Boutique Pilote", "BE 0123.456.789", "pret_a_porter", "€"
+                   SELECT "Mon Commerce", "Boutique Pilote", "BE 0123.456.789", "pret_a_porter", "€"
                    WHERE NOT EXISTS (SELECT 1 FROM ShopInfo)"""
             ]
         }

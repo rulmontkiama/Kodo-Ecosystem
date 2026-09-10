@@ -1,0 +1,13 @@
+pyinstaller
+pandas
+openpyxl
+pillow
+qrcode
+python-barcode
+reportlab
+flask
+requests
+customtkinter
+packaging
+psutil
+urllib3

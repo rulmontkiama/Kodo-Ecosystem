@@ -140,7 +140,7 @@ def generer_rapport_pdf(type_rapport, date_val, save_path):
     c = conn.cursor()
 
     # Infos boutique
-    shop_name = get_param(c, "shop_name", "L'ADRESSE B")
+    shop_name = get_param(c, "shop_name", "Mon Commerce")
     shop_subtitle = get_param(c, "shop_subtitle", "Boutique de Mode")
     shop_address = get_param(c, "shop_address", "")
     shop_vat = get_param(c, "shop_vat", "")
@@ -732,7 +732,7 @@ def generer_etiquettes_pdf(nom, code_barre, taille, prix, prix_solde, qte, outpu
     barcode_text = code_barre or "000000000000"
     
     for page_idx in range(qte):
-        story.append(Paragraph("L'ADRESSE B", style_shop))
+        story.append(Paragraph("Mon Commerce", style_shop))
         story.append(Spacer(1, 2))
         
         taille_suffix = f" ({taille})" if taille and taille != "—" else ""
@@ -789,7 +789,7 @@ def generer_facture_pdf(numero_facture, date_facture, client_info, items, totaux
     )
 
     shop = shop_info or {}
-    shop_name = shop.get("name", "L'ADRESSE B")
+    shop_name = shop.get("name", "Mon Commerce")
     shop_sub = shop.get("subtitle", "Boutique de Mode")
     shop_addr = shop.get("address", "Chemin Rue 53, 4960 Malmedy")
     shop_vat = shop.get("vat", "BE 0123.456.789")
@@ -957,7 +957,7 @@ def generer_recu_pdf(numero_ticket, date_heure, items, totaux, paiements, shop_i
     )
 
     shop = shop_info or {}
-    shop_name = shop.get("name", "L'ADRESSE B")
+    shop_name = shop.get("name", "Mon Commerce")
     shop_sub = shop.get("subtitle", "Boutique de Mode")
 
     styles = getSampleStyleSheet()

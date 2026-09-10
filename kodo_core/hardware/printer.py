@@ -294,7 +294,7 @@ class ESCPOSThermalPrinter:
 
 def generer_ticket(numero, panier, total_tvac, remise,
                    paiements, rendu_monnaie,
-                   nom_client=None, shop_name="L'ADRESSE B",
+                   nom_client=None, shop_name="Mon Commerce",
                    shop_subtitle="Boutique de Mode",
                    shop_address="Chemin Rue 53, 4960 Malmedy",
                    shop_vat="BE 0123.456.789",
@@ -501,7 +501,7 @@ def generer_ticket_takeaway(numero_commande, items, nom_client=None, telephone=N
     return "\n".join(lines)
 
 
-def generer_ticket_promo(code_promo, description, pourcentage=None, montant_fixe=None, date_expiration=None, shop_name="L'ADRESSE B", min_achat=None):
+def generer_ticket_promo(code_promo, description, pourcentage=None, montant_fixe=None, date_expiration=None, shop_name="Mon Commerce", min_achat=None):
     """
     Génère un bon de réduction / ticket promotionnel.
     """
@@ -823,7 +823,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
                 nom_client = f"{cli[1]} {cli[0]}".strip()
 
         # Infos Boutique
-        shop_name = "L'ADRESSE B"
+        shop_name = "Mon Commerce"
         shop_sub = "Boutique de Mode"
         shop_addr = "Chemin Rue 53, 4960 Malmedy"
         shop_vat = "BE 0123.456.789"

@@ -13,8 +13,8 @@ class ShopConfig:
     # Profil métier actif (Pilote: prêt-à-porter)
     PROFIL_METIER = ShopProfile.PRET_A_PORTER
     
-    # Branding et Informations par défaut (Pilote L'Adresse B)
-    NOM_MAGASIN_DEFAULT = "L'Adresse B"
+    # Branding et Informations par défaut (Pilote Mon Commerce)
+    NOM_MAGASIN_DEFAULT = "Mon Commerce"
     DEVISE_DEFAULT = "€"
     TAUX_TVA_DEFAULT = 0.21
     
