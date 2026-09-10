@@ -19,7 +19,7 @@ class ShopConfig:
     PROFIL_METIER = ShopProfile.PRET_A_PORTER
     
     # Information & Branding par défaut
-    NOM_MAGASIN_DEFAULT = "L'Adresse B"
+    NOM_MAGASIN_DEFAULT = "Mon Commerce"
     DEVISE_DEFAULT = "€"
     TAUX_TVA_DEFAULT = 0.21
     

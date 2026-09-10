@@ -1,5 +1,5 @@
 """
-Module d'exportation comptable pour L'ADRESSE B.
+Module d'exportation comptable pour Mon Commerce.
 Toutes les requêtes SQL utilisent des prepared statements.
 """
 import csv
@@ -9,7 +9,7 @@ import json
 from decimal import Decimal
 from database_manager import get_connection
 
-EXPORT_DIR = "Exports_L_ADRESSE_B"
+EXPORT_DIR = "Exports_Kodo_POS"
 
 def _ensure_dir():
     if not os.path.exists(EXPORT_DIR):
@@ -231,7 +231,7 @@ def export_synthese_gerant(comptage_details=None):
     # Feuille 1 — Synthèse
     ws1 = wb.active
     ws1.title = "Synthèse"
-    ws1.append(["CLÔTURE DE CAISSE — L'ADRESSE B"])
+    ws1.append(["CLÔTURE DE CAISSE — KŌDO POS"])
     ws1.append([f"Date : {datetime.date.today().strftime('%d/%m/%Y')}"])
     ws1.append([])
     headers1 = ["Méthode", "Nb Tickets", "Total TVAC (€)", "Total HTVA (€)", "Total TVA (€)"]
@@ -650,7 +650,7 @@ def export_comptable_mensuel(mois, annee, format_type="excel"):
         
     if format_type == "dict":
         return {
-            "boutique": "L'ADRESSE B",
+            "boutique": "Mon Commerce",
             "periode": f"{mois_str}/{annee_str}",
             "totaux": {k: float(v) for k, v in totaux.items()},
             "rapports_journaliers": records
@@ -658,7 +658,7 @@ def export_comptable_mensuel(mois, annee, format_type="excel"):
         
     if format_type == "json":
         res_obj = {
-            "boutique": "L'ADRESSE B",
+            "boutique": "Mon Commerce",
             "periode": f"{mois_str}/{annee_str}",
             "totaux": {k: float(v) for k, v in totaux.items()},
             "rapports_journaliers": records
@@ -712,7 +712,7 @@ def export_comptable_mensuel(mois, annee, format_type="excel"):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Rapport Mensuel"
-        ws.append(["RAPPORT COMPTABLE MENSUEL — L'ADRESSE B"])
+        ws.append(["RAPPORT COMPTABLE MENSUEL — KŌDO POS"])
         ws.append([f"Période : {mois_str}/{annee_str}"])
         ws.append([])
         ws.append(headers)
