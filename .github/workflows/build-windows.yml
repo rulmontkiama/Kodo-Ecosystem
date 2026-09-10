@@ -43,12 +43,18 @@ jobs:
       - name: 📦 Package Portable Windows Release ZIP
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\Kodo_POS\* -DestinationPath Kodo_POS_Windows_Standalone.zip -Force
-          ls Kodo_POS_Windows_Standalone.zip
+          if (Test-Path "dist\Kodo_POS.exe") {
+            Compress-Archive -Path dist\Kodo_POS.exe -DestinationPath Kodo_POS_Windows_Standalone.zip -Force
+          } elseif (Test-Path "dist\Kodo_POS") {
+            Compress-Archive -Path dist\Kodo_POS\* -DestinationPath Kodo_POS_Windows_Standalone.zip -Force
+          }
+          ls dist
 
       - name: 🚀 Upload Windows Executable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Kodo_POS_Windows_Standalone
-          path: Kodo_POS_Windows_Standalone.zip
+          name: Kodo_POS_Windows_EXE
+          path: |
+            dist/Kodo_POS.exe
+            Kodo_POS_Windows_Standalone.zip
           retention-days: 30
