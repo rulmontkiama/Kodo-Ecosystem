@@ -1,24 +1,36 @@
 @echo off
 chcp 65001 >nul
-title Kōdo POS
+cls
 echo ========================================================
-echo               DÉMARRAGE DE KŌDO POS
+echo               DEMARRAGE DE KODO POS
 echo ========================================================
 echo.
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERREUR] Python n'est pas détecté sur ce PC !
-    echo Veuillez installer Python (version 3.10 ou supérieure)
-    echo en cochant bien la case "Add Python to PATH".
-    echo.
-    pause
-    exit /b 1
-)
 
-echo [INFO] Démarrage du serveur et de l'interface Kōdo POS...
+where python >nul 2>&1
+if %errorlevel% equ 0 goto run_python
+
+where py >nul 2>&1
+if %errorlevel% equ 0 goto run_py
+
+echo [ATTENTION] Python n'est pas detecte sur ce PC Windows.
+echo.
+echo Tentative d'installation automatique via Windows Winget...
+winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements
+echo.
+echo Si l'installation a reussi, fermez cette fenetre et relancez Lancer_Kodo.
+echo Sinon, installez Python depuis le Microsoft Store ou python.org en cochant 'Add Python to PATH'.
+goto end
+
+:run_python
+echo [OK] Python detecte. Lancement de Kodo POS...
 python launch_app.py
-if %errorlevel% neq 0 (
-    echo.
-    echo [ERREUR] L'application s'est arrêtée avec une erreur.
-    pause
-)
+goto end
+
+:run_py
+echo [OK] Python Launcher detecte. Lancement de Kodo POS...
+py launch_app.py
+goto end
+
+:end
+echo.
+pause

@@ -1,0 +1,54 @@
+name: Build Windows Standalone (.EXE)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'kodo_core/**'
+      - 'core/**'
+      - 'launch_app.py'
+      - 'server_pos.py'
+      - 'Kodo_POS_Windows.spec'
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 📦 Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pandas openpyxl pillow qrcode python-barcode
+
+      - name: 🏭 Initialize Factory-Clean Databases
+        run: |
+          python -c "import database_manager; database_manager.DB_NAME='kodo_pos.db'; database_manager.initialiser_db(); database_manager.DB_NAME='ladresse_b.db'; database_manager.initialiser_db()"
+
+      - name: 🔨 Compile Standalone Windows Binary with PyInstaller
+        run: |
+          pyinstaller --noconfirm Kodo_POS_Windows.spec
+
+      - name: 📦 Package Portable Windows Release ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\Kodo_POS\* -DestinationPath Kodo_POS_Windows_Standalone.zip -Force
+          ls Kodo_POS_Windows_Standalone.zip
+
+      - name: 🚀 Upload Windows Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kodo_POS_Windows_Standalone
+          path: Kodo_POS_Windows_Standalone.zip
+          retention-days: 30
