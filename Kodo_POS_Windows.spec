@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: official -*-
+# -*- mode: python ; coding: utf-8 -*-
 # Script PyInstaller Spec pour Windows (Kōdo POS)
 
 from PyInstaller.utils.hooks import collect_data_files
