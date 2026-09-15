@@ -291,6 +291,25 @@ def process_sale_transaction(
 
         conn.commit()
 
+        # Scellement fiscal inaltérable (Conformité Loi Anti-fraude TVA)
+        try:
+            from kodo_core.services.fiscal_service import ensure_schema as ensure_fiscal_schema, seal_sale
+            ensure_fiscal_schema(conn)
+            seal_sale(conn, ticket_id, {
+                "total_ttc": tot_tvac_dec,
+                "total_ht": tot_htva_dec,
+                "total_tva": tot_tva_dec,
+            })
+        except Exception as fe:
+            print(f"[FISCAL LEDGER WARNING] Impossible de sceller la vente {ticket_id}: {fe}")
+
+        # Nettoyage de la session Crash Recovery (panier validé avec succès)
+        try:
+            from kodo_core.services.crash_recovery import CrashRecoveryService
+            CrashRecoveryService().clear_session()
+        except Exception:
+            pass
+
         return {
             "success": True,
             "ticket_id": ticket_id,

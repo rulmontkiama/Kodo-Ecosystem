@@ -5,6 +5,13 @@ on:
   push:
     tags:
       - 'v*'
+    paths:
+      - 'kodo_core/**'
+      - 'core/**'
+      - 'launch_app.py'
+      - 'server_pos.py'
+      - 'Kodo_POS_Windows.spec'
+      - '.github/workflows/build-windows.yml'
 
 jobs:
   build:

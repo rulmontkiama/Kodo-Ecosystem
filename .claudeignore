@@ -1,0 +1,55 @@
+# ==============================================================================
+# .claudeignore - Protection et Économie de Tokens pour Claude Code
+# ==============================================================================
+
+# Binaires, installateurs et archives volumineuses
+*.dmg
+*.zip
+*.tar.gz
+*.pkg
+*.exe
+releases/
+Installation_Pack/
+zih5Ix5L
+
+# Builds et artefacts compilés
+dist/
+dist_temp/
+build/
+work_temp/
+__pycache__/
+*.pyc
+*.spec
+
+# Données générées, exports et backups volumineux
+Backups_L_ADRESSE_B/
+Exports_L_ADRESSE_B/
+Tickets_L_ADRESSE_B/
+*.db
+*.db-journal
+*.db-wal
+
+# Fichiers médias / images
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.ico
+product_images/
+
+# Frontend Web Next.js / Node.js (hors périmètre backend POS)
+node_modules/
+.npm-cache/
+public/
+src/
+.next/
+package-lock.json
+
+# Fichiers systèmes et logs
+.git/
+.DS_Store
+._*
+*.log
+
+# Interface graphique CustomTkinter monolithique (interdite de lecture globale pour économiser les tokens)
+main_app.py
