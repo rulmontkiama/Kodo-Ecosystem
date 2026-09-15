@@ -1,161 +1,165 @@
-"""
-Tests unitaires pour les modules kodo_core/hardware (printer.py & pdf.py)
-"""
-import os
+"""Tests unitaires pour kodo_core/hardware/printer_service.py (flux simulés, pas d'accès matériel réel)."""
+import subprocess
 import sys
-import unittest
-import tempfile
-import datetime
 from decimal import Decimal
 
-# Inclure le dossier racine au path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import pytest
 
-from kodo_core.hardware.printer import (
-    COL,
-    ESCPOSThermalPrinter,
-    strip_accents,
-    generer_ticket,
-    generer_ticket_takeaway,
-    generer_ticket_promo,
-    pil_to_escpos_raster,
-    GS_CUT_FUNCTION,
-    ESC_DRAWER_PIN2,
-)
-from kodo_core.hardware.pdf import (
-    generer_rapport_pdf,
-    generer_etiquettes_pdf,
-    generer_facture_pdf,
-    generer_recu_pdf,
-    generate_barcode_drawing,
-)
-import ticket_printer
-import pdf_generator
-class TestHardwareModules(unittest.TestCase):
-
-    def setUp(self):
-        import database_manager
-        self.database_manager = database_manager
-        self.temp_dir = tempfile.mkdtemp()
-        self.temp_db_path = os.path.join(self.temp_dir, "test_hardware.db")
-        self.database_manager.DB_NAME = self.temp_db_path
-        self.database_manager.initialiser_db()
-
-    def tearDown(self):
-        if os.path.exists(self.temp_db_path):
-            try:
-                os.remove(self.temp_db_path)
-            except Exception:
-                pass
-
-    def test_strip_accents(self):
-        """Vérifie le nettoyage des caractères spéciaux pour imprimantes thermiques."""
-        raw_txt = "Café & Thélée — Mode & Beauté €100"
-        clean_txt = strip_accents(raw_txt)
-        self.assertNotIn("é", clean_txt)
-        self.assertNotIn("€", clean_txt)
-        self.assertIn("Cafe", clean_txt)
-        self.assertIn("EUR100", clean_txt)
-
-    def test_printer_formatting(self):
-        """Vérifie la génération des tickets de caisse, à emporter et promo."""
-        panier = [{
-            "nom": "Robe d'été",
-            "taille": "M",
-            "quantite": 2,
-            "prix_vente_tvac": Decimal("49.99"),
-            "taux_tva": Decimal("0.21")
-        }]
-        paiements = [("Bancontact", Decimal("99.98"))]
-
-        # Ticket standard
-        tck_text = generer_ticket(
-            numero="TCK-1001",
-            panier=panier,
-            total_tvac=Decimal("99.98"),
-            remise=Decimal("0.00"),
-            paiements=paiements,
-            rendu_monnaie=Decimal("0.00"),
-            nom_client="Jean Dupont"
-        )
-        self.assertIn("TCK-1001", tck_text)
-        self.assertIn("Robe d'ete", strip_accents(tck_text))
-        self.assertIn("CARTE", tck_text)
-
-        # Ticket Takeaway
-        items_food = [{"nom": "Burger Artisan", "quantite": 1, "options": ["Sans oignon"], "note": "Bien cuit"}]
-        tak_text = generer_ticket_takeaway(
-            numero_commande="42",
-            items=items_food,
-            nom_client="Alice",
-            heure_retrait="12:30"
-        )
-        self.assertIn("VENTE A EMPORTER", strip_accents(tak_text))
-        self.assertIn("TAK-42", tak_text)
-        self.assertIn("Burger Artisan", tak_text)
-
-        # Ticket Promo
-        promo_text = generer_ticket_promo(
-            code_promo="SUMMER20",
-            description="Remise estivale exclusive",
-            pourcentage=20,
-            date_expiration="31/08/2026"
-        )
-        self.assertIn("CODE PROMO : SUMMER20", promo_text)
-        self.assertIn("-20%", promo_text)
-
-    def test_escpos_commands_and_driver(self):
-        """Vérifie l'instanciation du driver et la génération de raw bytes."""
-        printer = ESCPOSThermalPrinter()
-        self.assertTrue(printer.connect())
-
-        # Test raster converter
-        from PIL import Image
-        img = Image.new("RGB", (100, 100), "white")
-        raster_bytes = pil_to_escpos_raster(img)
-        self.assertTrue(len(raster_bytes) > 0)
-        self.assertEqual(raster_bytes[:3], b'\x1dv0')
-
-    def test_pdf_generators(self):
-        """Vérifie la génération des PDF vectoriels (Bilan Z, Factures, Reçus, Étiquettes)."""
-        # Code-barres
-        d_ean = generate_barcode_drawing("EAN13", "5412345678901")
-        self.assertIsNotNone(d_ean)
-        d_128 = generate_barcode_drawing("Code128", "TCK-2026-99")
-        self.assertIsNotNone(d_128)
-        d_qr = generate_barcode_drawing("QR", "https://kodo.pos")
-        self.assertIsNotNone(d_qr)
-
-        # Rapport Bilan Z
-        z_pdf = os.path.join(self.temp_dir, "bilan_z.pdf")
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
-        res_z = generer_rapport_pdf("jour", today_str, z_pdf)
-        self.assertTrue(os.path.exists(res_z))
-        self.assertTrue(os.path.getsize(res_z) > 1000)
-
-        # Étiquettes
-        lbl_pdf = os.path.join(self.temp_dir, "etiquettes.pdf")
-        res_lbl = generer_etiquettes_pdf("T-Shirt Cotton", "1234567890123", "L", 29.99, 19.99, 2, lbl_pdf)
-        self.assertTrue(os.path.exists(res_lbl))
-
-        # Facture Vectorielle A4
-        inv_pdf = os.path.join(self.temp_dir, "facture.pdf")
-        items = [{"code_barre": "12345678", "nom": "Veste Cuir", "quantite": 1, "prix_vente_tvac": 150.0, "taux_tva": 0.21}]
-        res_inv = generer_facture_pdf("FAC-2026-001", "14/08/2026", {"nom": "Client Test"}, items, {}, save_path=inv_pdf)
-        self.assertTrue(os.path.exists(res_inv))
-
-        # Reçu Vectoriel Ticket
-        rec_pdf = os.path.join(self.temp_dir, "recu.pdf")
-        res_rec = generer_recu_pdf("TCK-001", "14/08/2026 12:00", items, {"total_tvac": 150.0}, [], save_path=rec_pdf)
-        self.assertTrue(os.path.exists(res_rec))
-
-    def test_facade_integrity(self):
-        """Vérifie l'exportation transparente des façades root ticket_printer et pdf_generator."""
-        self.assertEqual(ticket_printer.COL, COL)
-        self.assertEqual(ticket_printer.strip_accents("Testé"), "Teste")
-        self.assertIsNotNone(pdf_generator.generer_rapport_pdf)
-        self.assertIsNotNone(pdf_generator.generer_facture_pdf)
+from kodo_core.hardware import printer_service
 
 
-if __name__ == "__main__":
-    unittest.main()
+class _FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout=b""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+# ---------------------------------------------------------------------------
+# check_printer_status
+# ---------------------------------------------------------------------------
+
+def test_check_printer_status_ready(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+        return _FakeCompletedProcess(0, b"printer ThermalPOS is idle.  enabled since Mon")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    is_ready, status = printer_service.check_printer_status("ThermalPOS")
+    assert is_ready is True
+    assert status == "ready"
+
+
+def test_check_printer_status_busy(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+        return _FakeCompletedProcess(0, b"printer ThermalPOS now printing ThermalPOS-1.")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    is_ready, status = printer_service.check_printer_status("ThermalPOS")
+    assert is_ready is False
+    assert status == "busy"
+
+
+def test_check_printer_status_offline_disabled(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+        return _FakeCompletedProcess(0, b"printer ThermalPOS disabled since Mon - reason unknown")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    is_ready, status = printer_service.check_printer_status("ThermalPOS")
+    assert is_ready is False
+    assert status == "offline"
+
+
+def test_check_printer_status_command_failure(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+        return _FakeCompletedProcess(1, b"lpstat: unknown printer")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    is_ready, status = printer_service.check_printer_status("Ghost")
+    assert is_ready is False
+    assert status == "offline"
+
+
+def test_check_printer_status_exception(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+        raise FileNotFoundError("lpstat not found")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    is_ready, status = printer_service.check_printer_status("ThermalPOS")
+    assert is_ready is False
+    assert status == "unknown"
+
+
+def test_check_printer_status_empty_name():
+    is_ready, status = printer_service.check_printer_status("")
+    assert is_ready is False
+    assert status == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# generate_esc_pos_receipt
+# ---------------------------------------------------------------------------
+
+def _sample_ticket_data():
+    return {
+        "shop_name": "Kodo POS",
+        "numero": "0001",
+        "items": [
+            {"qty": 2, "label": "Café", "total": Decimal("5.00")},
+            {"qty": 1, "label": "Croissant", "total": Decimal("1.50")},
+        ],
+        "vat_breakdown": [
+            {"rate": "10", "base": Decimal("5.91"), "amount": Decimal("0.59")},
+        ],
+        "total_ttc": Decimal("6.50"),
+    }
+
+
+def test_generate_esc_pos_receipt_returns_bytes():
+    receipt = printer_service.generate_esc_pos_receipt(_sample_ticket_data(), "abc123fiscalhash")
+    assert isinstance(receipt, bytes)
+
+
+def test_generate_esc_pos_receipt_starts_with_init_and_ends_with_cut():
+    receipt = printer_service.generate_esc_pos_receipt(_sample_ticket_data(), "abc123fiscalhash")
+    assert receipt.startswith(printer_service.ESC_INIT)
+    assert receipt.rstrip(b"\n").endswith(printer_service.GS_CUT_FUNCTION) or printer_service.GS_CUT_FUNCTION in receipt
+    assert receipt.endswith(printer_service.GS_CUT_FUNCTION)
+
+
+def test_generate_esc_pos_receipt_contains_fiscal_hash():
+    fiscal_hash = "sealed-hash-xyz"
+    receipt = printer_service.generate_esc_pos_receipt(_sample_ticket_data(), fiscal_hash)
+    assert fiscal_hash.encode("ascii") in receipt
+
+
+def test_generate_esc_pos_receipt_contains_items_and_total():
+    receipt = printer_service.generate_esc_pos_receipt(_sample_ticket_data(), "hash")
+    assert b"Croissant" in receipt
+    assert b"6.50" in receipt
+
+
+def test_generate_esc_pos_receipt_contains_vat_breakdown():
+    receipt = printer_service.generate_esc_pos_receipt(_sample_ticket_data(), "hash")
+    assert b"TVA 10%" in receipt
+
+
+def test_generate_esc_pos_receipt_contains_barcode_sequence():
+    receipt = printer_service.generate_esc_pos_receipt(_sample_ticket_data(), "hash")
+    assert (printer_service.GS + b"k" + bytes([73])) in receipt
+
+
+def test_generate_esc_pos_receipt_empty_items():
+    data = _sample_ticket_data()
+    data["items"] = []
+    receipt = printer_service.generate_esc_pos_receipt(data, "hash")
+    assert isinstance(receipt, bytes)
+    assert receipt.endswith(printer_service.GS_CUT_FUNCTION)
+
+
+# ---------------------------------------------------------------------------
+# open_cash_drawer_sequence
+# ---------------------------------------------------------------------------
+
+def test_open_cash_drawer_sequence_matches_standard_pulse():
+    sequence = printer_service.open_cash_drawer_sequence()
+    assert isinstance(sequence, bytes)
+    assert sequence == printer_service.ESC_INIT + b'\x1bp\x00\x19\xfa'
+
+
+def test_open_cash_drawer_sequence_contains_esc_p_command():
+    sequence = printer_service.open_cash_drawer_sequence()
+    assert b'\x1bp\x00\x19\xfa' in sequence

@@ -151,6 +151,30 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         )
         return 200, res
 
+    # 3bis. Réimpression d'un ticket existant
+    elif method == "POST" and path == "/api/sales/reprint":
+        numero_ticket = data.get("receiptNumber")
+        if not numero_ticket:
+            ticket_id = data.get("ticket_id") or data.get("ticketId")
+            if not ticket_id:
+                return 400, {"error": "receiptNumber ou ticket_id manquant"}
+            conn = database_manager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT numero_ticket FROM Tickets WHERE id = ?", (ticket_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                return 404, {"error": "Ticket introuvable"}
+            numero_ticket = row[0]
+
+        try:
+            ticket_printer.imprimer_ticket_caisse(numero_ticket)
+        except Exception as pe:
+            print(f"[IMPRESSION WARNING] {pe}")
+            return 500, {"success": False, "error": str(pe)}
+
+        return 200, {"success": True, "receiptNumber": numero_ticket}
+
     # 4. Liste des paniers en attente
     elif method == "GET" and path == "/api/held-tickets":
         paniers = get_parked_carts()
@@ -238,4 +262,61 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         summary = ZReportEngine.get_daily_z_summary(caisse_id="POS-01")
         return 200, summary
 
+    # 10. Crash Recovery : Sauvegarde / Récupération du panier actif
+    elif method == "POST" and path == "/api/cart/session":
+        try:
+            from kodo_core.services.crash_recovery import CrashRecoveryService
+            from kodo_core.domain.sales.models import Cart
+            cart = Cart.from_dict(data.get("cart", {}))
+            CrashRecoveryService().save_snapshot(cart)
+            return 200, {"success": True}
+        except Exception as e:
+            return 400, {"error": str(e)}
+
+    elif method == "GET" and path == "/api/cart/session":
+        try:
+            from kodo_core.services.crash_recovery import CrashRecoveryService
+            recovery = CrashRecoveryService()
+            if recovery.has_pending_recovery():
+                cart = recovery.restore_cart_session()
+                return 200, {"has_recovery": True, "cart": cart.to_dict()}
+            return 200, {"has_recovery": False}
+        except Exception as e:
+            return 500, {"error": str(e)}
+
+    elif method == "DELETE" and path == "/api/cart/session":
+        try:
+            from kodo_core.services.crash_recovery import CrashRecoveryService
+            CrashRecoveryService().clear_session()
+            return 200, {"success": True}
+        except Exception as e:
+            return 500, {"error": str(e)}
+
+    # 11. Calcul Panier pur avec Decimal (cart_service)
+    elif method == "POST" and path == "/api/cart/calculate":
+        try:
+            from kodo_core.services.cart_service import compute_cart_totals
+            from kodo_core.domain.sales.models import Cart
+            cart = Cart.from_dict(data)
+            totals = compute_cart_totals(cart)
+            return 200, {
+                "subtotal_ttc": str(totals.subtotal_ttc),
+                "total_discount": str(totals.total_discount),
+                "total_ht": str(totals.total_ht),
+                "total_tva": str(totals.total_tva),
+                "total_ttc": str(totals.total_ttc),
+                "vat_breakdown": [
+                    {
+                        "rate": str(line.rate),
+                        "base_ht": str(line.base_ht),
+                        "vat_amount": str(line.vat_amount),
+                        "total_ttc": str(line.total_ttc)
+                    }
+                    for line in totals.vat_breakdown
+                ]
+            }
+        except Exception as e:
+            return 400, {"error": str(e)}
+
     return None
+

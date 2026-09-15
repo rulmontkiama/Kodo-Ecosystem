@@ -109,6 +109,13 @@ class ShopConfig:
         return path
 
     @classmethod
+    def get_sessions_dir(cls) -> str:
+        """Chemin dédié aux snapshots de session temporaire (crash recovery panier)."""
+        path = os.path.join(cls.get_base_data_dir(), "sessions")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @classmethod
     def get_backups_dir(cls) -> str:
         """Chemin dédié aux fichiers d'export et paquets de migration .kodo."""
         path = os.path.join(cls.get_base_data_dir(), "backups")

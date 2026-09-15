@@ -44,6 +44,13 @@ class CartDiscount:
         if self.type == DiscountType.PERCENT and self.value > Decimal("100"):
             raise ValueError("CartDiscount.value en pourcentage ne peut pas dépasser 100.")
 
+    def to_dict(self) -> dict:
+        return {"type": self.type.value, "value": str(self.value)}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CartDiscount":
+        return cls(type=DiscountType(data["type"]), value=Decimal(data["value"]))
+
 
 @dataclass
 class CartItem:
@@ -71,6 +78,28 @@ class CartItem:
         if self.vat_rate < Decimal("0"):
             raise ValueError("CartItem.vat_rate ne peut pas être négatif.")
 
+    def to_dict(self) -> dict:
+        return {
+            "unit_price_ttc": str(self.unit_price_ttc),
+            "quantity": self.quantity,
+            "vat_rate": str(self.vat_rate),
+            "product_id": self.product_id,
+            "name": self.name,
+            "discount": self.discount.to_dict() if self.discount is not None else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CartItem":
+        discount_data = data.get("discount")
+        return cls(
+            unit_price_ttc=Decimal(data["unit_price_ttc"]),
+            quantity=data["quantity"],
+            vat_rate=Decimal(data["vat_rate"]),
+            product_id=data.get("product_id"),
+            name=data.get("name", ""),
+            discount=CartDiscount.from_dict(discount_data) if discount_data else None,
+        )
+
 
 @dataclass
 class VatBreakdownLine:
@@ -91,3 +120,31 @@ class CartTotal:
     total_ttc: Decimal
     total_discount_ttc: Decimal
     vat_breakdown: List[VatBreakdownLine] = field(default_factory=list)
+
+
+@dataclass
+class Cart:
+    """Panier de vente en cours : lignes + remise globale éventuelle."""
+
+    items: List[CartItem] = field(default_factory=list)
+    global_discount: Optional[CartDiscount] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "items": [item.to_dict() for item in self.items],
+            "global_discount": (
+                self.global_discount.to_dict() if self.global_discount is not None else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Cart":
+        global_discount_data = data.get("global_discount")
+        return cls(
+            items=[CartItem.from_dict(item) for item in data.get("items", [])],
+            global_discount=(
+                CartDiscount.from_dict(global_discount_data)
+                if global_discount_data
+                else None
+            ),
+        )

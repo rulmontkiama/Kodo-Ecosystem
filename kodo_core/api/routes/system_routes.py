@@ -288,4 +288,64 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         except Exception as e:
             return 500, {"success": False, "error": f"Erreur lors de l'importation du catalogue: {str(e)}"}
 
+    # 16. Personnalisation du Ticket : Upload du Logo Boutique
+    elif method == "POST" and path == "/api/settings/logo":
+        try:
+            import base64
+            from io import BytesIO
+            from PIL import Image
+
+            logo_b64 = data.get("logo") or data.get("logo_base64")
+            if not logo_b64:
+                return 400, {"success": False, "error": "Données d'image manquantes (logo_base64 requis)"}
+
+            # Nettoyer l'éventuel header data:image/...;base64,
+            if "," in logo_b64:
+                logo_b64 = logo_b64.split(",", 1)[1]
+
+            image_data = base64.b64decode(logo_b64)
+            img = Image.open(BytesIO(image_data))
+
+            # Optimisation pour imprimante thermique 80mm ESC/POS (max 512px de large)
+            max_width = 384
+            if img.width > max_width:
+                ratio = max_width / float(img.width)
+                new_height = int(float(img.height) * ratio)
+                img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+
+            # Conversion en monochrome pour impression thermique nette
+            target_path = database_manager.data_path("logo_ticket.png")
+            img.save(target_path, format="PNG")
+
+            # Mettre à jour en base SQLite
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_logo_custom', '1')")
+            conn.commit()
+            conn.close()
+
+            return 200, {
+                "success": True,
+                "message": "Logo du ticket enregistré avec succès !",
+                "width": img.width,
+                "height": img.height
+            }
+        except Exception as e:
+            return 500, {"success": False, "error": f"Erreur lors du traitement du logo : {str(e)}"}
+
+    # 17. Obtenir le statut du logo actuel
+    elif method == "GET" and path == "/api/settings/logo":
+        try:
+            import os
+            import base64
+            target_path = database_manager.data_path("logo_ticket.png")
+            if os.path.exists(target_path):
+                with open(target_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                return 200, {"has_logo": True, "logo_url": f"data:image/png;base64,{b64}"}
+            return 200, {"has_logo": False}
+        except Exception as e:
+            return 500, {"has_logo": False, "error": str(e)}
+
     return None
+

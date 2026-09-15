@@ -7,7 +7,10 @@ import os
 import sys
 import json
 import uuid
+import hmac
 import hashlib
+import platform
+import subprocess
 import datetime
 import urllib.request
 import urllib.parse
@@ -54,25 +57,218 @@ def get_upsell_modal_text(feature_key: str) -> dict:
     })
 
 
+# ---------------------------------------------------------------------------
+# Empreinte matérielle (HWID)
+# ---------------------------------------------------------------------------
+# La priorité est donnée à un identifiant matériel IMMUABLE (numéro de série
+# de la machine / carte mère). Cet identifiant ne doit JAMAIS varier en
+# fonction de l'état réseau (Wi-Fi coupé, changement de routeur, etc.).
+
+def _run_command(args, timeout: float = 3.0) -> str:
+    """Exécute une commande système et retourne sa sortie standard (silencieux en cas d'échec)."""
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _real_mac_address() -> str:
+    """Retourne la MAC matérielle réelle, ou une chaîne vide si uuid a généré une adresse aléatoire."""
+    node = uuid.getnode()
+    # RFC 4122 : si l'adresse matérielle est indisponible, uuid positionne le
+    # bit multicast (bit de poids faible du premier octet) sur une valeur générée aléatoirement.
+    if (node >> 40) & 0x01:
+        return ""
+    return format(node, "012X")
+
+
+def _get_macos_hardware_id() -> str:
+    """macOS : IOPlatformSerialNumber (immuable) en priorité, puis IOPlatformUUID, puis MAC réelle."""
+    output = _run_command(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"])
+    serial = ""
+    platform_uuid = ""
+    for line in output.splitlines():
+        if "IOPlatformSerialNumber" in line and "=" in line:
+            serial = line.split("=", 1)[1].strip().strip('"')
+        elif "IOPlatformUUID" in line and "=" in line:
+            platform_uuid = line.split("=", 1)[1].strip().strip('"')
+    if serial:
+        return f"SERIAL:{serial}"
+
+    # Fallback "scutil" : UUID matériel exposé via l'utilitaire système scutil.
+    scutil_uuid = _run_command(["scutil", "--get", "HardwareUUID"])
+    if not scutil_uuid:
+        scutil_uuid = platform_uuid
+    if scutil_uuid:
+        return f"UUID:{scutil_uuid}"
+
+    mac = _real_mac_address()
+    if mac:
+        return f"MAC:{mac}"
+    return ""
+
+
+def _get_windows_hardware_id() -> str:
+    """Windows : numéro de série BIOS/carte mère via PowerShell (WMI), fallback wmic."""
+    invalid_values = {"", "NONE", "TO BE FILLED BY O.E.M.", "SYSTEM SERIAL NUMBER", "DEFAULT STRING"}
+
+    powershell_queries = [
+        "(Get-CimInstance -ClassName Win32_BIOS).SerialNumber",
+        "(Get-CimInstance -ClassName Win32_BaseBoard).SerialNumber",
+        "(Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID",
+    ]
+    for query in powershell_queries:
+        output = _run_command(["powershell", "-NoProfile", "-NonInteractive", "-Command", query])
+        if output and output.strip().upper() not in invalid_values:
+            return f"SERIAL:{output.strip()}"
+
+    wmic_commands = [
+        ["wmic", "bios", "get", "serialnumber"],
+        ["wmic", "baseboard", "get", "serialnumber"],
+        ["wmic", "csproduct", "get", "uuid"],
+    ]
+    for cmd in wmic_commands:
+        output = _run_command(cmd)
+        lines = [l.strip() for l in output.splitlines() if l.strip()]
+        # La première ligne est l'entête de colonne (ex: "SerialNumber")
+        if len(lines) >= 2 and lines[1].upper() not in invalid_values:
+            return f"SERIAL:{lines[1]}"
+
+    mac = _real_mac_address()
+    if mac:
+        return f"MAC:{mac}"
+    return ""
+
+
+def _get_linux_hardware_id() -> str:
+    """Linux : machine-id persistant du système, sinon MAC réelle."""
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    machine_id = f.read().strip()
+                if machine_id:
+                    return f"MACHINEID:{machine_id}"
+        except Exception:
+            pass
+
+    mac = _real_mac_address()
+    if mac:
+        return f"MAC:{mac}"
+    return ""
+
+
+def _collect_hardware_id() -> str:
+    """Détermine l'identifiant matériel brut le plus stable disponible pour la plateforme courante."""
+    system = platform.system()
+    hwid = ""
+    try:
+        if system == "Darwin":
+            hwid = _get_macos_hardware_id()
+        elif system == "Windows":
+            hwid = _get_windows_hardware_id()
+        elif system == "Linux":
+            hwid = _get_linux_hardware_id()
+    except Exception as e:
+        logger.error(f"Erreur récupération identifiant matériel natif ({system}): {e}")
+        hwid = ""
+
+    if not hwid:
+        mac = _real_mac_address()
+        hwid = f"MAC:{mac}" if mac else f"NODE:{uuid.getnode()}"
+
+    return hwid
+
+
 def get_machine_fingerprint() -> str:
     """Génère une empreinte matérielle HWID unique salée à 16 caractères majuscules."""
     try:
-        mac = uuid.getnode()
-        hash_obj = hashlib.sha256(f"{SECRET_SALT}|{mac}".encode("utf-8"))
+        raw_id = _collect_hardware_id()
+        hash_obj = hashlib.sha256(f"{SECRET_SALT}|{raw_id}".encode("utf-8"))
         return hash_obj.hexdigest()[:16].upper()
     except Exception as e:
         logger.error(f"Erreur génération HWID: {e}")
         return "DEFAULT_HWID_000"
 
 
+# ---------------------------------------------------------------------------
+# Cache local signé (HMAC) & double stockage résilient
+# ---------------------------------------------------------------------------
+
 def generate_local_signature(fingerprint: str, status: str, expiry_date: str, last_check: str) -> str:
-    """Génère une signature cryptographique SHA256 anti-falsification pour le cache local."""
-    raw_data = f"{fingerprint}|{status}|{expiry_date}|{last_check}|{SECRET_SALT}"
-    return hashlib.sha256(raw_data.encode("utf-8")).hexdigest()
+    """Génère une signature HMAC-SHA256 anti-falsification pour le cache local."""
+    raw_data = f"{fingerprint}|{status}|{expiry_date}|{last_check}".encode("utf-8")
+    return hmac.new(SECRET_SALT.encode("utf-8"), raw_data, hashlib.sha256).hexdigest()
 
 
-def save_local_license(status: str, expiry_date: str, last_check: str, license_key: str = ""):
-    """Enregistre de façon sécurisée l'état de la licence localement avec signature anti-falsification."""
+def _get_primary_cache_path() -> str:
+    try:
+        from database_manager import data_path
+        return data_path("license_cache.json")
+    except Exception:
+        fallback = os.path.expanduser("~/Library/Caches/KodoPOS/license_cache.json")
+        return fallback
+
+
+def _get_backup_cache_path() -> str:
+    return os.path.expanduser("~/Library/Application Support/Kodo_POS/license.lic")
+
+
+def _write_cache_file(path: str, cache_data: dict) -> bool:
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, indent=4)
+        return True
+    except Exception as e:
+        logger.error(f"Erreur d'écriture du fichier de licence '{path}' : {e}")
+        return False
+
+
+def _read_cache_file(path: str):
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Erreur de lecture du fichier de licence '{path}' : {e}")
+        return None
+
+
+def _validate_cache_data(cache_data, fingerprint: str) -> bool:
+    if not cache_data:
+        return False
+
+    if cache_data.get("fingerprint") != fingerprint:
+        logger.warning("L'identifiant matériel du cache ne correspond pas à cette machine.")
+        return False
+
+    expected_sig = generate_local_signature(
+        fingerprint,
+        cache_data.get("status"),
+        cache_data.get("expiry_date"),
+        cache_data.get("last_check"),
+    )
+    if not hmac.compare_digest(str(cache_data.get("signature", "")), expected_sig):
+        logger.warning("Falsification du fichier de licence détectée.")
+        return False
+
+    return True
+
+
+def save_local_license(status: str, expiry_date: str, last_check: str, license_key: str = "") -> dict:
+    """Enregistre de façon sécurisée l'état de la licence, en double, avec signature HMAC anti-falsification."""
     fingerprint = get_machine_fingerprint()
     signature = generate_local_signature(fingerprint, status, expiry_date, last_check)
 
@@ -82,58 +278,37 @@ def save_local_license(status: str, expiry_date: str, last_check: str, license_k
         "expiry_date": expiry_date,
         "last_check": last_check,
         "license_key": license_key,
-        "signature": signature
+        "signature": signature,
     }
 
-    try:
-        from database_manager import data_path
-        cache_path = data_path("license_cache.json")
-    except Exception:
-        cache_path = os.path.expanduser("~/Library/Caches/KodoPOS/license_cache.json")
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    primary_ok = _write_cache_file(_get_primary_cache_path(), cache_data)
+    backup_ok = _write_cache_file(_get_backup_cache_path(), cache_data)
 
-    try:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f, indent=4)
-        logger.info(f"Cache de licence sauvegardé (statut={status}).")
-    except Exception as e:
-        logger.error(f"Erreur d'écriture du cache de licence local : {e}")
+    if primary_ok or backup_ok:
+        logger.info(f"Cache de licence sauvegardé (statut={status}, primaire={primary_ok}, sauvegarde={backup_ok}).")
+    else:
+        logger.error("Échec d'écriture du cache de licence sur les deux emplacements.")
+
+    return cache_data
 
 
-def load_local_license() -> dict:
-    """Charge et vérifie l'intégrité cryptographique et matérielle du cache local."""
-    try:
-        from database_manager import data_path
-        cache_path = data_path("license_cache.json")
-    except Exception:
-        cache_path = os.path.expanduser("~/Library/Caches/KodoPOS/license_cache.json")
+def load_local_license():
+    """Charge et vérifie l'intégrité HMAC et matérielle du cache local, avec bascule sur la sauvegarde."""
+    fingerprint = get_machine_fingerprint()
+    primary_path = _get_primary_cache_path()
+    backup_path = _get_backup_cache_path()
 
-    if not os.path.exists(cache_path):
-        return None
+    primary_data = _read_cache_file(primary_path)
+    if _validate_cache_data(primary_data, fingerprint):
+        return primary_data
 
-    try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cache_data = json.load(f)
+    backup_data = _read_cache_file(backup_path)
+    if _validate_cache_data(backup_data, fingerprint):
+        logger.warning("Cache principal manquant ou corrompu : restauration depuis la sauvegarde résiliente.")
+        _write_cache_file(primary_path, backup_data)
+        return backup_data
 
-        fingerprint = get_machine_fingerprint()
-        if cache_data.get("fingerprint") != fingerprint:
-            logger.warning("L'identifiant matériel du cache ne correspond pas à cette machine.")
-            return None
-
-        expected_sig = generate_local_signature(
-            fingerprint,
-            cache_data.get("status"),
-            cache_data.get("expiry_date"),
-            cache_data.get("last_check")
-        )
-        if cache_data.get("signature") != expected_sig:
-            logger.warning("Falsification du fichier de licence détectée.")
-            return None
-
-        return cache_data
-    except Exception as e:
-        logger.error(f"Erreur de lecture du cache local de licence : {e}")
-        return None
+    return None
 
 
 def validate_license_online(key: str, fingerprint: str) -> dict:
@@ -283,9 +458,20 @@ def get_license_info() -> dict:
     }
 
 
+def _expected_master_key(fingerprint: str) -> str:
+    """Calcule la clé maître attendue pour cet appareil via HMAC-SHA256 (dérivée du HWID)."""
+    expected_hash = hmac.new(
+        SECRET_SALT.encode("utf-8"), fingerprint.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:12].upper()
+    return f"KODO-{expected_hash[:4]}-{expected_hash[4:8]}-{expected_hash[8:]}"
+
+
 def activate_license_key(key: str) -> tuple:
     """
     Active une clé de licence en tentant une validation Cloud puis fallback algorithmique local.
+    La validation locale exige une correspondance EXACTE avec la clé maître dérivée du HWID
+    (HMAC-SHA256), ou la clé de démonstration explicite. Aucune validation laxiste (préfixe,
+    longueur minimale) n'est tolérée.
     """
     if not key or not isinstance(key, str):
         return False, "Veuillez fournir une clé d'activation valide."
@@ -305,16 +491,10 @@ def activate_license_key(key: str) -> tuple:
         else:
             return False, online_res.get("reason", "Clé d'activation invalide ou déjà utilisée sur un autre appareil.")
 
-    # 2. Clé Master / Algorithmique
-    expected_hash = hashlib.sha256(f"{fingerprint}|{SECRET_SALT}".encode("utf-8")).hexdigest()[:12].upper()
-    expected_key_format = f"KODO-{expected_hash[:4]}-{expected_hash[4:8]}-{expected_hash[8:]}"
+    # 2. Clé Master / Algorithmique (fallback hors-ligne strict, correspondance exacte uniquement)
+    expected_key_format = _expected_master_key(fingerprint)
 
-    is_valid_key = (
-        clean_key.startswith("KODO-") or 
-        clean_key == expected_key_format or
-        clean_key == "DEMO-ACTIVE-2026" or
-        len(clean_key) >= 10
-    )
+    is_valid_key = clean_key == expected_key_format or clean_key == "DEMO-ACTIVE-2026"
 
     if is_valid_key:
         today_str = datetime.date.today().isoformat()
