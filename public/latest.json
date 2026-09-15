@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.44",
-  "latest_version": "1.0.44",
-  "version": "1.0.44",
-  "releaseDate": "2026-08-29",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.44.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.44.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.44.zip",
+  "latestVersion": "1.0.45",
+  "latest_version": "1.0.45",
+  "version": "1.0.45",
+  "releaseDate": "2026-09-15",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.45.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.45.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.45.zip",
   "has_update": true,
-  "changelog": "v1.0.44 : Intégration en direct Shopify (Admin API 2025-01, gestion SSL macOS), persistance complète des paramètres SQLite et correctif du moteur d'auto-update."
+  "changelog": "v1.0.45 : Renforcement du cœur backend (Calculs Panier Decimal, Grand Livre fiscal inaltérable SHA-256, Crash Recovery temps réel), HWID matériel Apple immuable, réimpression directe des tickets et personnalisation du logo thermique 80mm."
 }
