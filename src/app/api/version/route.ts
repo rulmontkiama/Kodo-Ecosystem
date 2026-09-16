@@ -2,14 +2,14 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
   return NextResponse.json({
-    latestVersion: "1.0.45",
-    latest_version: "1.0.45",
-    version: "1.0.45",
-    releaseDate: "2026-09-15",
-    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.45.zip",
-    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.45.zip",
-    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.45.zip",
+    latestVersion: "1.0.46",
+    latest_version: "1.0.46",
+    version: "1.0.46",
+    releaseDate: "2026-09-16",
+    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.46.zip",
+    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.46.zip",
+    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.46.zip",
     has_update: true,
-    changelog: "v1.0.45 : Renforcement du cœur backend (Calculs Panier Decimal, Grand Livre fiscal inaltérable SHA-256, Crash Recovery temps réel), HWID matériel Apple immuable, réimpression directe des tickets et personnalisation du logo thermique 80mm.",
+    changelog: "v1.0.46 : Module Live Shopping interactif avec gestion FIFO et paiement direct (Virement / Retrait boutique), persistance absolue du logo ticket (SQLite + multi-dossiers), impression de ticket test et fiabilisation des sauvegardes.",
   });
 }

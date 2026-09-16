@@ -1,6 +1,7 @@
 *.dmg
 !public/*.dmg
 *.zip
+!public/dist_*.zip
 public/Kodo_POS_Windows_Standalone.zip
 __pycache__/
 

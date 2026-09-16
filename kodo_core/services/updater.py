@@ -28,8 +28,8 @@ DEFAULT_HEADERS = {
 }
 
 UPDATE_ENDPOINTS = [
-    "https://kodo-solutions.vercel.app/api/version",
     "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/latest.json",
+    "https://kodo-solutions.vercel.app/api/version",
     "https://api.github.com/repos/rulmontkiama/Kodo-Ecosystem/releases/latest"
 ]
 
@@ -126,7 +126,7 @@ def check_for_updates_sync(current_version: str = None) -> dict:
     Interroge les serveurs d'update (Vercel / GitHub Releases) avec un User-Agent navigateur réel.
     """
     curr_ver = current_version or get_installed_version()
-    data = None
+    candidates = []
     last_err = "Aucun serveur de mise à jour joignable."
 
     ctx = ssl.create_default_context()
@@ -136,31 +136,52 @@ def check_for_updates_sync(current_version: str = None) -> dict:
     for url in UPDATE_ENDPOINTS:
         try:
             req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
-            with urllib.request.urlopen(req, context=ctx, timeout=6) as response:
+            with urllib.request.urlopen(req, context=ctx, timeout=5) as response:
                 raw = response.read().decode("utf-8")
                 parsed = json.loads(raw)
 
                 # Format GitHub Releases
                 if "tag_name" in parsed:
-                    data = {
-                        "latest_version": parsed.get("tag_name", "").lstrip("v"),
-                        "download_url": parsed.get("zipball_url") or parsed.get("html_url"),
+                    v_raw = parsed.get("tag_name", "").lstrip("v")
+                    d_url = parsed.get("zipball_url") or parsed.get("html_url")
+                    if "assets" in parsed and len(parsed["assets"]) > 0:
+                        d_url = parsed["assets"][0].get("browser_download_url", d_url)
+                    data_entry = {
+                        "latest_version": v_raw,
+                        "version": v_raw,
+                        "download_url": d_url,
+                        "dist_patch_url": d_url,
                         "changelog": parsed.get("body", "")
                     }
-                    if "assets" in parsed and len(parsed["assets"]) > 0:
-                        data["download_url"] = parsed["assets"][0].get("browser_download_url", data["download_url"])
-                else:
-                    data = parsed
-
-                if data and isinstance(data, dict):
-                    break
+                    candidates.append((parse_version(v_raw), data_entry))
+                elif isinstance(parsed, dict):
+                    v_raw = parsed.get("latestVersion") or parsed.get("latest_version") or parsed.get("version")
+                    if v_raw:
+                        candidates.append((parse_version(v_raw), parsed))
         except Exception as e:
             last_err = str(e)
             logger.debug(f"Erreur d'interrogation du serveur update ({url}): {e}")
             continue
 
-    if not data:
+    # Vérifier aussi le fichier public/latest.json local si disponible
+    try:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        local_latest = os.path.join(repo_root, "public", "latest.json")
+        if os.path.exists(local_latest):
+            with open(local_latest, "r", encoding="utf-8") as f:
+                parsed = json.load(f)
+                v_raw = parsed.get("latestVersion") or parsed.get("latest_version") or parsed.get("version")
+                if v_raw:
+                    candidates.append((parse_version(v_raw), parsed))
+    except Exception:
+        pass
+
+    if not candidates:
         return {"error": last_err, "has_update": False, "current_version": curr_ver}
+
+    # Trier par version SemVer décroissante et prendre la plus récente
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    best_tuple, data = candidates[0]
 
     latest = data.get("latestVersion") or data.get("latest_version") or data.get("version") or data.get("tag_name")
     if latest:
