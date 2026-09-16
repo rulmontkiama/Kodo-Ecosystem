@@ -7,5 +7,5 @@
   "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.48.zip",
   "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.48.zip",
   "has_update": true,
-  "changelog": "v1.0.48 : Refonte majeure Live Shopping avec vue dédiée 'Paniers des Clientes' (groupement par acheteuse, encaissement 1-clic POS, récapitulatif DM & moteur local résilient), suppression de l'IP du ticket test & gestion réactive du fond de caisse."
+  "changelog": "v1.0.48 : Refonte Live Shopping multi-pages (Régie Live avec Article Suivant/Précédent et raccourcis clavier, Paniers des Clientes avec encaissement 1-clic POS & messages WhatsApp, Stock portant en direct, Annuaire spectatrices) & Optimisation de la vue cliente (inscription mobile-first rapide avec @pseudo réseaux sociaux & parcours de commande fluide avec choix retrait/livraison et paiement)."
 }
