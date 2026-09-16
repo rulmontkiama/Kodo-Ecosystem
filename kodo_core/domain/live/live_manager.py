@@ -7,7 +7,7 @@ les acheteurs live, la synchronisation avec le CRM Clients et l'encaissement POS
 
 import json
 import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Dict, Any, Optional
 
 from kodo_core.db.connection import get_connection
@@ -23,12 +23,83 @@ class LiveManager:
     """
 
     # -------------------------------------------------------------------------
+    # 0. INITIALISATION DES TABLES
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def init_tables(cls, conn=None):
+        """Initialise les tables Live Shopping si elles n'existent pas encore."""
+        should_close = False
+        if conn is None:
+            conn = get_connection()
+            should_close = True
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS Live_Sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    titre TEXT NOT NULL,
+                    statut TEXT DEFAULT 'en_cours',
+                    date_debut DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    date_fin DATETIME,
+                    produit_vedette_id INTEGER,
+                    notes TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS Live_Buyers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id INTEGER,
+                    nom TEXT,
+                    prenom TEXT,
+                    telephone TEXT,
+                    email TEXT,
+                    pseudo_social TEXT,
+                    mode_reception TEXT DEFAULT 'retrait_magasin',
+                    adresse_rue TEXT,
+                    code_postal TEXT,
+                    ville TEXT,
+                    pays TEXT,
+                    taille_haut TEXT,
+                    taille_bas TEXT,
+                    pointure TEXT,
+                    notes TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS Live_Claims (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    buyer_id INTEGER NOT NULL,
+                    client_id INTEGER,
+                    product_id INTEGER NOT NULL,
+                    stock_id INTEGER,
+                    article_nom TEXT NOT NULL,
+                    taille TEXT,
+                    prix_unitaire_tvac REAL NOT NULL DEFAULT 0.0,
+                    quantite INTEGER NOT NULL DEFAULT 1,
+                    statut_attribution TEXT DEFAULT 'file_attente',
+                    rang_file INTEGER DEFAULT 1,
+                    statut_paiement TEXT DEFAULT 'non_paye',
+                    statut_commande TEXT DEFAULT 'en_attente',
+                    ticket_pos_id INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+        finally:
+            if should_close:
+                conn.close()
+
+    # -------------------------------------------------------------------------
     # 1. SESSIONS LIVE
     # -------------------------------------------------------------------------
 
     @classmethod
     def get_active_session(cls, conn=None) -> Optional[Dict[str, Any]]:
         """Retourne la session live active (la plus récente), ou None si aucune."""
+        cls.init_tables(conn=conn)
         should_close = False
         if conn is None:
             conn = get_connection()
@@ -37,7 +108,7 @@ class LiveManager:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT s.id, s.titre, s.statut, s.date_debut, s.produit_vedette_id,
-                       p.nom as produit_vedette_nom, p.prix_vente_tvac, p.image_path
+                       p.nom as produit_vedette_nom, p.prix_vente_tvac, p.image_path, s.notes
                 FROM Live_Sessions s
                 LEFT JOIN Produits p ON s.produit_vedette_id = p.id
                 WHERE s.statut = 'active'
@@ -55,6 +126,7 @@ class LiveManager:
                 "produit_vedette_nom": row[5],
                 "produit_vedette_prix": float(row[6]) if row[6] else None,
                 "produit_vedette_image": row[7] or "",
+                "notes": row[8] or "",
             }
         finally:
             if should_close:
@@ -362,6 +434,9 @@ class LiveManager:
             should_close = True
         try:
             cursor = conn.cursor()
+            # Verrou d'écriture immédiat : empêche une lecture concurrente du stock
+            # (TOCTOU) entre le calcul du rang FIFO et l'insertion de la claim.
+            cursor.execute("BEGIN IMMEDIATE")
             session_id = int(data.get("session_id"))
             buyer_id = int(data.get("buyer_id"))
             product_id = int(data.get("product_id"))
@@ -369,21 +444,23 @@ class LiveManager:
             quantite = int(data.get("quantite", 1))
             client_id = data.get("client_id")
 
-            # Récupérer infos produit
+            # Récupérer infos produit (jointure alignée sur _recalculate_queue
+            # pour garantir la même vue du stock disponible)
             cursor.execute("""
                 SELECT p.nom, p.prix_vente_tvac, s.id, s.quantite_actuelle
                 FROM Produits p
-                LEFT JOIN Stocks s ON s.id_produit = p.id
-                WHERE p.id = ? AND (s.taille = ? OR s.taille IS NULL OR ? = 'Taille Unique')
+                LEFT JOIN Stocks s ON s.id_produit = p.id AND (s.taille = ? OR s.taille IS NULL)
+                WHERE p.id = ?
                 ORDER BY CASE WHEN s.taille = ? THEN 0 ELSE 1 END
                 LIMIT 1
-            """, (product_id, taille, taille, taille))
+            """, (taille, product_id, taille))
             prod_row = cursor.fetchone()
             if not prod_row:
+                conn.rollback()
                 return {"success": False, "error": "Produit ou taille introuvable"}
 
             article_nom = prod_row[0]
-            prix_unitaire = float(prod_row[1]) if prod_row[1] else 0.0
+            prix_unitaire = Decimal(str(prod_row[1])).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if prod_row[1] else Decimal('0.00')
             stock_id = prod_row[2]
             stock_dispo = int(prod_row[3]) if prod_row[3] else 0
 
@@ -406,6 +483,7 @@ class LiveManager:
             """, (session_id, buyer_id, product_id, taille))
             existing = cursor.fetchone()
             if existing:
+                conn.rollback()
                 return {
                     "success": False,
                     "error": "Vous avez déjà une réservation pour cet article en cette taille."
@@ -428,7 +506,7 @@ class LiveManager:
                 "rang_file": rang_file,
                 "statut_attribution": statut_attribution,
                 "article_nom": article_nom,
-                "prix_unitaire": prix_unitaire,
+                "prix_unitaire": float(prix_unitaire),
                 "stock_dispo": stock_dispo,
             }
         except Exception as e:
@@ -470,6 +548,9 @@ class LiveManager:
             if filters.get("statut_paiement"):
                 query += " AND c.statut_paiement=?"
                 params.append(filters["statut_paiement"])
+            if filters.get("buyer_id"):
+                query += " AND c.buyer_id=?"
+                params.append(filters["buyer_id"])
 
             query += " ORDER BY c.created_at ASC"
             cursor.execute(query, params)
@@ -504,10 +585,11 @@ class LiveManager:
         """Liste les claims d'un acheteur spécifique pour une session."""
         return cls.get_claims(
             session_id,
+            filters={"buyer_id": buyer_id},
             conn=conn
         )
-        # Filter in memory for simplicity
-    
+
+
     @classmethod
     def get_my_claims(cls, buyer_id: int, session_id: int, conn=None) -> List[Dict[str, Any]]:
         """Retourne uniquement les claims du buyer_id dans la session."""
@@ -633,8 +715,7 @@ class LiveManager:
                 return {"success": False, "error": "Claim introuvable"}
 
             statut_attr = row[10]
-            statut_cmd = row[11]
-            if statut_cmd == "encaissé":
+            if statut_attr == "encaissé":
                 return {"success": False, "error": "Cette commande a déjà été encaissée"}
             if statut_attr not in ("attribué",):
                 return {"success": False, "error": "Seules les commandes attribuées peuvent être encaissées"}
@@ -664,16 +745,16 @@ class LiveManager:
                 "taille": taille,
             }]
 
-            total_ttc = prix_unitaire * quantite
+            total_ttc = float(Decimal(str(prix_unitaire)) * quantite)
 
             result = process_sale_transaction(
-                items=cart_items,
-                total_ttc=total_ttc,
-                mode_paiement=mode_paiement,
-                id_client=client_id,
-                vendeur=vendeur,
-                remise=0.0,
-                rendu=0.0,
+                cart_items=cart_items,
+                total_tvac=total_ttc,
+                payments=[(mode_paiement, total_ttc)],
+                client_id=client_id,
+                cashier_name=vendeur,
+                discount_percent=0.0,
+                change_given=0.0,
                 conn=conn
             )
 
@@ -690,7 +771,7 @@ class LiveManager:
                 return {
                     "success": True,
                     "ticket_id": ticket_id,
-                    "receipt_number": result.get("receipt_number", ""),
+                    "receipt_number": result.get("numero_ticket", ""),
                     "buyer_nom": buyer_nom,
                     "article_nom": article_nom,
                     "total_ttc": total_ttc,
@@ -720,6 +801,19 @@ class LiveManager:
             should_close = True
         try:
             cursor = conn.cursor()
+            # Vérifier si la session restreint les articles à une sélection spécifique
+            product_filter_ids = None
+            if session_id:
+                cursor.execute("SELECT notes FROM Live_Sessions WHERE id=?", (session_id,))
+                nrow = cursor.fetchone()
+                if nrow and nrow[0]:
+                    try:
+                        n_data = json.loads(nrow[0])
+                        if isinstance(n_data, dict) and n_data.get("product_ids"):
+                            product_filter_ids = [int(pid) for pid in n_data["product_ids"]]
+                    except Exception:
+                        pass
+
             cursor.execute("""
                 SELECT p.id, p.nom, p.categorie, p.prix_vente_tvac, p.en_solde,
                        p.prix_solde_tvac, p.image_path, p.marque
@@ -727,6 +821,12 @@ class LiveManager:
                 ORDER BY p.nom ASC
             """)
             products = cursor.fetchall()
+
+            if product_filter_ids:
+                # Filtrer et respecter l'ordre précis choisi par le vendeur
+                id_to_order = {pid: idx for idx, pid in enumerate(product_filter_ids)}
+                products = [p for p in products if p[0] in id_to_order]
+                products.sort(key=lambda p: id_to_order.get(p[0], 9999))
 
             result = []
             for prod in products:
@@ -846,7 +946,8 @@ class LiveManager:
                 paiement = {
                     "paye": " — ✅ Payé",
                     "non_paye": " — ⚠️ Paiement en attente",
-                    "sur_place": " — 🏪 Paiement sur place"
+                    "sur_place": " — 🏪 Retrait boutique (sur place)",
+                    "virement": " — 🏦 Virement en attente"
                 }.get(claim["statut_paiement"], "")
                 lignes.append(
                     f"  {emoji} {claim['article_nom']}{taille_str} — {prix_ligne:.2f}€{rang}{paiement}"
@@ -859,12 +960,23 @@ class LiveManager:
 
             prenom_display = buyer[1] or nom_complet.split()[0] if nom_complet else "Cher(e) client(e)"
 
+            # Ajout des coordonnées bancaires si au moins un article est en attente de virement
+            virement_info = ""
+            has_virement = any(c.get("statut_paiement") == "virement" for c in claims)
+            if has_virement:
+                cursor.execute("SELECT valeur FROM Parametres WHERE cle='shop_iban'")
+                iban_row = cursor.fetchone()
+                shop_iban = iban_row[0] if iban_row and iban_row[0] else "BE68 0000 0000 0000"
+                virement_ref = f"LIVE-{prenom_display.upper()}-{buyer_id}"
+                virement_info = f"\n\n🏦 Coordonnées pour le virement bancaire :\n• IBAN : {shop_iban}\n• Communication : {virement_ref}\n• Montant : {total:.2f}€"
+
             message = (
                 f"Bonjour {prenom_display} {'(' + pseudo + ') ' if pseudo else ''}👋\n\n"
                 f"Voici le récapitulatif de tes réservations du Live 🛍️ :\n\n"
                 + "\n".join(lignes) +
                 f"\n\n💰 Total : {total:.2f}€\n"
-                f"{mode_str}{adresse_str}\n\n"
+                f"{mode_str}{adresse_str}"
+                f"{virement_info}\n\n"
                 f"Merci pour ta confiance ! 🙏\n"
                 f"À très vite ! 💫"
             )
