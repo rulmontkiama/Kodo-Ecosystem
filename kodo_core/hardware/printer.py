@@ -971,7 +971,6 @@ def generer_ticket_test(shop_name="KŌDO POS",
     lines.append(f"Date   : {date_str}")
     lines.append(f"Ticket : TEST-0001      Caisse : Caisse 01")
     lines.append(f"Statut : TEST MATERIEL REUSSI")
-    lines.append(f"IP Imp : {printer_ip or 'USB / CUPS Local'}")
     lines.append(_separator("-"))
 
     lines.append(f"{'QTE':<4}{'DESIGNATION':<25}{'PRIX (EUR)':>13}")

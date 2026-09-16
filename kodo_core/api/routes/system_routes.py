@@ -176,14 +176,24 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         cursor = conn.cursor()
         cursor.execute("SELECT cle, valeur FROM Parametres")
         rows = cursor.fetchall()
-        conn.close()
         params = {r[0]: r[1] for r in rows}
+
+        # Fond de caisse actuel de la session active (sans réécriture historique)
+        try:
+            cursor.execute("SELECT fond_caisse_matin FROM Sessions_Caisse WHERE date_cloture IS NULL ORDER BY id DESC LIMIT 1")
+            row_fc = cursor.fetchone()
+            fond_caisse = float(row_fc[0]) if (row_fc and row_fc[0] is not None) else float(params.get("fond_caisse_matin", 200.0))
+        except Exception:
+            fond_caisse = float(params.get("fond_caisse_matin", 200.0))
+        conn.close()
+
         return 200, {
             "storeName": params.get("shop_name", "KŌDO POS"),
             "address": params.get("shop_address", ""),
             "bceNumber": params.get("shop_bce", params.get("shop_siret", "")),
             "tvaNumber": params.get("shop_tva", ""),
             "iban": params.get("shop_iban", "BE68 0000 0000 0000"),
+            "fondCaisse": fond_caisse,
             "printerIP": params.get("printer_ip", "192.168.1.150"),
             "shopifyDomain": params.get("shopify_store_url", ""),
             "shopifyToken": params.get("shopify_access_token", ""),
@@ -199,6 +209,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         bce = data.get("bceNumber") or data.get("shop_bce", "")
         tva = data.get("tvaNumber") or data.get("shop_tva", "")
         iban = data.get("iban") or data.get("shop_iban")
+        fond_caisse_val = data.get("fondCaisse") or data.get("fond_caisse")
         printer_ip = data.get("printerIP") or data.get("printer_ip", "192.168.1.150")
         shopify_domain = data.get("shopifyDomain") or data.get("shopify_store_url")
         shopify_token = data.get("shopifyToken") or data.get("shopify_access_token")
@@ -207,6 +218,14 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
         conn = get_connection()
         cursor = conn.cursor()
+        if fond_caisse_val is not None:
+            try:
+                from kodo_core.services.cash_session_service import set_fond_caisse_matin
+                set_fond_caisse_matin(cursor, str(fond_caisse_val))
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('fond_caisse_matin', ?)", (str(fond_caisse_val),))
+            except Exception:
+                pass
+
         if store_name:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_name', ?)", (store_name,))
         cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_address', ?)", (address,))
