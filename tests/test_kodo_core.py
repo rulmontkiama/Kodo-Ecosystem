@@ -127,7 +127,11 @@ class TestKodoCore(unittest.TestCase):
         cat_id = c.lastrowid
         c.execute("INSERT INTO Produits (code_barre, nom, categorie, prix_vente_tvac) VALUES ('SKU-OFF', 'Article Off', 'TestCat', 10.0)")
         p_id = c.lastrowid
-        c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle) VALUES (?, 'Unique', 0)", (p_id,))
+        # Le stock est déjà décrémenté (-1) : enregistrer_vente() applique la
+        # décrémentation dès la création du ticket (en ligne comme hors-ligne).
+        # process_pending_tickets() ne doit pas décrémenter une seconde fois,
+        # seulement détecter le stock négatif et le marquer pour audit.
+        c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle) VALUES (?, 'Unique', -1)", (p_id,))
         s_id = c.lastrowid
 
         c.execute("""

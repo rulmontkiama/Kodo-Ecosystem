@@ -19,8 +19,12 @@ class DataSanitizer:
     # Patterns de masquage PII et données financières
     EMAIL_REGEX = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+')
     PHONE_REGEX = re.compile(r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b')
-    AMOUNT_REGEX = re.compile(r'\b\d+(?:[\.,]\d{1,2})?\s*(?:€|\$|EUR|USD)\b', re.IGNORECASE)
-    PIN_TOKEN_REGEX = re.compile(r'(pin|token|password|secret|key)["\s:=]+["\']?([a-zA-Z0-9_\-]+)["\']?', re.IGNORECASE)
+    AMOUNT_REGEX = re.compile(r'\b\d+(?:[\.,]\d{1,2})?\s*(?:€|\$|EUR|USD)(?!\w)', re.IGNORECASE)
+    PIN_TOKEN_REGEX = re.compile(
+        r'(pin|token|password|secret|key)(?:\s+(?:pin|token|password|secret|key))*'
+        r'["\s:=]+["\']?([a-zA-Z0-9_\-]+)["\']?',
+        re.IGNORECASE,
+    )
 
     @classmethod
     def sanitize_text(cls, text: str) -> str:

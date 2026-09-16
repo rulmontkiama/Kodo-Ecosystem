@@ -9,7 +9,10 @@ import shutil
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.migrations import MigrationManager, MigrationError
-from core.config import ShopConfig
+# core.migrations est un alias vers kodo_core.db.migrations, qui résout ses chemins
+# via kodo_core.config.ShopConfig (distinct de core.config.ShopConfig) : c'est cette
+# classe qu'il faut patcher pour rediriger le dossier de snapshots en test.
+from kodo_core.config import ShopConfig
 
 class TestMigrations(unittest.TestCase):
 
@@ -47,12 +50,13 @@ class TestMigrations(unittest.TestCase):
 
     def test_pre_migration_snapshot_created(self):
         """Vérifie qu'un snapshot de sauvegarde est généré avant d'exécuter de nouvelles migrations."""
-        # 1. Appliquer v1.0.0 uniquement
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("CREATE TABLE schema_version (version TEXT PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_version VALUES ('1.0.0')")
-        conn.commit()
-        conn.close()
+        # 1. Appliquer réellement v1.0.0 uniquement (schéma + marqueur de version)
+        original_migrations = MigrationManager.MIGRATIONS
+        try:
+            MigrationManager.MIGRATIONS = [m for m in original_migrations if m["version"] == "1.0.0"]
+            MigrationManager.run_migrations(self.db_path)
+        finally:
+            MigrationManager.MIGRATIONS = original_migrations
 
         # 2. Exécuter la migration vers v1.1.0
         MigrationManager.run_migrations(self.db_path)

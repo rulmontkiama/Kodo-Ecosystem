@@ -26,9 +26,14 @@ class TestKodoCoreDomainAndAPI(unittest.TestCase):
     def setUp(self):
         self.temp_db_fd, self.temp_db_path = tempfile.mkstemp(suffix=".db")
         database_manager.DB_NAME = self.temp_db_path
+        # kodo_core.db.connection résout son propre chemin via ShopConfig.get_db_path(),
+        # indépendamment de database_manager.DB_NAME : sans cet override, les modules
+        # domain/* écriraient dans la vraie base persistante au lieu du fichier temporaire.
+        os.environ["KODO_DB_PATH"] = self.temp_db_path
         database_manager.initialiser_db()
 
     def tearDown(self):
+        os.environ.pop("KODO_DB_PATH", None)
         os.close(self.temp_db_fd)
         if os.path.exists(self.temp_db_path):
             os.remove(self.temp_db_path)

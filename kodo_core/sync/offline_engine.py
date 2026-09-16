@@ -188,11 +188,13 @@ class OfflineSyncEngine:
             conn = get_connection()
             close_conn = True
 
+        cls.init_db_schema(conn=conn)
+
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, numero_ticket, total_tvac, offline_uuid, created_at_utc 
-                FROM Tickets WHERE sync_status=0 
+                SELECT id, numero_ticket, total_tvac, offline_uuid, created_at_utc
+                FROM Tickets WHERE sync_status=0
                 ORDER BY id ASC
             """)
             pending_tickets = cursor.fetchall()
@@ -218,14 +220,14 @@ class OfflineSyncEngine:
 
                 for stock_id, qte, prod_id, qte_actuelle in items:
                     if stock_id:
-                        nouvelle_qte = (qte_actuelle or 0) - (qte or 1)
-                        cursor.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (nouvelle_qte, stock_id))
-
-                        if nouvelle_qte < 0:
+                        # Le décompte a déjà été appliqué par enregistrer_vente() à la création
+                        # du ticket (hors-ligne ou non) : ne pas décrémenter une seconde fois ici,
+                        # seulement détecter et signaler un stock négatif pour audit manuel.
+                        if (qte_actuelle or 0) < 0:
                             cursor.execute("UPDATE Stocks SET requires_stock_audit=1 WHERE id=?", (stock_id,))
                             if prod_id:
                                 cursor.execute("UPDATE Produits SET requires_stock_audit=1 WHERE id=?", (prod_id,))
-                            logger.warning(f"[AUDIT STOCK] Conflit de stock lors de la synchro du ticket {t_num} (Stock ID {stock_id}: {nouvelle_qte}). Produit marqué pour audit.")
+                            logger.warning(f"[AUDIT STOCK] Conflit de stock lors de la synchro du ticket {t_num} (Stock ID {stock_id}: {qte_actuelle}). Produit marqué pour audit.")
 
                 cursor.execute("UPDATE Tickets SET sync_status=1 WHERE id=?", (t_id,))
                 synced_count += 1
