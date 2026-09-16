@@ -79,12 +79,12 @@ class SafeConnection:
     """Wrapper ultra-sécurisé pour garantir la fermeture des connexions."""
     def __init__(self, db_name, **kwargs):
         self.db_name = db_name
+        self._closed = False
         self._conn = sqlite3.connect(db_name, **kwargs)
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
         except Exception:
             pass
-        self._closed = False
 
     def cursor(self):
         return self._conn.cursor()
@@ -119,6 +119,10 @@ class SafeConnection:
 
 def get_connection(db_path=None):
     target_db = db_path or DB_NAME
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(target_db)), exist_ok=True)
+    except Exception:
+        pass
     return SafeConnection(target_db, detect_types=sqlite3.PARSE_DECLTYPES)
 
 
@@ -410,6 +414,62 @@ def _initialiser_db_raw(conn):
             current_hash TEXT,
             signature TEXT,
             created_at_utc TEXT
+        )
+    ''')
+
+    # Tables Live Shopping
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Live_Sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titre TEXT NOT NULL,
+            statut TEXT DEFAULT 'en_cours',
+            date_debut DATETIME DEFAULT CURRENT_TIMESTAMP,
+            date_fin DATETIME,
+            produit_vedette_id INTEGER,
+            notes TEXT
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Live_Buyers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER,
+            nom TEXT,
+            prenom TEXT,
+            telephone TEXT,
+            email TEXT,
+            pseudo_social TEXT,
+            mode_reception TEXT DEFAULT 'retrait_magasin',
+            adresse_rue TEXT,
+            code_postal TEXT,
+            ville TEXT,
+            pays TEXT,
+            taille_haut TEXT,
+            taille_bas TEXT,
+            pointure TEXT,
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Live_Claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            buyer_id INTEGER NOT NULL,
+            client_id INTEGER,
+            product_id INTEGER NOT NULL,
+            stock_id INTEGER,
+            article_nom TEXT NOT NULL,
+            taille TEXT,
+            prix_unitaire_tvac REAL NOT NULL DEFAULT 0.0,
+            quantite INTEGER NOT NULL DEFAULT 1,
+            statut_attribution TEXT DEFAULT 'file_attente',
+            rang_file INTEGER DEFAULT 1,
+            statut_paiement TEXT DEFAULT 'non_paye',
+            statut_commande TEXT DEFAULT 'en_attente',
+            ticket_pos_id INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 

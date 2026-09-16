@@ -183,6 +183,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "address": params.get("shop_address", ""),
             "bceNumber": params.get("shop_bce", params.get("shop_siret", "")),
             "tvaNumber": params.get("shop_tva", ""),
+            "iban": params.get("shop_iban", "BE68 0000 0000 0000"),
             "printerIP": params.get("printer_ip", "192.168.1.150"),
             "shopifyDomain": params.get("shopify_store_url", ""),
             "shopifyToken": params.get("shopify_access_token", ""),
@@ -197,6 +198,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         address = data.get("address") or data.get("shop_address", "")
         bce = data.get("bceNumber") or data.get("shop_bce", "")
         tva = data.get("tvaNumber") or data.get("shop_tva", "")
+        iban = data.get("iban") or data.get("shop_iban")
         printer_ip = data.get("printerIP") or data.get("printer_ip", "192.168.1.150")
         shopify_domain = data.get("shopifyDomain") or data.get("shopify_store_url")
         shopify_token = data.get("shopifyToken") or data.get("shopify_access_token")
@@ -210,6 +212,8 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_address', ?)", (address,))
         cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_bce', ?)", (bce,))
         cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_tva', ?)", (tva,))
+        if iban is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_iban', ?)", (str(iban).strip(),))
         cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('printer_ip', ?)", (printer_ip,))
 
         if shopify_domain is not None:
@@ -306,21 +310,52 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             image_data = base64.b64decode(logo_b64)
             img = Image.open(BytesIO(image_data))
 
-            # Optimisation pour imprimante thermique 80mm ESC/POS (max 512px de large)
+            # Gestion de la transparence (Alpha channel) : fond blanc net
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == 'RGBA':
+                    bg.paste(img, mask=img.split()[-1])
+                else:
+                    bg.paste(img)
+                img = bg
+
+            # Optimisation pour imprimante thermique 80mm ESC/POS (max 384px de large)
             max_width = 384
             if img.width > max_width:
                 ratio = max_width / float(img.width)
                 new_height = int(float(img.height) * ratio)
                 img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
 
-            # Conversion en monochrome pour impression thermique nette
+            # Sauvegarder dans tous les chemins potentiels pour assurer la persistance
+            import os
             target_path = database_manager.data_path("logo_ticket.png")
-            img.save(target_path, format="PNG")
+            try:
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                img.save(target_path, format="PNG")
+            except Exception as e:
+                print(f"[WARN] Sauvegarde logo data_path: {e}")
 
-            # Mettre à jour en base SQLite
+            for alt_dir in [
+                os.path.expanduser("~/Documents/Kodo_POS"),
+                os.path.expanduser("~/Library/Application Support/Kodo_POS"),
+                os.path.abspath(".")
+            ]:
+                try:
+                    os.makedirs(alt_dir, exist_ok=True)
+                    img.save(os.path.join(alt_dir, "logo_ticket.png"), format="PNG")
+                except Exception:
+                    pass
+
+            # Préparer le base64 final pour stockage SQLite et retour frontend
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            stored_b64 = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+            # Mettre à jour en base SQLite (persistance universelle)
             conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_logo_custom', '1')")
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_logo_b64', ?)", (stored_b64,))
             conn.commit()
             conn.close()
 
@@ -328,24 +363,93 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 "success": True,
                 "message": "Logo du ticket enregistré avec succès !",
                 "width": img.width,
-                "height": img.height
+                "height": img.height,
+                "logo_url": stored_b64
             }
         except Exception as e:
             return 500, {"success": False, "error": f"Erreur lors du traitement du logo : {str(e)}"}
 
-    # 17. Obtenir le statut du logo actuel
+    # 17. Obtenir le statut et l'URL du logo actuel
     elif method == "GET" and path == "/api/settings/logo":
         try:
             import os
             import base64
-            target_path = database_manager.data_path("logo_ticket.png")
-            if os.path.exists(target_path):
-                with open(target_path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                return 200, {"has_logo": True, "logo_url": f"data:image/png;base64,{b64}"}
+
+            # 1. Vérifier en base SQLite en premier
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_logo_b64'")
+                row = cursor.fetchone()
+                conn.close()
+                if row and row[0] and len(row[0]) > 50:
+                    return 200, {"has_logo": True, "logo_url": row[0]}
+            except Exception:
+                pass
+
+            # 2. Vérifier sur le disque
+            candidate_paths = [
+                database_manager.data_path("logo_ticket.png"),
+                os.path.expanduser("~/Documents/Kodo_POS/logo_ticket.png"),
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png"),
+                os.path.join(os.path.abspath("."), "logo_ticket.png")
+            ]
+            for target_path in candidate_paths:
+                if os.path.exists(target_path) and os.path.getsize(target_path) > 100:
+                    with open(target_path, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("utf-8")
+                    return 200, {"has_logo": True, "logo_url": f"data:image/png;base64,{b64}"}
+
             return 200, {"has_logo": False}
         except Exception as e:
             return 500, {"has_logo": False, "error": str(e)}
+
+    # 17b. Supprimer le logo personnalisé
+    elif method == "DELETE" and path == "/api/settings/logo":
+        try:
+            import os
+            # Supprimer de SQLite
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM Parametres WHERE cle IN ('receipt_logo_custom', 'receipt_logo_b64')")
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+            # Supprimer des emplacements de données personnalisées
+            candidate_paths = [
+                database_manager.data_path("logo_ticket.png"),
+                os.path.expanduser("~/Documents/Kodo_POS/logo_ticket.png"),
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png")
+            ]
+            for p in candidate_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+
+            return 200, {"success": True, "message": "Logo supprimé avec succès"}
+        except Exception as e:
+            return 500, {"success": False, "error": str(e)}
+
+    # 18. Impression d'un ticket test
+    elif method == "POST" and (path == "/api/printer/test" or path == "/api/settings/printer/test"):
+        try:
+            import ticket_printer
+            printer_ip = data.get("printerIP") or data.get("printer_ip")
+            res = ticket_printer.imprimer_ticket_test(host=printer_ip)
+            return 200, {
+                "success": True,
+                "message": "Ticket de test envoyé à l'imprimante avec succès !",
+                "receiptNumber": res.get("receiptNumber"),
+                "file": res.get("file"),
+                "printerIP": res.get("printerIP")
+            }
+        except Exception as e:
+            return 500, {"success": False, "error": f"Erreur lors de l'impression du ticket test : {str(e)}"}
 
     return None
 

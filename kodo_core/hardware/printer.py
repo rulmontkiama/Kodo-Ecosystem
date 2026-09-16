@@ -535,6 +535,61 @@ def generer_ticket_promo(code_promo, description, pourcentage=None, montant_fixe
     return "\n".join(lines)
 
 
+def get_ticket_logo_path():
+    """
+    Retourne le chemin d'accès au logo pour le ticket de caisse.
+    Cherche en priorité le logo personnalisé téléversé par l'utilisateur,
+    puis se replie sur le logo par défaut de l'application.
+    Si le logo n'existe pas sur disque mais est présent en base SQLite (Parametres), le régénère.
+    """
+    # 1. Vérifier si présent en base SQLite et reconstituer sur disque si besoin
+    try:
+        import database_manager
+        conn = database_manager.get_connection()
+        c = conn.cursor()
+        c.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_logo_b64'")
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            raw_b64 = row[0]
+            if "," in raw_b64:
+                raw_b64 = raw_b64.split(",", 1)[1]
+            import base64
+            img_bytes = base64.b64decode(raw_b64)
+            target_p = database_manager.data_path("logo_ticket.png")
+            try:
+                os.makedirs(os.path.dirname(target_p), exist_ok=True)
+                with open(target_p, "wb") as f:
+                    f.write(img_bytes)
+                return target_p
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 2. Vérifier les répertoires de données utilisateur
+    try:
+        import database_manager
+        candidate_paths = [
+            database_manager.data_path("logo_ticket.png"),
+            os.path.expanduser("~/Documents/Kodo_POS/logo_ticket.png"),
+            os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png"),
+            os.path.join(os.path.abspath("."), "logo_ticket.png")
+        ]
+        for p in candidate_paths:
+            if os.path.exists(p) and os.path.getsize(p) > 100:
+                return p
+    except Exception:
+        pass
+
+    # 3. Repli sur le logo par défaut
+    default_p = get_resource_path("logo_ticket.png")
+    if os.path.exists(default_p) and os.path.getsize(default_p) > 100:
+        return default_p
+
+    return None
+
+
 def generer_image_ticket(contenu, numero):
     """
     Génère une image PNG du ticket complet (Logo + Texte + Instagram/QR Code)
@@ -542,12 +597,12 @@ def generer_image_ticket(contenu, numero):
     """
     from PIL import Image, ImageDraw, ImageFont
 
-    logo_path = get_resource_path("logo_ticket.png")
+    logo_path = get_ticket_logo_path()
     insta_path = get_resource_path("instagram_block.png")
 
     img_logo = None
     img_insta = None
-    if os.path.exists(logo_path):
+    if logo_path and os.path.exists(logo_path):
         try:
             img_logo = Image.open(logo_path).convert("RGBA")
         except Exception:
@@ -690,8 +745,8 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100):
 
     # 3. Payload ESC/POS
     raw_payload = bytearray(ESC_INIT + ESC_ALIGN_CENTER)
-    logo_path = get_resource_path("logo_ticket.png")
-    if os.path.exists(logo_path):
+    logo_path = get_ticket_logo_path()
+    if logo_path and os.path.exists(logo_path):
         try:
             img_logo = Image.open(logo_path)
             raw_payload.extend(pil_to_escpos_raster(img_logo))
@@ -888,3 +943,97 @@ def ouvrir_tiroir_caisse(printer_name=None, host=None, port=9100):
         print(f"[ERROR ouvrir_tiroir_caisse] {e}")
 
     return False
+
+
+def generer_ticket_test(shop_name="KŌDO POS",
+                        shop_address="Avenue Louise 100, 1050 Bruxelles",
+                        shop_vat="BE 0123.456.789",
+                        shop_iban="BE68 0000 0000 0000",
+                        printer_ip="192.168.1.150"):
+    """
+    Génère le texte d'un ticket de test thermique ESC/POS 80mm.
+    """
+    now = datetime.datetime.now()
+    lines = []
+    lines.append(_separator("="))
+    lines.append(_center(shop_name))
+    lines.append(_center("*** TICKET TEST D'IMPRESSION ***"))
+    if shop_address:
+        lines.append(_center(shop_address))
+    if shop_vat:
+        vat_str = shop_vat if str(shop_vat).startswith("TVA") else f"TVA: {shop_vat}"
+        lines.append(_center(vat_str))
+    if shop_iban:
+        lines.append(_center(f"IBAN: {shop_iban}"))
+    lines.append(_separator("="))
+
+    date_str = now.strftime("%d/%m/%Y %H:%M:%S")
+    lines.append(f"Date   : {date_str}")
+    lines.append(f"Ticket : TEST-0001      Caisse : Caisse 01")
+    lines.append(f"Statut : TEST MATERIEL REUSSI")
+    lines.append(f"IP Imp : {printer_ip or 'USB / CUPS Local'}")
+    lines.append(_separator("-"))
+
+    lines.append(f"{'QTE':<4}{'DESIGNATION':<25}{'PRIX (EUR)':>13}")
+    lines.append(_separator("-"))
+    lines.append(f"{'1':<4}{'Article Test A (Taille M)':<25}{'15.00':>13}")
+    lines.append(f"{'1':<4}{'Impr. Thermique ESC/POS':<25}{'5.00':>13}")
+    lines.append(_separator("-"))
+
+    lines.append(f"{'TOTAL TVAC':<25}{'20.00 EUR':>17}")
+    lines.append(f"{'Paiement Test':<25}{'20.00 EUR':>17}")
+    lines.append(_separator("-"))
+    lines.append("DETAIL TVA :")
+    lines.append(f"  Taux 21.0% : HTVA 16.53 EUR | TVA 3.47 EUR")
+    lines.append(_separator("="))
+    lines.append(_center("TEST MATERIEL & COMMUNICATION"))
+    lines.append(_center("Vitesse : OK | Decoupe : OK"))
+    lines.append(_center("Kōdo POS v1.0.45"))
+    lines.append(_separator("-"))
+    lines.append(_center("Merci pour votre confiance !"))
+    lines.append(_center("https://kodopos.com"))
+    lines.append(_separator("="))
+    lines.append("\n\n")
+
+    return "\n".join(lines)
+
+
+def imprimer_ticket_test(printer_name=None, host=None, port=9100):
+    """
+    Imprime un ticket de test sur l'imprimante thermique configurée.
+    Récupère automatiquement les paramètres boutique depuis SQLite.
+    """
+    try:
+        from database_manager import get_connection
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT cle, valeur FROM Parametres")
+        params = {r[0]: r[1] for r in c.fetchall()}
+        conn.close()
+    except Exception:
+        params = {}
+
+    shop_name = params.get("shop_name", "KŌDO POS")
+    shop_addr = params.get("shop_address", "Bruxelles, Belgique")
+    shop_vat = params.get("shop_tva", params.get("shop_bce", "BE 0123.456.789"))
+    shop_iban = params.get("shop_iban", "BE68 0000 0000 0000")
+    printer_ip = host or params.get("printer_ip", "192.168.1.150")
+
+    txt = generer_ticket_test(
+        shop_name=shop_name,
+        shop_address=shop_addr,
+        shop_vat=shop_vat,
+        shop_iban=shop_iban,
+        printer_ip=printer_ip
+    )
+
+    num_test = datetime.datetime.now().strftime("TEST-%H%M%S")
+    path_or_success = imprimer_ticket(txt, numero=num_test, printer_name=printer_name, host=printer_ip, port=port)
+    return {
+        "success": True,
+        "receiptNumber": num_test,
+        "file": str(path_or_success),
+        "printerIP": printer_ip,
+        "content": txt
+    }
+

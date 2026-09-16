@@ -1,7 +1,7 @@
 *.dmg
 !public/*.dmg
 *.zip
-!public/*.zip
+public/Kodo_POS_Windows_Standalone.zip
 __pycache__/
 
 build/
@@ -9,6 +9,9 @@ Installation_Pack/
 data/
 .agents/
 .DS_Store
+._*
+.next/
+*.tsbuildinfo
 *.db
 node_modules/
 .npm-cache/

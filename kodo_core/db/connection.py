@@ -47,12 +47,13 @@ class SafeConnection:
         else:
             self.db_path = db_path or ShopConfig.get_db_path()
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+            self._closed = False
+            self._external_conn = False
             
             if "detect_types" not in kwargs:
                 kwargs["detect_types"] = sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
             
             self._conn = sqlite3.connect(self.db_path, **kwargs)
-            self._external_conn = False
 
         self._conn.row_factory = sqlite3.Row
         self._closed = False
