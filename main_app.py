@@ -1607,11 +1607,10 @@ class MainApp(ctk.CTk):
             from decimal import Decimal
             Decimal(val)  # Validation
             self._set_param("fond_caisse_matin", val)
-            # Mise à jour de la session courante en DB
+            # Mise à jour de la session active (non clôturée), sans toucher à l'historique
+            from kodo_core.services.cash_session_service import set_fond_caisse_matin
             conn = get_connection(); c = conn.cursor()
-            c.execute("UPDATE Sessions_Caisse SET fond_caisse_matin=? WHERE id=(SELECT MAX(id) FROM Sessions_Caisse)", (val,))
-            if c.rowcount == 0:
-                c.execute("INSERT INTO Sessions_Caisse (fond_caisse_matin) VALUES (?)", (val,))
+            set_fond_caisse_matin(c, val)
             conn.commit()
             self._st(f"Fond de caisse enregistré : {val} €", GRN)
         except Exception:
