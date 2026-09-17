@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.50",
-  "latest_version": "1.0.50",
-  "version": "1.0.50",
+  "latestVersion": "1.0.51",
+  "latest_version": "1.0.51",
+  "version": "1.0.51",
   "releaseDate": "2026-09-17",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.50.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.50.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.50.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.51.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.51.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.51.zip",
   "has_update": true,
-  "changelog": "v1.0.50 : Support et détection automatique des imprimantes thermiques USB (CUPS Printer_POS_80 sans délai IP), normalisation des routes API (slash trailing), endpoints de statut matériel et commande d'ouverture tiroir-caisse."
+  "changelog": "v1.0.51 : Correction de la suppression du logo sur ticket (nettoyage CWD & protection bundle), support de la personnalisation du bloc réseaux sociaux (routes /api/settings/social et fallback instagram_block), et résolution robuste des ressources d'impression."
 }
