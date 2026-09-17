@@ -225,6 +225,57 @@ class TestKodoCore(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertFalse(os.path.exists(custom_logo))
 
+        # 7. Test générateur QR Code agrandi (mode="qr")
+        from kodo_core.hardware.printer import generate_social_qr_image
+        qr_img = generate_social_qr_image(
+            title="SUIVEZ-NOUS SUR INSTAGRAM !",
+            url="https://instagram.com/kodo_pos",
+            subtitle="@kodo_pos",
+            width=512,
+            qr_size="large"
+        )
+        self.assertEqual(qr_img.width, 512)
+        self.assertGreater(qr_img.height, 250)
+
+        # 8. Test API POST mode="qr"
+        code, resp, _ = app.handle_request("POST", "/api/settings/social", {}, {}, {
+            "mode": "qr",
+            "title": "AVIS GOOGLE ⭐",
+            "url": "https://g.page/r/test",
+            "subtitle": "Scannez pour 5 étoiles",
+            "qr_size": "large"
+        })
+        self.assertEqual(code, 200)
+        self.assertTrue(resp.get("success"))
+        self.assertEqual(resp.get("width"), 512)
+        self.assertEqual(resp.get("mode"), "qr")
+
+        code, resp, _ = app.handle_request("GET", "/api/settings/social", {}, {}, {})
+        self.assertEqual(code, 200)
+        self.assertTrue(resp.get("has_social"))
+        self.assertEqual(resp.get("mode"), "qr")
+        self.assertEqual(resp.get("title"), "AVIS GOOGLE ⭐")
+
+        qr_path = get_ticket_social_path()
+        self.assertIsNotNone(qr_path)
+        self.assertTrue(os.path.exists(qr_path))
+
+        # 9. Test désactivation (mode="none")
+        code, resp, _ = app.handle_request("POST", "/api/settings/social", {}, {}, {"mode": "none"})
+        self.assertEqual(code, 200)
+        self.assertEqual(resp.get("mode"), "none")
+
+        code, resp, _ = app.handle_request("GET", "/api/settings/social", {}, {}, {})
+        self.assertEqual(code, 200)
+        self.assertFalse(resp.get("has_social"))
+        self.assertEqual(resp.get("mode"), "none")
+
+        none_path = get_ticket_social_path()
+        self.assertIsNone(none_path)
+
+        # Nettoyage
+        app.handle_request("DELETE", "/api/settings/social", {}, {}, {})
+
 
 if __name__ == "__main__":
     unittest.main()

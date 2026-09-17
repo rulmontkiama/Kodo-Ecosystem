@@ -462,92 +462,180 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             return 500, {"success": False, "error": str(e)}
 
     # 18. Personnalisation du Ticket : Upload du bloc Réseaux Sociaux
+    # 18. Personnalisation du Ticket : Upload ou Génération du bloc Réseaux Sociaux / QR Code
     elif method == "POST" and path == "/api/settings/social":
         try:
+            import os
             import base64
             from io import BytesIO
             from PIL import Image
+            from kodo_core.hardware.printer import generate_social_qr_image
 
-            social_b64 = data.get("social") or data.get("social_base64")
-            if not social_b64:
-                return 400, {"success": False, "error": "Données d'image manquantes (social_base64 requis)"}
+            mode = data.get("mode")
 
-            if "," in social_b64:
-                social_b64 = social_b64.split(",", 1)[1]
+            # Cas 1 : Désactivation explicite du bloc en bas de ticket
+            if mode == "none":
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_mode', 'none')")
+                cursor.execute("DELETE FROM Parametres WHERE cle IN ('receipt_social_custom', 'receipt_social_b64')")
+                conn.commit()
+                conn.close()
 
-            image_data = base64.b64decode(social_b64)
-            img = Image.open(BytesIO(image_data))
-
-            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                bg = Image.new("RGB", img.size, (255, 255, 255))
-                if img.mode == 'RGBA':
-                    bg.paste(img, mask=img.split()[-1])
-                else:
-                    bg.paste(img)
-                img = bg
-
-            max_width = 384
-            if img.width > max_width:
-                ratio = max_width / float(img.width)
-                new_height = int(float(img.height) * ratio)
-                img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
-
-            import os
-            target_path = database_manager.data_path("social_ticket.png")
-            try:
-                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                img.save(target_path, format="PNG")
-            except Exception as e:
-                print(f"[WARN] Sauvegarde social data_path: {e}")
-
-            for alt_dir in [
-                os.path.expanduser("~/Documents/Kodo_POS"),
-                os.path.expanduser("~/Library/Application Support/Kodo_POS"),
-                os.path.abspath(".")
-            ]:
+                target_p = database_manager.data_path("social_ticket.png")
                 try:
-                    os.makedirs(alt_dir, exist_ok=True)
-                    img.save(os.path.join(alt_dir, "social_ticket.png"), format="PNG")
+                    if os.path.exists(target_p):
+                        os.remove(target_p)
                 except Exception:
                     pass
 
-            buffer = BytesIO()
-            img.save(buffer, format="PNG")
-            stored_b64 = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+                return 200, {
+                    "success": True,
+                    "message": "Bloc en bas de ticket désactivé avec succès.",
+                    "mode": "none",
+                    "has_social": False
+                }
 
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_custom', '1')")
-            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_b64', ?)", (stored_b64,))
-            conn.commit()
-            conn.close()
+            # Cas 2 : Générateur QR Code dynamique et personnalisable (Réseaux / Web / Avis / etc.)
+            elif mode == "qr" or ("url" in data or "title" in data):
+                title = (data.get("title") or "REJOIGNEZ-NOUS !").strip()
+                url = (data.get("url") or data.get("qr_data") or "https://instagram.com").strip()
+                subtitle = (data.get("subtitle") or "").strip()
+                qr_size = data.get("qr_size") or "large"
 
-            return 200, {
-                "success": True,
-                "message": "Bloc réseaux sociaux enregistré avec succès !",
-                "width": img.width,
-                "height": img.height,
-                "social_url": stored_b64
-            }
+                img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, width=512, qr_size=qr_size)
+
+                buffer = BytesIO()
+                img.save(buffer, format="PNG")
+                stored_b64 = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+                target_path = database_manager.data_path("social_ticket.png")
+                try:
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    img.save(target_path, format="PNG")
+                except Exception as e:
+                    print(f"[WARN] Sauvegarde social data_path: {e}")
+
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_mode', 'qr')")
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_title', ?)", (title,))
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_url', ?)", (url,))
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_subtitle', ?)", (subtitle,))
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_size', ?)", (qr_size,))
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_custom', '1')")
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_b64', ?)", (stored_b64,))
+                conn.commit()
+                conn.close()
+
+                return 200, {
+                    "success": True,
+                    "message": "Bloc QR Code généré et enregistré avec succès !",
+                    "width": img.width,
+                    "height": img.height,
+                    "social_url": stored_b64,
+                    "mode": "qr",
+                    "title": title,
+                    "url": url,
+                    "subtitle": subtitle,
+                    "qr_size": qr_size
+                }
+
+            # Cas 3 : Image personnalisée uploadée directement en base64
+            else:
+                social_b64 = data.get("social") or data.get("social_base64")
+                if not social_b64:
+                    return 400, {"success": False, "error": "Données manquantes (mode 'qr' avec url/titre ou image en base64 requise)"}
+
+                if "," in social_b64:
+                    social_b64 = social_b64.split(",", 1)[1]
+
+                image_data = base64.b64decode(social_b64)
+                img = Image.open(BytesIO(image_data))
+
+                if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                    bg = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == 'RGBA':
+                        bg.paste(img, mask=img.split()[-1])
+                    else:
+                        bg.paste(img)
+                    img = bg
+
+                max_width = 512
+                if img.width > max_width:
+                    ratio = max_width / float(img.width)
+                    new_height = int(float(img.height) * ratio)
+                    img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+
+                target_path = database_manager.data_path("social_ticket.png")
+                try:
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    img.save(target_path, format="PNG")
+                except Exception as e:
+                    print(f"[WARN] Sauvegarde social data_path: {e}")
+
+                buffer = BytesIO()
+                img.save(buffer, format="PNG")
+                stored_b64 = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_mode', 'custom_image')")
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_custom', '1')")
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_b64', ?)", (stored_b64,))
+                conn.commit()
+                conn.close()
+
+                return 200, {
+                    "success": True,
+                    "message": "Visuel personnalisé enregistré avec succès !",
+                    "width": img.width,
+                    "height": img.height,
+                    "social_url": stored_b64,
+                    "mode": "custom_image"
+                }
         except Exception as e:
             return 500, {"success": False, "error": f"Erreur lors du traitement du bloc réseaux sociaux : {str(e)}"}
 
-    # 18b. Obtenir le statut et l'URL du bloc réseaux sociaux actuel
+    # 18b. Obtenir le statut et la configuration du bloc réseaux sociaux / QR Code
     elif method == "GET" and path == "/api/settings/social":
         try:
             import os
             import base64
 
-            try:
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_social_b64'")
-                row = cursor.fetchone()
-                conn.close()
-                if row and row[0] and len(row[0]) > 50:
-                    return 200, {"has_social": True, "social_url": row[0]}
-            except Exception:
-                pass
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'receipt_social_%'")
+            params = dict(cursor.fetchall())
+            conn.close()
+
+            mode = params.get("receipt_social_mode")
+            title = params.get("receipt_social_title", "SUIVEZ-NOUS SUR NOS RÉSEAUX !")
+            url = params.get("receipt_social_url", "https://instagram.com")
+            subtitle = params.get("receipt_social_subtitle", "")
+            qr_size = params.get("receipt_social_size", "large")
+            stored_b64 = params.get("receipt_social_b64")
+
+            if mode == "none":
+                return 200, {
+                    "has_social": False,
+                    "mode": "none",
+                    "title": title,
+                    "url": url,
+                    "subtitle": subtitle,
+                    "qr_size": qr_size
+                }
+
+            if stored_b64 and len(stored_b64) > 50:
+                return 200, {
+                    "has_social": True,
+                    "mode": mode or "custom_image",
+                    "social_url": stored_b64,
+                    "title": title,
+                    "url": url,
+                    "subtitle": subtitle,
+                    "qr_size": qr_size
+                }
 
             candidate_paths = [
                 database_manager.data_path("social_ticket.png"),
@@ -559,20 +647,43 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 if os.path.exists(target_path) and os.path.getsize(target_path) > 100:
                     with open(target_path, "rb") as f:
                         b64 = base64.b64encode(f.read()).decode("utf-8")
-                    return 200, {"has_social": True, "social_url": f"data:image/png;base64,{b64}"}
+                    return 200, {
+                        "has_social": True,
+                        "mode": mode or "custom_image",
+                        "social_url": f"data:image/png;base64,{b64}",
+                        "title": title,
+                        "url": url,
+                        "subtitle": subtitle,
+                        "qr_size": qr_size
+                    }
 
-            return 200, {"has_social": False}
+            from kodo_core.hardware.printer import get_resource_path
+            default_p = get_resource_path("instagram_block.png")
+            if os.path.exists(default_p) and os.path.getsize(default_p) > 100:
+                with open(default_p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                return 200, {
+                    "has_social": False,
+                    "mode": "default",
+                    "social_url": f"data:image/png;base64,{b64}",
+                    "title": "SUIVEZ-NOUS SUR NOS RÉSEAUX !",
+                    "url": "https://instagram.com",
+                    "subtitle": "",
+                    "qr_size": "large"
+                }
+
+            return 200, {"has_social": False, "mode": "none"}
         except Exception as e:
             return 500, {"has_social": False, "error": str(e)}
 
-    # 18c. Supprimer le bloc réseaux sociaux personnalisé (retour au bloc par défaut)
+    # 18c. Supprimer le bloc personnalisé (retour au bloc par défaut)
     elif method == "DELETE" and path == "/api/settings/social":
         try:
             import os
             try:
                 conn = get_connection()
                 cursor = conn.cursor()
-                cursor.execute("DELETE FROM Parametres WHERE cle IN ('receipt_social_custom', 'receipt_social_b64')")
+                cursor.execute("DELETE FROM Parametres WHERE cle LIKE 'receipt_social_%'")
                 conn.commit()
                 conn.close()
             except Exception:
@@ -595,7 +706,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 except Exception:
                     pass
 
-            return 200, {"success": True, "message": "Bloc réseaux sociaux supprimé avec succès"}
+            return 200, {"success": True, "message": "Bloc de communication réinitialisé au bloc par défaut"}
         except Exception as e:
             return 500, {"success": False, "error": str(e)}
 

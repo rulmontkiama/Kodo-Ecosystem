@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.51",
-  "latest_version": "1.0.51",
-  "version": "1.0.51",
+  "latestVersion": "1.0.52",
+  "latest_version": "1.0.52",
+  "version": "1.0.52",
   "releaseDate": "2026-09-17",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.51.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.51.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.51.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.52.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.52.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.52.zip",
   "has_update": true,
-  "changelog": "v1.0.51 : Correction de la suppression du logo sur ticket (nettoyage CWD & protection bundle), support de la personnalisation du bloc réseaux sociaux (routes /api/settings/social et fallback instagram_block), et résolution robuste des ressources d'impression."
+  "changelog": "v1.0.52 : Personnalisation complète du pied de ticket avec générateur QR Code grand format (80mm / 512 dots), modèles prédéfinis (Instagram, Avis Google, TikTok, E-shop, Wi-Fi), textes d'accroche/liens configurables et aperçu en direct."
 }

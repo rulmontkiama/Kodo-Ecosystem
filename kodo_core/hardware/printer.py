@@ -609,22 +609,141 @@ def get_ticket_logo_path():
     return None
 
 
+def generate_social_qr_image(title=None, url=None, subtitle=None, width=512, qr_size="large"):
+    """
+    Génère un bloc visuel de communication avec QR Code haute résolution
+    pour le pied de ticket thermique (80mm / 512 dots).
+    Optimisé pour être grand, ultra-net et facilement scannable par tout smartphone.
+    """
+    import qrcode
+    from PIL import Image, ImageDraw, ImageFont
+
+    url_str = (url or "https://kodo-pos.com").strip()
+
+    # Taille du QR Code (ajustée pour ticket thermique 80mm)
+    if qr_size == "extra_large":
+        box_size = 9
+    elif qr_size == "normal":
+        box_size = 6
+    else:  # "large" par défaut (environ 240px de largeur)
+        box_size = 8
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=box_size,
+        border=2,
+    )
+    qr.add_data(url_str)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    qr_w, qr_h = qr_img.size
+
+    # Polices de caractères optimisées pour l'impression thermique
+    font_title = None
+    font_sub = None
+    possible_bold_fonts = [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+        "C:\\Windows\\Fonts\\arialbd.ttf",
+        "C:\\Windows\\Fonts\\courbd.ttf",
+    ]
+    for p in possible_bold_fonts:
+        if os.path.exists(p):
+            try:
+                font_title = ImageFont.truetype(p, 24)
+                font_sub = ImageFont.truetype(p, 19)
+                break
+            except Exception:
+                pass
+    if not font_title:
+        font_title = ImageFont.load_default()
+        font_sub = ImageFont.load_default()
+
+    pad_top = 18
+    pad_bottom = 18
+    spacing = 14
+
+    title_text = (title or "").strip()
+    sub_text = (subtitle or "").strip()
+
+    dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1), "white"))
+    title_h = 0
+    if title_text:
+        bbox = dummy_draw.textbbox((0, 0), title_text, font=font_title)
+        title_h = (bbox[3] - bbox[1]) + spacing
+
+    sub_h = 0
+    if sub_text:
+        bbox_s = dummy_draw.textbbox((0, 0), sub_text, font=font_sub)
+        sub_h = (bbox_s[3] - bbox_s[1]) + spacing
+
+    total_h = pad_top + title_h + qr_h + sub_h + pad_bottom
+    img = Image.new("RGB", (width, total_h), "white")
+    draw = ImageDraw.Draw(img)
+
+    y = pad_top
+    if title_text:
+        bbox = draw.textbbox((0, 0), title_text, font=font_title)
+        tw = bbox[2] - bbox[0]
+        tx = max(10, (width - tw) // 2)
+        draw.text((tx, y), title_text, fill="black", font=font_title)
+        y += (bbox[3] - bbox[1]) + spacing
+
+    # QR code centré
+    qx = max(0, (width - qr_w) // 2)
+    img.paste(qr_img, (qx, y))
+    y += qr_h + spacing
+
+    # Sous-titre / Handle centré
+    if sub_text:
+        bbox_s = draw.textbbox((0, 0), sub_text, font=font_sub)
+        sw = bbox_s[2] - bbox_s[0]
+        sx = max(10, (width - sw) // 2)
+        draw.text((sx, y), sub_text, fill="black", font=font_sub)
+
+    return img
+
+
 def get_ticket_social_path():
     """
-    Retourne le chemin d'accès au bloc réseaux sociaux du ticket de caisse.
-    Cherche en priorité le bloc personnalisé configuré par l'utilisateur,
+    Retourne le chemin d'accès au bloc réseaux sociaux / communication du ticket de caisse.
+    Cherche en priorité le bloc personnalisé configuré par l'utilisateur (QR Code ou image personnalisée),
     puis se replie sur le bloc Instagram par défaut de l'application.
+    Si le bloc est explicitement désactivé ('none'), retourne None.
     Si le bloc n'existe pas sur disque mais est présent en base SQLite (Parametres), le régénère.
     """
     try:
         import database_manager
         conn = database_manager.get_connection()
         c = conn.cursor()
-        c.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_social_b64'")
-        row = c.fetchone()
+        c.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'receipt_social_%'")
+        params = dict(c.fetchall())
         conn.close()
-        if row and row[0]:
-            raw_b64 = row[0]
+
+        mode = params.get("receipt_social_mode")
+        if mode == "none":
+            return None
+
+        raw_b64 = params.get("receipt_social_b64")
+
+        # Régénération automatique si mode QR sans image stockée
+        if not raw_b64 and mode == "qr":
+            title = params.get("receipt_social_title", "")
+            url = params.get("receipt_social_url", "https://instagram.com")
+            subtitle = params.get("receipt_social_subtitle", "")
+            qr_size = params.get("receipt_social_size", "large")
+            img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, width=512, qr_size=qr_size)
+            from io import BytesIO
+            import base64
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            raw_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        if raw_b64:
             if "," in raw_b64:
                 raw_b64 = raw_b64.split(",", 1)[1]
             import base64
@@ -748,9 +867,10 @@ def generer_image_ticket(contenu, numero):
     return nom_fichier_img
 
 
-def pil_to_escpos_raster(image, max_width=384):
+def pil_to_escpos_raster(image, max_width=512):
     """
     Convertit une image PIL en bytes d'impression ESC/POS (Commande GS v 0).
+    Ajusté à max_width=512 pour une largeur d'impression 80mm complète, nette et agrandie.
     """
     from PIL import Image
     if image.width > max_width:
