@@ -349,6 +349,27 @@ class InventoryManager:
             if should_close and conn:
                 conn.close()
 
+    @classmethod
+    def bulk_update_alert_threshold(cls, product_ids: List[int], threshold: Optional[int], conn=None) -> bool:
+        """Met à jour en masse le seuil d'alerte pour plusieurs produits (None pour rétablir le seuil global)."""
+        if not product_ids:
+            return True
+        should_close = False
+        if conn is None:
+            conn = get_connection()
+            should_close = True
+        try:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(product_ids))
+            params = [threshold] + list(product_ids)
+            cursor.execute(f"UPDATE Produits SET seuil_alerte=? WHERE id IN ({placeholders})", params)
+            cursor.execute(f"UPDATE Stocks SET seuil_alerte=? WHERE id_produit IN ({placeholders})", params)
+            conn.commit()
+            return True
+        finally:
+            if should_close and conn:
+                conn.close()
+
     # Catégories et Marques
 
     @classmethod

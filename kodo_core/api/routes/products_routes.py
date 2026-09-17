@@ -36,6 +36,29 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
         InventoryManager.delete_product(int(prod_ids[0]))
         return 200, {"success": True}
 
+    # 3b. Mise à jour en masse des seuils d'alerte
+    elif method == "POST" and path == "/api/products/bulk-alert":
+        raw_ids = data.get("product_ids") or data.get("ids") or []
+        pids = []
+        for rid in raw_ids:
+            try:
+                pids.append(int(rid))
+            except (ValueError, TypeError):
+                pass
+
+        raw_thresh = data.get("alertStock") if data.get("alertStock") is not None else (
+            data.get("alert_stock") if data.get("alert_stock") is not None else data.get("alert_threshold")
+        )
+        if isinstance(raw_thresh, str) and not raw_thresh.strip():
+            raw_thresh = None
+        try:
+            thresh = int(raw_thresh) if raw_thresh is not None else None
+        except (ValueError, TypeError):
+            thresh = None
+
+        InventoryManager.bulk_update_alert_threshold(pids, thresh)
+        return 200, {"success": True, "updated": len(pids)}
+
     # 4. Liste des catégories
     elif method == "GET" and path == "/api/categories":
         cats = InventoryManager.get_categories()

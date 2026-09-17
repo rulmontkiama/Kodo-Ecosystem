@@ -181,6 +181,57 @@ class TestKodoCoreDomainAndAPI(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(res_del.get("success"))
 
+    def test_api_default_alert_threshold_and_bulk_update(self):
+        """Vérifie la persistance du seuil global via /api/settings et la modification en masse via /api/products/bulk-alert."""
+        # 1. Vérifier GET /api/settings retourne defaultAlertThreshold
+        status, settings, _ = kodo_app.handle_request("GET", "/api/settings", {}, {}, {})
+        self.assertEqual(status, 200)
+        self.assertIn("defaultAlertThreshold", settings)
+        self.assertEqual(settings["defaultAlertThreshold"], 5)
+
+        # 2. Mettre à jour le seuil global via POST /api/settings
+        status, res_set, _ = kodo_app.handle_request("POST", "/api/settings", {}, {}, {"defaultAlertThreshold": 8})
+        self.assertEqual(status, 200)
+        self.assertTrue(res_set.get("success"))
+
+        # Vérifier que le GET renvoie bien 8
+        status, settings2, _ = kodo_app.handle_request("GET", "/api/settings", {}, {}, {})
+        self.assertEqual(settings2["defaultAlertThreshold"], 8)
+
+        # 3. Créer 2 produits
+        p1 = InventoryManager.save_product({"name": "Produit A", "category": "Test", "price": 10.0, "stock": 5})
+        p2 = InventoryManager.save_product({"name": "Produit B", "category": "Test", "price": 20.0, "stock": 10})
+        pid1 = p1["product_id"]
+        pid2 = p2["product_id"]
+
+        # Les 2 produits doivent hériter du seuil global 8
+        prod_a = InventoryManager.get_product_by_id(int(pid1))
+        self.assertEqual(prod_a["alertStock"], 8)
+        self.assertFalse(prod_a["has_custom_alert_threshold"])
+
+        # 4. Appliquer un seuil personnalisé en masse via /api/products/bulk-alert
+        status, res_bulk, _ = kodo_app.handle_request(
+            "POST", "/api/products/bulk-alert", {}, {},
+            {"product_ids": [pid1, pid2], "alertStock": 3}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(res_bulk.get("updated"), 2)
+
+        # Les 2 produits ont maintenant un seuil custom de 3
+        prod_a2 = InventoryManager.get_product_by_id(int(pid1))
+        self.assertEqual(prod_a2["alertStock"], 3)
+        self.assertTrue(prod_a2["has_custom_alert_threshold"])
+
+        # 5. Réinitialiser au seuil global via /api/products/bulk-alert avec None/vide
+        status, res_reset, _ = kodo_app.handle_request(
+            "POST", "/api/products/bulk-alert", {}, {},
+            {"product_ids": [pid1], "alertStock": None}
+        )
+        self.assertEqual(status, 200)
+        prod_a3 = InventoryManager.get_product_by_id(int(pid1))
+        self.assertEqual(prod_a3["alertStock"], 8)  # De retour au seuil global
+        self.assertFalse(prod_a3["has_custom_alert_threshold"])
+
 
 if __name__ == "__main__":
     unittest.main()

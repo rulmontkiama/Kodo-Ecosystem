@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.62",
-  "latest_version": "1.0.62",
-  "version": "1.0.62",
+  "latestVersion": "1.0.63",
+  "latest_version": "1.0.63",
+  "version": "1.0.63",
   "releaseDate": "2026-09-17",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.62.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.62.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.62.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.63.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.63.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.63.zip",
   "has_update": true,
-  "changelog": "v1.0.62 : Ajout d'un seuil d'alerte de stock global par défaut (Paramètres > Boutique), avec possibilité de le personnaliser par article."
+  "changelog": "v1.0.63 : Interface complète de gestion du seuil d'alerte : réglage global par défaut dans Paramètres, action en masse sur la sélection dans Stocks, et personnalisation individuelle par produit."
 }

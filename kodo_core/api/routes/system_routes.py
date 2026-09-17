@@ -188,6 +188,10 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         except Exception:
             fond_caisse = float(params.get("fond_caisse_matin", 200.0))
         conn.close()
+        try:
+            default_alert = int(params.get("default_seuil_alerte", 5))
+        except (ValueError, TypeError):
+            default_alert = 5
 
         return 200, {
             "storeName": params.get("shop_name", "KŌDO POS"),
@@ -201,7 +205,9 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "shopifyToken": params.get("shopify_access_token", ""),
             "shopifyConnected": bool(params.get("shopify_store_url") and params.get("shopify_access_token")),
             "autoSyncStock": params.get("shopify_auto_sync", "1") == "1",
-            "syncOrders": params.get("shopify_sync_orders", "1") == "1"
+            "syncOrders": params.get("shopify_sync_orders", "1") == "1",
+            "defaultAlertThreshold": default_alert,
+            "default_seuil_alerte": default_alert
         }
 
     # 13. Enregistrer les paramètres de l'établissement et de synchronisation
@@ -246,6 +252,14 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_auto_sync', ?)", ("1" if auto_sync else "0",))
         if sync_orders is not None:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_sync_orders', ?)", ("1" if sync_orders else "0",))
+
+        default_alert_raw = data.get("defaultAlertThreshold") if data.get("defaultAlertThreshold") is not None else data.get("default_seuil_alerte")
+        if default_alert_raw is not None:
+            try:
+                alert_int = max(0, int(default_alert_raw))
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('default_seuil_alerte', ?)", (str(alert_int),))
+            except (ValueError, TypeError):
+                pass
 
         conn.commit()
         conn.close()
