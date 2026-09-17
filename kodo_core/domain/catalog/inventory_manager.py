@@ -56,7 +56,8 @@ class InventoryManager:
                 SELECT p.id, p.code_barre, p.nom, p.categorie, p.prix_achat_htva, 
                        p.prix_vente_tvac, p.taux_tva, p.image_path, p.en_solde, 
                        p.prix_solde_tvac, p.type_vente, p.unite_mesure, p.marque, p.attributs_json,
-                       COALESCE(SUM(s.quantite_actuelle), 0) as stock_total
+                       COALESCE(SUM(s.quantite_actuelle), 0) as stock_total,
+                       COALESCE(p.seuil_alerte, 5) as seuil_alerte
                 FROM Produits p
                 LEFT JOIN Stocks s ON p.id = s.id_produit
                 WHERE 1=1
@@ -96,7 +97,7 @@ class InventoryManager:
                         "stock_id": s[0],
                         "size": s[1] or "Taille Unique",
                         "quantity": int(s[2]),
-                        "alert_threshold": int(s[3])
+                        "alert_threshold": int(s[3]) if s[3] is not None else 5
                     }
                     for s in stock_rows
                 ]
@@ -105,6 +106,18 @@ class InventoryManager:
 
                 px_tvac = float(r[5]) if r[5] is not None else 0.0
                 px_solde = float(r[9]) if r[9] is not None else None
+
+                alert_val = 5
+                if len(r) > 15 and r[15] is not None:
+                    try:
+                        alert_val = int(r[15])
+                    except (ValueError, TypeError):
+                        alert_val = 5
+                elif stocks_detail and stocks_detail[0].get("alert_threshold") is not None:
+                    try:
+                        alert_val = int(stocks_detail[0]["alert_threshold"])
+                    except (ValueError, TypeError):
+                        alert_val = 5
 
                 products.append({
                     "id": str(r[0]),
@@ -126,7 +139,11 @@ class InventoryManager:
                     "attributes_json": r[13] or "",
                     "sizes": sizes_str,
                     "stock": int(r[14]),
-                    "stocks": stocks_detail
+                    "stocks": stocks_detail,
+                    "alertStock": alert_val,
+                    "alert_stock": alert_val,
+                    "alert_threshold": alert_val,
+                    "seuil_alerte": alert_val
                 })
 
             return products
@@ -176,6 +193,16 @@ class InventoryManager:
             is_sale = 1 if data.get("en_solde") else 0
             prix_solde = Decimal(str(data.get("prix_solde_tvac"))) if data.get("prix_solde_tvac") is not None else None
 
+            raw_alert = data.get("alertStock") if data.get("alertStock") is not None else (
+                data.get("alert_stock") if data.get("alert_stock") is not None else (
+                    data.get("alert_threshold") if data.get("alert_threshold") is not None else data.get("seuil_alerte")
+                )
+            )
+            try:
+                alert_threshold = int(raw_alert) if raw_alert is not None else 5
+            except (ValueError, TypeError):
+                alert_threshold = 5
+
             if not name:
                 raise ValueError("Le nom du produit est obligatoire")
 
@@ -205,15 +232,15 @@ class InventoryManager:
                 cursor.execute("""
                     UPDATE Produits
                     SET code_barre=?, nom=?, categorie=?, prix_achat_htva=?, 
-                        prix_vente_tvac=?, taux_tva=?, en_solde=?, prix_solde_tvac=?, marque=?
+                        prix_vente_tvac=?, taux_tva=?, en_solde=?, prix_solde_tvac=?, marque=?, seuil_alerte=?
                     WHERE id=?
-                """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, existing_id))
+                """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, alert_threshold, existing_id))
                 prod_id = existing_id
             else:
                 cursor.execute("""
-                    INSERT INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, taux_tva, en_solde, prix_solde_tvac, marque)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand))
+                    INSERT INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, taux_tva, en_solde, prix_solde_tvac, marque, seuil_alerte)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (barcode, name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, alert_threshold))
                 prod_id = cursor.lastrowid
 
             if sizes_str:
@@ -234,9 +261,9 @@ class InventoryManager:
                     cursor.execute("SELECT id FROM Stocks WHERE id_produit=? AND taille=?", (prod_id, sz))
                     s_row = cursor.fetchone()
                     if s_row:
-                        cursor.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, s_row[0]))
+                        cursor.execute("UPDATE Stocks SET quantite_actuelle=?, seuil_alerte=? WHERE id=?", (qty, alert_threshold, s_row[0]))
                     else:
-                        cursor.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, 2)", (prod_id, sz, qty))
+                        cursor.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, ?)", (prod_id, sz, qty, alert_threshold))
 
                 cursor.execute("SELECT id, taille FROM Stocks WHERE id_produit=?", (prod_id,))
                 for sid, t in cursor.fetchall():
@@ -246,9 +273,9 @@ class InventoryManager:
                 cursor.execute("SELECT id FROM Stocks WHERE id_produit=? AND (taille='Taille Unique' OR taille IS NULL OR taille='')", (prod_id,))
                 s_row = cursor.fetchone()
                 if s_row:
-                    cursor.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (stock_default, s_row[0]))
+                    cursor.execute("UPDATE Stocks SET quantite_actuelle=?, seuil_alerte=? WHERE id=?", (stock_default, alert_threshold, s_row[0]))
                 else:
-                    cursor.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, 'Taille Unique', ?, 2)", (prod_id, stock_default))
+                    cursor.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, 'Taille Unique', ?, ?)", (prod_id, stock_default, alert_threshold))
 
             conn.commit()
             return {"success": True, "product_id": str(prod_id)}

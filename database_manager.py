@@ -219,7 +219,8 @@ def _initialiser_db_raw(conn):
             unite_mesure TEXT DEFAULT 'pce',
             marque TEXT DEFAULT NULL,
             attributs_json TEXT DEFAULT NULL,
-            sync_status INTEGER DEFAULT 0
+            sync_status INTEGER DEFAULT 0,
+            seuil_alerte INTEGER DEFAULT 5
         )
     ''')
 
@@ -249,6 +250,9 @@ def _initialiser_db_raw(conn):
         except: pass
     if 'sync_status' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN sync_status INTEGER DEFAULT 0")
+        except: pass
+    if 'seuil_alerte' not in cols_produits:
+        try: cursor.execute("ALTER TABLE Produits ADD COLUMN seuil_alerte INTEGER DEFAULT 5")
         except: pass
 
     # Insertion automatique dans Categories & Marques

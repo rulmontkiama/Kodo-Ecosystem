@@ -49,7 +49,8 @@ class MigrationManager:
                     unite_mesure TEXT DEFAULT 'pce',
                     marque TEXT DEFAULT NULL,
                     attributs_json TEXT DEFAULT NULL,
-                    sync_status INTEGER DEFAULT 0
+                    sync_status INTEGER DEFAULT 0,
+                    seuil_alerte INTEGER DEFAULT 5
                 )""",
                 """CREATE TABLE IF NOT EXISTS Stocks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -476,7 +477,8 @@ def initialiser_db(db_path: str = None, conn=None):
                 unite_mesure TEXT DEFAULT 'pce',
                 marque TEXT DEFAULT NULL,
                 attributs_json TEXT DEFAULT NULL,
-                sync_status INTEGER DEFAULT 0
+                sync_status INTEGER DEFAULT 0,
+                seuil_alerte INTEGER DEFAULT 5
             )
         ''')
 
@@ -762,7 +764,8 @@ def initialiser_db(db_path: str = None, conn=None):
             ('unite_mesure', "TEXT DEFAULT 'pce'"),
             ('marque', "TEXT DEFAULT NULL"),
             ('attributs_json', "TEXT DEFAULT NULL"),
-            ('sync_status', "INTEGER DEFAULT 0")
+            ('sync_status', "INTEGER DEFAULT 0"),
+            ('seuil_alerte', "INTEGER DEFAULT 5")
         ]:
             if col_def[0] not in cols_produits:
                 try: cursor.execute(f"ALTER TABLE Produits ADD COLUMN {col_def[0]} {col_def[1]}")
