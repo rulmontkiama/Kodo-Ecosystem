@@ -463,7 +463,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
     # 18. Personnalisation du Ticket : Upload du bloc Réseaux Sociaux
     # 18. Personnalisation du Ticket : Upload ou Génération du bloc Réseaux Sociaux / QR Code
-    elif method == "POST" and path == "/api/settings/social":
+    elif method == "POST" and path in ("/api/settings/social", "/settings/social"):
         try:
             import os
             import base64
@@ -598,7 +598,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             return 500, {"success": False, "error": f"Erreur lors du traitement du bloc réseaux sociaux : {str(e)}"}
 
     # 18b. Obtenir le statut et la configuration du bloc réseaux sociaux / QR Code
-    elif method == "GET" and path == "/api/settings/social":
+    elif method == "GET" and path in ("/api/settings/social", "/settings/social"):
         try:
             import os
             import base64
@@ -677,7 +677,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             return 500, {"has_social": False, "error": str(e)}
 
     # 18c. Supprimer le bloc personnalisé (retour au bloc par défaut)
-    elif method == "DELETE" and path == "/api/settings/social":
+    elif method == "DELETE" and path in ("/api/settings/social", "/settings/social"):
         try:
             import os
             try:

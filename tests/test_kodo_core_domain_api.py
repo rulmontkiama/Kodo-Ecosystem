@@ -102,6 +102,34 @@ class TestKodoCoreDomainAndAPI(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsInstance(prods, list)
 
+        # Settings Social POST (avec /api)
+        status, res_post, _ = kodo_app.handle_request(
+            "POST", "/api/settings/social", {}, {},
+            {"mode": "qr", "title": "Instagram", "url": "https://instagram.com/test", "qr_size": "large"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(res_post.get("success"))
+
+        # Settings Social GET (sans /api)
+        status, res_get, _ = kodo_app.handle_request("GET", "/settings/social", {}, {}, {})
+        self.assertEqual(status, 200)
+        self.assertTrue(res_get.get("has_social"))
+        self.assertEqual(res_get.get("title"), "Instagram")
+
+        # Settings Social POST (sans /api)
+        status, res_post2, _ = kodo_app.handle_request(
+            "POST", "/settings/social", {}, {},
+            {"mode": "none"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(res_post2.get("success"))
+        self.assertEqual(res_post2.get("mode"), "none")
+
+        # Settings Social DELETE (avec /api)
+        status, res_del, _ = kodo_app.handle_request("DELETE", "/api/settings/social", {}, {}, {})
+        self.assertEqual(status, 200)
+        self.assertTrue(res_del.get("success"))
+
 
 if __name__ == "__main__":
     unittest.main()
