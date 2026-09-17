@@ -893,7 +893,12 @@ class MainApp(ctk.CTk):
             c.execute("SELECT SUM(quantite_actuelle) FROM Stocks")
             total_pcs = c.fetchone()[0] or 0
             
-            c.execute("SELECT COUNT(DISTINCT id_produit) FROM Stocks WHERE quantite_actuelle <= seuil_alerte")
+            default_alert = int(self._get_param("default_seuil_alerte", "5"))
+            c.execute("""
+                SELECT COUNT(DISTINCT s.id_produit) FROM Stocks s
+                JOIN Produits p ON p.id = s.id_produit
+                WHERE s.quantite_actuelle <= COALESCE(s.seuil_alerte, p.seuil_alerte, ?)
+            """, (default_alert,))
             total_alertes = c.fetchone()[0] or 0
 
             if hasattr(self, 'kpi_ref'):
@@ -914,7 +919,12 @@ class MainApp(ctk.CTk):
 
             if hasattr(self, 'active_category'):
                 if self.active_category == "Alertes":
-                    conditions.append("id IN (SELECT id_produit FROM Stocks WHERE quantite_actuelle <= seuil_alerte)")
+                    conditions.append("""id IN (
+                        SELECT s.id_produit FROM Stocks s
+                        JOIN Produits p ON p.id = s.id_produit
+                        WHERE s.quantite_actuelle <= COALESCE(s.seuil_alerte, p.seuil_alerte, ?)
+                    )""")
+                    params.append(default_alert)
                 elif self.active_category != "Toutes":
                     conditions.append("categorie = ?")
                     params.append(self.active_category)
@@ -981,7 +991,13 @@ class MainApp(ctk.CTk):
             if page_products:
                 pids = [p[0] for p in page_products]
                 placeholders = ",".join("?" * len(pids))
-                c.execute(f"SELECT id_produit, taille, quantite_actuelle, seuil_alerte FROM Stocks WHERE id_produit IN ({placeholders})", pids)
+                c.execute(f"""
+                    SELECT s.id_produit, s.taille, s.quantite_actuelle,
+                           COALESCE(s.seuil_alerte, p.seuil_alerte, ?) as seuil_effectif
+                    FROM Stocks s
+                    JOIN Produits p ON p.id = s.id_produit
+                    WHERE s.id_produit IN ({placeholders})
+                """, [default_alert] + pids)
                 for id_p, t, q, s in c.fetchall():
                     if id_p not in stock_map:
                         stock_map[id_p] = []
@@ -1003,7 +1019,8 @@ class MainApp(ctk.CTk):
                 for pid, code, nom, cat, prix, img_path, en_solde, prix_solde in page_products:
                     variants = stock_map.get(pid, [])
                     total_stock = sum(qte for _, qte, _ in variants)
-                    
+                    seuil_effectif = variants[0][2] if variants else default_alert
+
                     var_texts = [f"{t}:{q}" for t, q, _ in variants if t != "Unique"]
                     var_desc = " | ".join(var_texts) if var_texts else "Unique"
                     
@@ -1029,8 +1046,8 @@ class MainApp(ctk.CTk):
                     ctk.CTkLabel(prix_container, text=f"{prix_val:.2f} €", font=ctk.CTkFont(FNT_BODY, 13, "bold"), text_color=ACCENT, anchor="e").pack(anchor="e")
 
                     q = int(total_stock)
-                    b_col = "#E8F5E9" if q > 5 else ("#FFF3E0" if q > 0 else "#FFE5E5")
-                    t_col = "#2E7D32" if q > 5 else ("#EF6C00" if q > 0 else RED)
+                    b_col = "#E8F5E9" if q > seuil_effectif else ("#FFF3E0" if q > 0 else "#FFE5E5")
+                    t_col = "#2E7D32" if q > seuil_effectif else ("#EF6C00" if q > 0 else RED)
                     stk_b = ctk.CTkFrame(row_frame, fg_color=b_col, corner_radius=14, width=80)
                     stk_b.pack(side="left", padx=10)
                     ctk.CTkLabel(stk_b, text=f"{q} dispo", font=ctk.CTkFont(FNT_BODY, 11, "bold"), text_color=t_col).pack(padx=8, pady=2)
@@ -1080,7 +1097,8 @@ class MainApp(ctk.CTk):
                 for i, (pid, code, nom, cat, prix, img_path, en_solde, prix_solde) in enumerate(page_products):
                     variants = stock_map.get(pid, [])
                     total_stock = sum(qte for _, qte, _ in variants)
-                    
+                    seuil_effectif = variants[0][2] if variants else default_alert
+
                     variante_texts = [f"{t}:{q}" for t, q, _ in variants if t != "Unique"]
                     var_desc = " | ".join(variante_texts) if variante_texts else "Taille Unique"
                     
@@ -1111,8 +1129,8 @@ class MainApp(ctk.CTk):
                     ctk.CTkLabel(bot_f, text=f"{prix_val:.2f} €", font=ctk.CTkFont(FNT_BODY, 20, "bold"), text_color=ACCENT).pack(side="left")
 
                     q = int(total_stock)
-                    b_col = "#E6F8ED" if q > 5 else ("#FFF3E0" if q > 0 else "#FFEBEB")
-                    t_col = "#28C76F" if q > 5 else ("#EF6C00" if q > 0 else "#FF4D4D")
+                    b_col = "#E6F8ED" if q > seuil_effectif else ("#FFF3E0" if q > 0 else "#FFEBEB")
+                    t_col = "#28C76F" if q > seuil_effectif else ("#EF6C00" if q > 0 else "#FF4D4D")
                     stk_b = ctk.CTkFrame(bot_f, fg_color=b_col, corner_radius=16)
                     stk_b.pack(side="right")
                     ctk.CTkLabel(stk_b, text=f"{q} dispo", font=ctk.CTkFont(FNT_BODY, 11, "bold"), text_color=t_col).pack(padx=10, pady=4)
@@ -1344,7 +1362,9 @@ class MainApp(ctk.CTk):
         self.entry_shop_address = _add_input_row(card_b, "Adresse complète", getattr(self, "shop_address", ""))
         self.entry_shop_vat = _add_input_row(card_b, "N° Entreprise / TVA", getattr(self, "shop_vat", ""))
         self.entry_def_tva = _add_input_row(card_b, "Taux TVA par défaut", self._get_param("default_tva", "0.21"))
-        
+        self.entry_default_seuil_alerte = _add_input_row(card_b, "Seuil d'alerte stock par défaut", self._get_param("default_seuil_alerte", "5"),
+                                                           "Appliqué aux articles sans seuil personnalisé")
+
         # Row bouton
         row_btn_b = ctk.CTkFrame(card_b, fg_color="transparent")
         row_btn_b.pack(fill="x", padx=24, pady=(12, 20))
@@ -1644,6 +1664,16 @@ class MainApp(ctk.CTk):
 
         if tva:
             self._set_param("default_tva", tva)
+
+        seuil_alerte_raw = self.entry_default_seuil_alerte.get().strip()
+        if seuil_alerte_raw:
+            try:
+                seuil_alerte_default = max(0, int(seuil_alerte_raw))
+                self._set_param("default_seuil_alerte", str(seuil_alerte_default))
+            except ValueError:
+                self._st("Le seuil d'alerte par défaut doit être un nombre entier.", RED)
+                return
+
         self._st("Paramètres sauvegardés avec succès.", GRN)
 
     def _save_shopify_params(self):

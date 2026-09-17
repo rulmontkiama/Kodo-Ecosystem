@@ -407,7 +407,14 @@ def _get_kpis(periode="jour"):
         art_row = c.fetchone()
         art = art_row[0] if art_row else 0
         
-        c.execute("SELECT COUNT(*) FROM Stocks WHERE quantite_actuelle <= seuil_alerte")
+        c.execute("SELECT valeur FROM Parametres WHERE cle='default_seuil_alerte'")
+        param_row = c.fetchone()
+        default_alert = int(param_row[0]) if param_row and param_row[0] else 5
+        c.execute("""
+            SELECT COUNT(*) FROM Stocks s
+            JOIN Produits p ON p.id = s.id_produit
+            WHERE s.quantite_actuelle <= COALESCE(s.seuil_alerte, p.seuil_alerte, ?)
+        """, (default_alert,))
         alr = c.fetchone()[0]
         
         return str(Decimal(str(ca or 0)).quantize(Decimal("0.01"))), nb or 0, art or 0, alr or 0
@@ -512,10 +519,13 @@ def _get_alertes_stock():
     try:
         conn = get_connection()
         c = conn.cursor()
+        c.execute("SELECT valeur FROM Parametres WHERE cle='default_seuil_alerte'")
+        param_row = c.fetchone()
+        default_alert = int(param_row[0]) if param_row and param_row[0] else 5
         c.execute("""SELECT p.nom, s.taille, s.quantite_actuelle
                      FROM Stocks s JOIN Produits p ON p.id=s.id_produit
-                     WHERE s.quantite_actuelle <= s.seuil_alerte
-                     ORDER BY s.quantite_actuelle ASC""")
+                     WHERE s.quantite_actuelle <= COALESCE(s.seuil_alerte, p.seuil_alerte, ?)
+                     ORDER BY s.quantite_actuelle ASC""", (default_alert,))
         rows = c.fetchall()
         return rows
     except Exception as e:

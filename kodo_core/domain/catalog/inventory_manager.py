@@ -18,6 +18,48 @@ class InventoryManager:
     Gestionnaire du catalogue de produits et des mouvements de stock.
     """
 
+    DEFAULT_ALERT_THRESHOLD_KEY = "default_seuil_alerte"
+    FALLBACK_ALERT_THRESHOLD = 5
+
+    @classmethod
+    def get_default_alert_threshold(cls, conn=None) -> int:
+        """Seuil d'alerte global appliqué aux articles sans seuil personnalisé."""
+        should_close = False
+        if conn is None:
+            conn = get_connection()
+            should_close = True
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT valeur FROM Parametres WHERE cle=?", (cls.DEFAULT_ALERT_THRESHOLD_KEY,))
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                try:
+                    return int(row[0])
+                except (ValueError, TypeError):
+                    pass
+            return cls.FALLBACK_ALERT_THRESHOLD
+        finally:
+            if should_close and conn:
+                conn.close()
+
+    @classmethod
+    def set_default_alert_threshold(cls, value: int, conn=None) -> None:
+        should_close = False
+        if conn is None:
+            conn = get_connection()
+            should_close = True
+        try:
+            threshold = max(0, int(value))
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)",
+                (cls.DEFAULT_ALERT_THRESHOLD_KEY, str(threshold))
+            )
+            conn.commit()
+        finally:
+            if should_close and conn:
+                conn.close()
+
     @staticmethod
     def clean_barcode(barcode: Optional[str]) -> Optional[str]:
         """Formatte et nettoie un code-barres (retourne None si vide)."""
@@ -51,13 +93,14 @@ class InventoryManager:
 
         try:
             cursor = conn.cursor()
+            default_alert = cls.get_default_alert_threshold(conn=conn)
 
             query = """
-                SELECT p.id, p.code_barre, p.nom, p.categorie, p.prix_achat_htva, 
-                       p.prix_vente_tvac, p.taux_tva, p.image_path, p.en_solde, 
+                SELECT p.id, p.code_barre, p.nom, p.categorie, p.prix_achat_htva,
+                       p.prix_vente_tvac, p.taux_tva, p.image_path, p.en_solde,
                        p.prix_solde_tvac, p.type_vente, p.unite_mesure, p.marque, p.attributs_json,
                        COALESCE(SUM(s.quantite_actuelle), 0) as stock_total,
-                       COALESCE(p.seuil_alerte, 5) as seuil_alerte
+                       p.seuil_alerte
                 FROM Produits p
                 LEFT JOIN Stocks s ON p.id = s.id_produit
                 WHERE 1=1
@@ -97,7 +140,7 @@ class InventoryManager:
                         "stock_id": s[0],
                         "size": s[1] or "Taille Unique",
                         "quantity": int(s[2]),
-                        "alert_threshold": int(s[3]) if s[3] is not None else 5
+                        "alert_threshold": int(s[3]) if s[3] is not None else default_alert
                     }
                     for s in stock_rows
                 ]
@@ -107,17 +150,14 @@ class InventoryManager:
                 px_tvac = float(r[5]) if r[5] is not None else 0.0
                 px_solde = float(r[9]) if r[9] is not None else None
 
-                alert_val = 5
-                if len(r) > 15 and r[15] is not None:
+                custom_threshold = r[15] if len(r) > 15 else None
+                if custom_threshold is not None:
                     try:
-                        alert_val = int(r[15])
+                        alert_val = int(custom_threshold)
                     except (ValueError, TypeError):
-                        alert_val = 5
-                elif stocks_detail and stocks_detail[0].get("alert_threshold") is not None:
-                    try:
-                        alert_val = int(stocks_detail[0]["alert_threshold"])
-                    except (ValueError, TypeError):
-                        alert_val = 5
+                        alert_val = default_alert
+                else:
+                    alert_val = default_alert
 
                 products.append({
                     "id": str(r[0]),
@@ -143,7 +183,8 @@ class InventoryManager:
                     "alertStock": alert_val,
                     "alert_stock": alert_val,
                     "alert_threshold": alert_val,
-                    "seuil_alerte": alert_val
+                    "seuil_alerte": alert_val,
+                    "has_custom_alert_threshold": custom_threshold is not None
                 })
 
             return products
@@ -198,10 +239,13 @@ class InventoryManager:
                     data.get("alert_threshold") if data.get("alert_threshold") is not None else data.get("seuil_alerte")
                 )
             )
+            if isinstance(raw_alert, str) and not raw_alert.strip():
+                raw_alert = None
+            # None => pas de seuil personnalisé : le produit suivra le seuil global par défaut.
             try:
-                alert_threshold = int(raw_alert) if raw_alert is not None else 5
+                alert_threshold = int(raw_alert) if raw_alert is not None else None
             except (ValueError, TypeError):
-                alert_threshold = 5
+                alert_threshold = None
 
             if not name:
                 raise ValueError("Le nom du produit est obligatoire")
@@ -392,13 +436,15 @@ class InventoryManager:
             should_close = True
         try:
             cursor = conn.cursor()
+            default_alert = cls.get_default_alert_threshold(conn=conn)
             cursor.execute("""
-                SELECT p.id, p.nom, p.code_barre, s.taille, s.quantite_actuelle, s.seuil_alerte
+                SELECT p.id, p.nom, p.code_barre, s.taille, s.quantite_actuelle,
+                       COALESCE(s.seuil_alerte, p.seuil_alerte, ?) as seuil_effectif
                 FROM Stocks s
                 JOIN Produits p ON s.id_produit = p.id
-                WHERE s.quantite_actuelle <= s.seuil_alerte
+                WHERE s.quantite_actuelle <= COALESCE(s.seuil_alerte, p.seuil_alerte, ?)
                 ORDER BY s.quantite_actuelle ASC
-            """)
+            """, (default_alert, default_alert))
             rows = cursor.fetchall()
             alerts = []
             for r in rows:

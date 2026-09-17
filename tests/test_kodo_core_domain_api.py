@@ -65,6 +65,57 @@ class TestKodoCoreDomainAndAPI(unittest.TestCase):
         self.assertEqual(prod["name"], "Jean Slim")
         self.assertEqual(prod["stock"], 15)
 
+    def test_product_without_custom_threshold_follows_global_default(self):
+        """Un article sans seuil personnalisé doit suivre le seuil global, y compris après modification de celui-ci."""
+        res = InventoryManager.save_product({
+            "name": "T-Shirt Basique",
+            "category": "Hauts",
+            "price": 19.90,
+            "sizes": "M:3"
+        })
+        prod_id = int(res["product_id"])
+
+        prod = InventoryManager.get_product_by_id(prod_id)
+        self.assertFalse(prod["has_custom_alert_threshold"])
+        self.assertEqual(prod["alertStock"], 5)  # seuil global par défaut
+
+        InventoryManager.set_default_alert_threshold(2)
+        prod_after = InventoryManager.get_product_by_id(prod_id)
+        self.assertEqual(prod_after["alertStock"], 2)
+
+    def test_product_with_custom_threshold_ignores_global_default(self):
+        """Un seuil personnalisé sur un article ne doit jamais être écrasé par le seuil global."""
+        InventoryManager.set_default_alert_threshold(5)
+        res = InventoryManager.save_product({
+            "name": "Veste Cuir",
+            "category": "Manteaux",
+            "price": 199.0,
+            "sizes": "L:1",
+            "alertStock": 1
+        })
+        prod_id = int(res["product_id"])
+
+        prod = InventoryManager.get_product_by_id(prod_id)
+        self.assertTrue(prod["has_custom_alert_threshold"])
+        self.assertEqual(prod["alertStock"], 1)
+
+        InventoryManager.set_default_alert_threshold(10)
+        prod_after = InventoryManager.get_product_by_id(prod_id)
+        self.assertEqual(prod_after["alertStock"], 1)
+
+    def test_low_stock_alerts_use_effective_threshold(self):
+        """get_low_stock_alerts doit détecter les ruptures en tenant compte du seuil global."""
+        InventoryManager.set_default_alert_threshold(3)
+        InventoryManager.save_product({
+            "name": "Casquette",
+            "category": "Accessoires",
+            "price": 15.0,
+            "sizes": "Unique:2"
+        })
+
+        alerts = InventoryManager.get_low_stock_alerts()
+        self.assertTrue(any(a["product_name"] == "Casquette" for a in alerts))
+
     def test_crm_manager_customer(self):
         """Vérifie la création et gestion client et des points de fidélité."""
         res = CRMManager.save_customer({

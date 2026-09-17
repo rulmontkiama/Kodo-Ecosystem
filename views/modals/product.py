@@ -13,6 +13,7 @@ import barcode
 from barcode.writer import ImageWriter
 
 from views.modals.category import get_prepopulated_categories, get_prepopulated_marques, GestionCategoriesModal, GestionMarquesModal
+from kodo_core.domain.catalog.inventory_manager import InventoryManager
 
 def generate_ean13_code():
     """Génère un code EAN-13 valide à 13 chiffres avec clé de contrôle."""
@@ -74,6 +75,15 @@ class ProductEditModal(ctk.CTkToplevel):
         self._create_category_field()
         self.entry_prix_ht = self._create_field("Prix Achat HTVA (€) :", "0.00")
         self.entry_prix_ttc = self._create_field("Prix Vente TVAC (€) :", "0.00")
+
+        try:
+            default_alert = InventoryManager.get_default_alert_threshold()
+        except Exception:
+            default_alert = 5
+        self.entry_seuil_alerte = self._create_field(
+            "Seuil d'alerte stock (optionnel) :",
+            f"Par défaut : {default_alert} (réglable dans Paramètres)"
+        )
 
         # Section Article en Solde
         solde_frame = ctk.CTkFrame(self.form_frame, fg_color="transparent")
@@ -340,7 +350,7 @@ class ProductEditModal(ctk.CTkToplevel):
     def _load_product_data(self):
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT nom, code_barre, categorie, prix_achat_htva, prix_vente_tvac, marque, en_solde, prix_solde_tvac FROM Produits WHERE id=?", (self.product_id,))
+        cursor.execute("SELECT nom, code_barre, categorie, prix_achat_htva, prix_vente_tvac, marque, en_solde, prix_solde_tvac, seuil_alerte FROM Produits WHERE id=?", (self.product_id,))
         row = cursor.fetchone()
         if row:
             self.entry_nom.delete(0, "end")
@@ -361,6 +371,9 @@ class ProductEditModal(ctk.CTkToplevel):
             if len(row) > 7 and row[7] is not None:
                 self.entry_prix_solde.delete(0, "end")
                 self.entry_prix_solde.insert(0, str(row[7]))
+            if len(row) > 8 and row[8] is not None:
+                self.entry_seuil_alerte.delete(0, "end")
+                self.entry_seuil_alerte.insert(0, str(row[8]))
 
         # Chargement des quantités existantes en stock par taille
         cursor.execute("SELECT taille, quantite_actuelle FROM Stocks WHERE id_produit=?", (self.product_id,))
@@ -405,6 +418,15 @@ class ProductEditModal(ctk.CTkToplevel):
             ToastNotification(self, "Le nom du produit est obligatoire", type="error")
             return
 
+        seuil_raw = self.entry_seuil_alerte.get().strip()
+        seuil_alerte_val = None
+        if seuil_raw:
+            try:
+                seuil_alerte_val = max(0, int(seuil_raw))
+            except ValueError:
+                ToastNotification(self, "Le seuil d'alerte doit être un nombre entier (ex: 3)", type="error")
+                return
+
         conn = None
         try:
             conn = get_connection()
@@ -418,16 +440,16 @@ class ProductEditModal(ctk.CTkToplevel):
 
             if self.product_id:
                 cursor.execute("""
-                    UPDATE Produits 
-                    SET nom=?, code_barre=?, categorie=?, prix_achat_htva=?, prix_vente_tvac=?, marque=?, en_solde=?, prix_solde_tvac=?
+                    UPDATE Produits
+                    SET nom=?, code_barre=?, categorie=?, prix_achat_htva=?, prix_vente_tvac=?, marque=?, en_solde=?, prix_solde_tvac=?, seuil_alerte=?
                     WHERE id=?
-                """, (nom, barcode_val, cat_val, prix_ht, prix_ttc, marque_val, en_solde_val, prix_solde_val, self.product_id))
+                """, (nom, barcode_val, cat_val, prix_ht, prix_ttc, marque_val, en_solde_val, prix_solde_val, seuil_alerte_val, self.product_id))
                 prod_id = self.product_id
             else:
                 cursor.execute("""
-                    INSERT INTO Produits (nom, code_barre, categorie, prix_achat_htva, prix_vente_tvac, marque, en_solde, prix_solde_tvac)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (nom, barcode_val, cat_val, prix_ht, prix_ttc, marque_val, en_solde_val, prix_solde_val))
+                    INSERT INTO Produits (nom, code_barre, categorie, prix_achat_htva, prix_vente_tvac, marque, en_solde, prix_solde_tvac, seuil_alerte)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (nom, barcode_val, cat_val, prix_ht, prix_ttc, marque_val, en_solde_val, prix_solde_val, seuil_alerte_val))
                 prod_id = cursor.lastrowid
 
             # Mettre à jour les stocks pour chaque taille active
@@ -442,9 +464,9 @@ class ProductEditModal(ctk.CTkToplevel):
                 cursor.execute("SELECT id FROM Stocks WHERE id_produit=? AND taille=?", (prod_id, taille))
                 s_row = cursor.fetchone()
                 if s_row:
-                    cursor.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, s_row[0]))
+                    cursor.execute("UPDATE Stocks SET quantite_actuelle=?, seuil_alerte=? WHERE id=?", (qty, seuil_alerte_val, s_row[0]))
                 else:
-                    cursor.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, 2)", (prod_id, taille, qty))
+                    cursor.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, ?)", (prod_id, taille, qty, seuil_alerte_val))
 
             # Purger les stocks des tailles supprimées
             cursor.execute("SELECT id, taille FROM Stocks WHERE id_produit=?", (prod_id,))

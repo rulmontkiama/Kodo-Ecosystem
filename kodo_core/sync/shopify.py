@@ -433,7 +433,7 @@ class ShopifySync:
                     if s_row:
                         c.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, s_row[0]))
                     else:
-                        c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, 2)", (pid, taille, qty))
+                        c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, NULL)", (pid, taille, qty))
 
                 imported_count += 1
 
