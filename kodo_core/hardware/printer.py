@@ -64,7 +64,15 @@ def get_resource_path(relative_path):
     """
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+    hw_dir = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(hw_dir, relative_path)
+    if os.path.exists(candidate):
+        return candidate
+    root_dir = os.path.abspath(os.path.join(hw_dir, "..", ".."))
+    candidate_root = os.path.join(root_dir, relative_path)
+    if os.path.exists(candidate_root):
+        return candidate_root
+    return candidate
 
 
 def strip_accents(text):

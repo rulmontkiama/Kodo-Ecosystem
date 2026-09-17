@@ -446,8 +446,12 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png"),
                 os.path.join(os.path.abspath("."), "logo_ticket.png")
             ]
+            from kodo_core.hardware.printer import get_resource_path
+            default_logo = get_resource_path("logo_ticket.png")
             for p in candidate_paths:
                 try:
+                    if default_logo and os.path.abspath(p) == os.path.abspath(default_logo):
+                        continue
                     if os.path.exists(p):
                         os.remove(p)
                 except Exception:
@@ -580,8 +584,12 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png"),
                 os.path.join(os.path.abspath("."), "social_ticket.png")
             ]
+            from kodo_core.hardware.printer import get_resource_path
+            default_social = get_resource_path("instagram_block.png")
             for p in candidate_paths:
                 try:
+                    if default_social and os.path.abspath(p) == os.path.abspath(default_social):
+                        continue
                     if os.path.exists(p):
                         os.remove(p)
                 except Exception:
