@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.54",
-  "latest_version": "1.0.54",
-  "version": "1.0.54",
+  "latestVersion": "1.0.55",
+  "latest_version": "1.0.55",
+  "version": "1.0.55",
   "releaseDate": "2026-09-17",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.54.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.54.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.54.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.55.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.55.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.55.zip",
   "has_update": true,
-  "changelog": "v1.0.54 : Sélection automatique de la saisie sur la caisse (focus & fast-scan immédiats), sélection prioritaire de la zone code-barres EAN à l'enregistrement d'un produit (champ non pré-rempli pour scan direct) et passage automatique à la désignation."
+  "changelog": "v1.0.55 : Correction et sauvegarde persistante des grilles de déclinaisons de tailles personnalisées (Catégories et fiche Produit), sélection automatique du scan caisse et focus prioritaire EAN à la création de produit."
 }
