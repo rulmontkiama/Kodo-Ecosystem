@@ -40,7 +40,7 @@ def compute_sha256(data_string: str) -> str:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Crée la table fiscal_ledger si elle n'existe pas."""
+    """Crée les tables fiscal_ledger et fiscal_unsealed_sales si elles n'existent pas."""
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fiscal_ledger (
@@ -57,7 +57,81 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fiscal_unsealed_sales (
+            sale_id INTEGER PRIMARY KEY,
+            total_ttc DECIMAL NOT NULL,
+            total_ht DECIMAL NOT NULL,
+            total_tva DECIMAL NOT NULL,
+            timestamp_utc TEXT NOT NULL,
+            failure_reason TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
+
+
+def record_unsealed_sale(conn: sqlite3.Connection, sale_id: int, totals: dict, reason: str) -> None:
+    """Journalise une vente dont le scellement fiscal a échoué, pour reprise ultérieure.
+
+    Appelé quand `seal_sale` lève une exception après le commit de la vente : sans ce
+    filet, la vente reste enregistrée dans Tickets mais disparaît silencieusement du
+    journal fiscal inaltérable (trou de conformité NF525 indétectable en usage normal).
+    """
+    conn.execute(
+        """
+        INSERT INTO fiscal_unsealed_sales
+            (sale_id, total_ttc, total_ht, total_tva, timestamp_utc, failure_reason, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sale_id) DO UPDATE SET
+            failure_reason = excluded.failure_reason,
+            recorded_at = excluded.recorded_at
+        """,
+        (
+            sale_id,
+            str(quantize_money(Decimal(str(totals["total_ttc"])))),
+            str(quantize_money(Decimal(str(totals["total_ht"])))),
+            str(quantize_money(Decimal(str(totals["total_tva"])))),
+            totals.get("timestamp_utc") or _now_iso(),
+            str(reason),
+            _now_iso(),
+        ),
+    )
+    conn.commit()
+
+
+def reseal_pending_sales(conn: sqlite3.Connection) -> list:
+    """Retente le scellement de toutes les ventes en attente (ex. au démarrage de l'app).
+
+    Retourne la liste des sale_id rescellés avec succès. Une vente qui échoue à nouveau
+    reste en attente pour la prochaine tentative.
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT sale_id, total_ttc, total_ht, total_tva, timestamp_utc FROM fiscal_unsealed_sales")
+    pending = cursor.fetchall()
+
+    resealed = []
+    for sale_id, total_ttc, total_ht, total_tva, timestamp_utc in pending:
+        try:
+            seal_sale(conn, sale_id, {
+                "total_ttc": total_ttc,
+                "total_ht": total_ht,
+                "total_tva": total_tva,
+                "timestamp_utc": timestamp_utc,
+            })
+        except Exception as fe:
+            record_unsealed_sale(conn, sale_id, {
+                "total_ttc": total_ttc, "total_ht": total_ht, "total_tva": total_tva,
+                "timestamp_utc": timestamp_utc,
+            }, str(fe))
+            continue
+        conn.execute("DELETE FROM fiscal_unsealed_sales WHERE sale_id = ?", (sale_id,))
+        conn.commit()
+        resealed.append(sale_id)
+
+    return resealed
 
 
 def _next_sequence_number(cursor: sqlite3.Cursor, year: int) -> str:

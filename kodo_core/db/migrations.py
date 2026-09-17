@@ -118,6 +118,7 @@ class MigrationManager:
                     created_at_utc TEXT,
                     synced_shopify INTEGER DEFAULT 0,
                     shopify_order_id TEXT,
+                    z_id INTEGER DEFAULT NULL,
                     FOREIGN KEY (id_client) REFERENCES Clients(id)
                 )""",
                 """CREATE TABLE IF NOT EXISTS Ventes_Details (
@@ -138,7 +139,9 @@ class MigrationManager:
                     methode_paiement TEXT,
                     reference TEXT,
                     signature TEXT,
-                    hash_precedent TEXT
+                    hash_precedent TEXT,
+                    caisse_id TEXT DEFAULT 'POS-01',
+                    z_id INTEGER DEFAULT NULL
                 )""",
                 """CREATE TABLE IF NOT EXISTS Rapports_Z (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -233,6 +236,93 @@ class MigrationManager:
                 """INSERT INTO ShopInfo (nom_magasin, adresse, siret_tva, type_commerce, devise)
                    SELECT "L'Adresse B", "Boutique Pilote", "BE 0123.456.789", "pret_a_porter", "€"
                    WHERE NOT EXISTS (SELECT 1 FROM ShopInfo)"""
+            ]
+        },
+        {
+            "version": "1.2.0",
+            "description": "Immutabilité des ventes (piste d'audit) et anti-double-comptage Z multi-caisse",
+            "sql": [
+                # z_id marque un ticket/mouvement comme déjà compté dans une clôture Z :
+                # sans ce marqueur, generer_bilan_z_journalier ne peut distinguer, pour une
+                # caisse donnée, ce qui a déjà été clôturé de ce qui ne l'a pas été, et un Z
+                # multi-caisse recompte les ventes des autres caisses (comparaison de date
+                # seule, sans filtre caisse_id).
+                "ALTER TABLE Tickets ADD COLUMN z_id INTEGER DEFAULT NULL",
+                "ALTER TABLE Ledger_Caisse ADD COLUMN caisse_id TEXT DEFAULT 'POS-01'",
+                "ALTER TABLE Ledger_Caisse ADD COLUMN z_id INTEGER DEFAULT NULL",
+
+                # Un ticket scellé (piste d'audit / NF525) ne peut plus être modifié ou
+                # supprimé par un simple UPDATE/DELETE : seul le marquage z_id (clôture Z)
+                # est autorisé après coup, toute autre colonne financière ou d'identité
+                # reste figée dès l'insertion. Sans ce déclencheur, PRAGMA foreign_keys
+                # absent + aucune contrainte applicative ne protégeait Tickets d'une
+                # falsification directe en base.
+                """CREATE TRIGGER IF NOT EXISTS prevent_ticket_tamper_update
+                   BEFORE UPDATE ON Tickets
+                   FOR EACH ROW
+                   WHEN NOT (
+                       NEW.numero_ticket IS OLD.numero_ticket
+                       AND NEW.date_heure IS OLD.date_heure
+                       AND NEW.total_tvac IS OLD.total_tvac
+                       AND NEW.total_htva IS OLD.total_htva
+                       AND NEW.total_tva IS OLD.total_tva
+                       AND NEW.remise IS OLD.remise
+                       AND NEW.methode_paiement IS OLD.methode_paiement
+                       AND NEW.id_client IS OLD.id_client
+                       AND NEW.vendeur_nom IS OLD.vendeur_nom
+                       AND NEW.rendu_monnaie IS OLD.rendu_monnaie
+                       AND NEW.caisse_id IS OLD.caisse_id
+                       AND NEW.signature IS OLD.signature
+                       AND NEW.hash_precedent IS OLD.hash_precedent
+                       AND NEW.previous_hash IS OLD.previous_hash
+                       AND NEW.current_hash IS OLD.current_hash
+                   )
+                   BEGIN
+                       SELECT RAISE(ABORT, 'Modification interdite : ticket scelle (piste audit). Utiliser une contre-passation.');
+                   END""",
+                """CREATE TRIGGER IF NOT EXISTS prevent_ticket_tamper_delete
+                   BEFORE DELETE ON Tickets
+                   FOR EACH ROW
+                   BEGIN
+                       SELECT RAISE(ABORT, 'Suppression interdite : ticket scelle (piste audit). Utiliser une contre-passation.');
+                   END""",
+
+                """CREATE TRIGGER IF NOT EXISTS prevent_ventes_details_tamper_update
+                   BEFORE UPDATE ON Ventes_Details
+                   FOR EACH ROW
+                   BEGIN
+                       SELECT RAISE(ABORT, 'Modification interdite : ligne de vente scellee (piste audit).');
+                   END""",
+                """CREATE TRIGGER IF NOT EXISTS prevent_ventes_details_tamper_delete
+                   BEFORE DELETE ON Ventes_Details
+                   FOR EACH ROW
+                   BEGIN
+                       SELECT RAISE(ABORT, 'Suppression interdite : ligne de vente scellee (piste audit).');
+                   END""",
+
+                """CREATE TRIGGER IF NOT EXISTS prevent_ledger_caisse_tamper_update
+                   BEFORE UPDATE ON Ledger_Caisse
+                   FOR EACH ROW
+                   WHEN NOT (
+                       NEW.date_heure IS OLD.date_heure
+                       AND NEW.vendeur IS OLD.vendeur
+                       AND NEW.type_mouvement IS OLD.type_mouvement
+                       AND NEW.montant IS OLD.montant
+                       AND NEW.methode_paiement IS OLD.methode_paiement
+                       AND NEW.reference IS OLD.reference
+                       AND NEW.signature IS OLD.signature
+                       AND NEW.hash_precedent IS OLD.hash_precedent
+                       AND NEW.caisse_id IS OLD.caisse_id
+                   )
+                   BEGIN
+                       SELECT RAISE(ABORT, 'Modification interdite : mouvement de caisse scelle (piste audit).');
+                   END""",
+                """CREATE TRIGGER IF NOT EXISTS prevent_ledger_caisse_tamper_delete
+                   BEFORE DELETE ON Ledger_Caisse
+                   FOR EACH ROW
+                   BEGIN
+                       SELECT RAISE(ABORT, 'Suppression interdite : mouvement de caisse scelle (piste audit).');
+                   END"""
             ]
         }
     ]
@@ -528,7 +618,9 @@ def initialiser_db(db_path: str = None, conn=None):
                 methode_paiement TEXT,
                 reference TEXT,
                 signature TEXT,
-                hash_precedent TEXT
+                hash_precedent TEXT,
+                caisse_id TEXT DEFAULT 'POS-01',
+                z_id INTEGER DEFAULT NULL
             )
         ''')
 
@@ -705,6 +797,28 @@ def initialiser_db(db_path: str = None, conn=None):
                 try: cursor.execute(f"ALTER TABLE Tickets ADD COLUMN {col_def[0]} {col_def[1]}")
                 except Exception: pass
 
+        # z_id marque le ticket comme déjà compté dans une clôture Z, pour empêcher tout
+        # double comptage entre caisses ou entre exécutions successives d'un Z (voir
+        # generer_bilan_z_journalier / enregistrer_cloture_caisse).
+        if 'z_id' not in cols_tickets:
+            try: cursor.execute("ALTER TABLE Tickets ADD COLUMN z_id INTEGER DEFAULT NULL")
+            except Exception: pass
+
+        cursor.execute("PRAGMA table_info(Ledger_Caisse)")
+        cols_ledger_caisse = [row[1] for row in cursor.fetchall()]
+        for col_def in [
+            # caisse_id identifie la caisse d'origine du mouvement : sans cette colonne,
+            # Ledger_Caisse ne peut pas être filtré par caisse, ce qui rend tout Z
+            # multi-caisse comptable sur des mouvements d'autres caisses.
+            ('caisse_id', "TEXT DEFAULT 'POS-01'"),
+            # z_id marque le mouvement comme déjà compté dans une clôture Z (même logique
+            # que Tickets.z_id).
+            ('z_id', "INTEGER DEFAULT NULL"),
+        ]:
+            if col_def[0] not in cols_ledger_caisse:
+                try: cursor.execute(f"ALTER TABLE Ledger_Caisse ADD COLUMN {col_def[0]} {col_def[1]}")
+                except Exception: pass
+
         # ---------------------------------------------------------------------
         # 20. SEEDING DONNÉES INITIALES USINE
         # ---------------------------------------------------------------------
@@ -791,6 +905,90 @@ def initialiser_db(db_path: str = None, conn=None):
             WHEN NEW.code_barre = ''
             BEGIN
                 UPDATE Produits SET code_barre = NULL WHERE id = NEW.id;
+            END;
+        ''')
+
+        # Seul le marquage z_id (clôture Z) est autorisé après coup ; toute autre colonne
+        # financière ou d'identité du ticket est figée dès l'insertion.
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS prevent_ticket_tamper_update
+            BEFORE UPDATE ON Tickets
+            FOR EACH ROW
+            WHEN NOT (
+                NEW.numero_ticket IS OLD.numero_ticket
+                AND NEW.date_heure IS OLD.date_heure
+                AND NEW.total_tvac IS OLD.total_tvac
+                AND NEW.total_htva IS OLD.total_htva
+                AND NEW.total_tva IS OLD.total_tva
+                AND NEW.remise IS OLD.remise
+                AND NEW.methode_paiement IS OLD.methode_paiement
+                AND NEW.id_client IS OLD.id_client
+                AND NEW.vendeur_nom IS OLD.vendeur_nom
+                AND NEW.rendu_monnaie IS OLD.rendu_monnaie
+                AND NEW.caisse_id IS OLD.caisse_id
+                AND NEW.signature IS OLD.signature
+                AND NEW.hash_precedent IS OLD.hash_precedent
+                AND NEW.previous_hash IS OLD.previous_hash
+                AND NEW.current_hash IS OLD.current_hash
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'Modification interdite : ticket scellé (piste d''audit). Utiliser une contre-passation.');
+            END;
+        ''')
+
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS prevent_ticket_tamper_delete
+            BEFORE DELETE ON Tickets
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'Suppression interdite : ticket scellé (piste d''audit). Utiliser une contre-passation.');
+            END;
+        ''')
+
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS prevent_ledger_caisse_tamper_update
+            BEFORE UPDATE ON Ledger_Caisse
+            FOR EACH ROW
+            WHEN NOT (
+                NEW.date_heure IS OLD.date_heure
+                AND NEW.vendeur IS OLD.vendeur
+                AND NEW.type_mouvement IS OLD.type_mouvement
+                AND NEW.montant IS OLD.montant
+                AND NEW.methode_paiement IS OLD.methode_paiement
+                AND NEW.reference IS OLD.reference
+                AND NEW.signature IS OLD.signature
+                AND NEW.hash_precedent IS OLD.hash_precedent
+                AND NEW.caisse_id IS OLD.caisse_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'Modification interdite : mouvement de caisse scellé (piste d''audit).');
+            END;
+        ''')
+
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS prevent_ledger_caisse_tamper_delete
+            BEFORE DELETE ON Ledger_Caisse
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'Suppression interdite : mouvement de caisse scellé (piste d''audit).');
+            END;
+        ''')
+
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS prevent_ventes_details_tamper_update
+            BEFORE UPDATE ON Ventes_Details
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'Modification interdite : ligne de vente scellée (piste d''audit).');
+            END;
+        ''')
+
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS prevent_ventes_details_tamper_delete
+            BEFORE DELETE ON Ventes_Details
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'Suppression interdite : ligne de vente scellée (piste d''audit).');
             END;
         ''')
 

@@ -153,7 +153,13 @@ def initialiser_db(conn=None, *args, **kwargs):
     try:
         from core.migrations import MigrationManager
         db_target = getattr(conn, 'db_name', DB_NAME) if conn is not None else DB_NAME
-        MigrationManager.run_migrations(db_target)
+        # Quand un `conn` explicite est fourni (ex. bases ":memory:" ou temporaires des
+        # tests), il faut appliquer les migrations SUR CETTE connexion : sans le passer
+        # ici, run_migrations ouvrait sa propre connexion ":memory:" séparée et jetable,
+        # et les migrations (déclencheurs d'immutabilité, colonnes z_id/caisse_id, etc.)
+        # n'atteignaient jamais la connexion réellement utilisée par l'appelant.
+        raw_conn = getattr(conn, "_conn", conn) if conn is not None else None
+        MigrationManager.run_migrations(db_target, conn=raw_conn)
     except Exception as me:
         print(f"⚠️ Avertissement Migration: {me}")
 
@@ -603,17 +609,23 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
 
         sig_ledger, hash_ledger = signer_ledger(cursor, 'VENTE', montant_reel, methode, numero_ticket, date_heure)
         cursor.execute("""
-            INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent)
-            VALUES (?, 'VENTE', ?, ?, ?, ?, ?, ?)
-        """, (vendeur_nom, float(montant_reel), methode, numero_ticket, date_heure, sig_ledger, hash_ledger))
+            INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent, caisse_id)
+            VALUES (?, 'VENTE', ?, ?, ?, ?, ?, ?, ?)
+        """, (vendeur_nom, float(montant_reel), methode, numero_ticket, date_heure, sig_ledger, hash_ledger, caisse_id))
 
     return ticket_id
 
 
-def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mode, vendeur_nom, date_heure):
-    """Enregistre un remboursement (NF525)."""
+def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mode, vendeur_nom, date_heure, quantite=1, caisse_id="POS-01"):
+    """Enregistre un remboursement (NF525).
+
+    `prix` est le prix UNITAIRE (tel que stocké dans Ventes_Details.prix_unitaire_tvac) ;
+    `quantite` est le nombre d'unités réellement retournées. Le stock réintégré et le
+    montant remboursé sont proportionnels à `quantite`, plutôt qu'un +1/-1 fixe qui
+    désynchronise le stock dès qu'un retour porte sur plus d'une unité.
+    """
     cursor.execute("""
-        SELECT p.taux_tva 
+        SELECT p.taux_tva
         FROM Ventes_Details vd
         JOIN Stocks s ON vd.id_stock = s.id
         JOIN Produits p ON s.id_produit = p.id
@@ -622,7 +634,8 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
     row = cursor.fetchone()
     taux_tva = Decimal(str(row[0])) if row else Decimal('0.21')
 
-    total_tvac = -Decimal(str(prix))
+    quantite = int(quantite) if quantite else 1
+    total_tvac = -(Decimal(str(prix)) * Decimal(str(quantite))).quantize(Decimal('0.01'))
     total_htva = (total_tvac / (Decimal('1.00') + taux_tva)).quantize(Decimal('0.01'))
     total_tva = total_tvac - total_htva
 
@@ -630,27 +643,27 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
     timestamp_suffix = str(int(time.time()))[-5:]
     new_tk = f"REF-{ticket_origine}-{timestamp_suffix}"
 
-    signature, hash_prec = signer_ticket(cursor, new_tk, total_tvac, date_heure)
+    signature, hash_prec = signer_ticket(cursor, new_tk, total_tvac, date_heure, caisse_id=caisse_id)
 
     cursor.execute("""
-        INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, total_tva, remise, methode_paiement, signature, hash_precedent)
-        VALUES (?, ?, ?, ?, ?, 0.00, ?, ?, ?)
-    """, (new_tk, date_heure, total_tvac, total_htva, total_tva, f"REMB ({mode})", signature, hash_prec))
+        INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, total_tva, remise, methode_paiement, caisse_id, signature, hash_precedent)
+        VALUES (?, ?, ?, ?, ?, 0.00, ?, ?, ?, ?)
+    """, (new_tk, date_heure, total_tvac, total_htva, total_tva, f"REMB ({mode})", caisse_id, signature, hash_prec))
 
     ticket_id = cursor.lastrowid
 
     if stock_id:
-        cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + 1 WHERE id = ?", (stock_id,))
+        cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?", (quantite, stock_id))
         cursor.execute("""
             INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac)
-            VALUES (?, ?, -1, ?)
-        """, (ticket_id, stock_id, prix))
+            VALUES (?, ?, ?, ?)
+        """, (ticket_id, stock_id, -quantite, prix))
 
     sig_ledger, hash_ledger = signer_ledger(cursor, 'REMBOURSEMENT', total_tvac, mode, new_tk, date_heure)
     cursor.execute("""
-        INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent)
-        VALUES (?, 'REMBOURSEMENT', ?, ?, ?, ?, ?, ?)
-    """, (vendeur_nom, float(total_tvac), mode, new_tk, date_heure, sig_ledger, hash_ledger))
+        INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent, caisse_id)
+        VALUES (?, 'REMBOURSEMENT', ?, ?, ?, ?, ?, ?, ?)
+    """, (vendeur_nom, float(total_tvac), mode, new_tk, date_heure, sig_ledger, hash_ledger, caisse_id))
 
     return new_tk
 
@@ -672,6 +685,16 @@ def supprimer_panier_en_attente(panier_id, conn=None):
     return delete_parked_cart(panier_id, conn=conn)
 
 def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
+    """Agrège les ventes/mouvements non encore comptés dans un Z, pour UNE caisse donnée.
+
+    Le filtrage se fait par (caisse_id, z_id IS NULL) plutôt que par une comparaison de
+    date : une comparaison de date sur `Ledger_Caisse`/`Tickets` ignorait `caisse_id`,
+    ce qui provoquait un double comptage dès qu'il y a plus d'une caisse (chaque Z
+    recomptait les ventes des autres caisses). Le marquage z_id (posé par
+    enregistrer_cloture_caisse dans la même transaction que l'INSERT Clotures_Caisse)
+    garantit qu'une vente ou un mouvement n'est jamais compté deux fois, même en cas de
+    clôtures rapprochées ou de plusieurs caisses.
+    """
     should_close = False
     if conn is None:
         conn = get_connection()
@@ -680,35 +703,30 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
     try:
         c = conn.cursor()
 
-        c.execute("SELECT MAX(date_cloture) FROM Clotures_Caisse WHERE caisse_id=?", (caisse_id,))
-        row_z = c.fetchone()
-        last_z_date = row_z[0] if row_z else None
+        c.execute("""
+            SELECT id, total_tvac, total_htva, total_tva, remise
+            FROM Tickets WHERE caisse_id = ? AND z_id IS NULL
+        """, (caisse_id,))
+        ticket_rows = c.fetchall()
 
-        if last_z_date:
-            c.execute("""
-                SELECT COUNT(*), COALESCE(SUM(total_tvac), 0.0), COALESCE(SUM(total_htva), 0.0), 
-                       COALESCE(SUM(total_tva), 0.0), COALESCE(SUM(remise), 0.0)
-                FROM Tickets WHERE date_heure > ?
-            """, (last_z_date,))
-        else:
-            c.execute("""
-                SELECT COUNT(*), COALESCE(SUM(total_tvac), 0.0), COALESCE(SUM(total_htva), 0.0), 
-                       COALESCE(SUM(total_tva), 0.0), COALESCE(SUM(remise), 0.0)
-                FROM Tickets
-            """)
+        ticket_ids = [row[0] for row in ticket_rows]
+        nb_tickets = len(ticket_ids)
+        tot_tvac = sum((Decimal(str(row[1] or "0.00")) for row in ticket_rows), Decimal("0.00"))
+        tot_htva = sum((Decimal(str(row[2] or "0.00")) for row in ticket_rows), Decimal("0.00"))
+        tot_tva = sum((Decimal(str(row[3] or "0.00")) for row in ticket_rows), Decimal("0.00"))
+        tot_remises = sum((Decimal(str(row[4] or "0.00")) for row in ticket_rows), Decimal("0.00"))
 
-        nb_tickets, tot_tvac, tot_htva, tot_tva, tot_remises = c.fetchone()
-
-        if last_z_date:
-            c.execute("SELECT methode_paiement, SUM(montant) FROM Ledger_Caisse WHERE date_heure > ? GROUP BY methode_paiement", (last_z_date,))
-        else:
-            c.execute("SELECT methode_paiement, SUM(montant) FROM Ledger_Caisse GROUP BY methode_paiement")
-
+        c.execute("""
+            SELECT id, methode_paiement, montant
+            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL
+        """, (caisse_id,))
         ledger_rows = c.fetchall()
+
+        ledger_ids = [row[0] for row in ledger_rows]
         tot_esp = Decimal("0.00")
         tot_carte = Decimal("0.00")
 
-        for m, mt in ledger_rows:
+        for _id, m, mt in ledger_rows:
             mt_dec = Decimal(str(mt or "0.00"))
             if m and str(m).lower() in ["espèces", "especes", "cash"]:
                 tot_esp += mt_dec
@@ -717,13 +735,15 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
 
         return {
             "caisse_id": caisse_id,
-            "nb_tickets": nb_tickets or 0,
-            "total_tvac": Decimal(str(tot_tvac or "0.00")),
-            "total_htva": Decimal(str(tot_htva or "0.00")),
-            "total_tva": Decimal(str(tot_tva or "0.00")),
-            "total_remises": Decimal(str(tot_remises or "0.00")),
+            "nb_tickets": nb_tickets,
+            "total_tvac": tot_tvac,
+            "total_htva": tot_htva,
+            "total_tva": tot_tva,
+            "total_remises": tot_remises,
             "total_especes": tot_esp,
-            "total_carte": tot_carte
+            "total_carte": tot_carte,
+            "ticket_ids": ticket_ids,
+            "ledger_ids": ledger_ids,
         }
     finally:
         if should_close:
@@ -768,6 +788,21 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
             bilan["nb_tickets"], float(fond_reel_dec), float(ecart), vendeur,
             hash_prec, curr_hash, curr_hash, now_utc
         ))
+        z_id = c.lastrowid
+
+        # Marquage atomique (même transaction que l'INSERT ci-dessus) des tickets et
+        # mouvements de caisse inclus dans ce Z, pour empêcher qu'un Z ultérieur (sur
+        # cette caisse ou une autre) ne les recompte.
+        if bilan["ticket_ids"]:
+            c.executemany(
+                "UPDATE Tickets SET z_id = ? WHERE id = ?",
+                [(z_id, tid) for tid in bilan["ticket_ids"]],
+            )
+        if bilan["ledger_ids"]:
+            c.executemany(
+                "UPDATE Ledger_Caisse SET z_id = ? WHERE id = ?",
+                [(z_id, lid) for lid in bilan["ledger_ids"]],
+            )
 
         conn.commit()
         print(f"[Z DE CAISSE] ✅ Clôture enregistrée avec succès. Hash: {curr_hash[:16]}...")

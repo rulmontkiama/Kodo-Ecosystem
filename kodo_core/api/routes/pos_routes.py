@@ -140,6 +140,7 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         price = float(data.get("price") or data.get("amount") or 0.0)
         mode = data.get("mode") or data.get("paymentMethod") or "Espèces"
         vendeur = data.get("vendeur") or data.get("cashierName") or "Admin"
+        quantity = int(data.get("quantity") or data.get("quantite") or 1)
 
         res = process_return_transaction(
             original_ticket_number=orig_ticket,
@@ -147,7 +148,8 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             stock_id=stock_id,
             refund_price=price,
             refund_mode=mode,
-            cashier_name=vendeur
+            cashier_name=vendeur,
+            quantity=quantity
         )
         return 200, res
 

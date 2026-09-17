@@ -79,7 +79,13 @@ class TestAuditChain(unittest.TestCase):
         )
         self.conn.commit()
 
-        # Falsifier directement le montant en base de données
+        # Falsifier directement le montant en base de données. Le déclencheur
+        # prevent_ticket_tamper_update bloque désormais ce type de falsification en
+        # temps réel (défense préventive) ; on le retire ici pour simuler un attaquant
+        # qui contourne cette protection (accès direct au fichier .db), afin de vérifier
+        # que le chaînage cryptographique (défense détective) rattrape quand même la
+        # falsification.
+        cursor.execute("DROP TRIGGER IF EXISTS prevent_ticket_tamper_update")
         cursor.execute("UPDATE Tickets SET total_tvac = 5.00 WHERE numero_ticket = 'TCK-TEST-MODIF'")
         self.conn.commit()
 
@@ -112,7 +118,11 @@ class TestAuditChain(unittest.TestCase):
             )
         self.conn.commit()
 
-        # Supprimer le ticket intermédiaire TCK-DEL-2
+        # Supprimer le ticket intermédiaire TCK-DEL-2. Le déclencheur
+        # prevent_ticket_tamper_delete bloque désormais la suppression en temps réel ;
+        # on le retire ici pour simuler un attaquant qui contourne cette protection, afin
+        # de vérifier que le chaînage cryptographique rattrape quand même la rupture.
+        cursor.execute("DROP TRIGGER IF EXISTS prevent_ticket_tamper_delete")
         cursor.execute("DELETE FROM Tickets WHERE numero_ticket = 'TCK-DEL-2'")
         self.conn.commit()
 

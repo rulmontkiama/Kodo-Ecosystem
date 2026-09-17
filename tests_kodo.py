@@ -21,20 +21,19 @@ import audit_trail
 def run_tests():
     print("=== DÉBUT DES TESTS AUTOMATISÉS ===")
     
-    # 1. Initialisation de la base de test
+    # 1. Repartir d'une base de test vierge. Tickets/Ventes_Details/Ledger_Caisse sont
+    # désormais protégés par des déclencheurs anti-falsification (piste d'audit) qui
+    # rejettent un DELETE en masse : on repart d'un fichier neuf plutôt que de vider les
+    # tables d'une base existante.
+    for ext in ["", "-shm", "-wal"]:
+        f = database_manager.DB_NAME + ext
+        if os.path.exists(f):
+            os.remove(f)
+
     initialiser_db()
     conn = get_connection()
     c = conn.cursor()
-    
-    # Nettoyer la base de test
-    c.execute("DELETE FROM Ventes_Details")
-    c.execute("DELETE FROM Tickets")
-    c.execute("DELETE FROM Ledger_Caisse")
-    c.execute("DELETE FROM Stocks")
-    c.execute("DELETE FROM Produits")
-    c.execute("DELETE FROM Categories")
-    conn.commit()
-    print("✅ Base de données nettoyée pour les tests.")
+    print("✅ Base de données réinitialisée pour les tests.")
     
     # 2. Test de création de catégorie et produit
     c.execute("INSERT INTO Categories (nom) VALUES (?)", ("Vêtements",))

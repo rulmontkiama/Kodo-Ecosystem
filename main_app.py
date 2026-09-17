@@ -1256,10 +1256,10 @@ class MainApp(ctk.CTk):
                 ctk.CTkLabel(row, text=f"{nom} (x{qte}) - {prix:.2f} €", font=ctk.CTkFont(FNT_BODY, 13), text_color=TEXT).pack(side="left", padx=20)
                 ctk.CTkButton(row, text="Rembourser", width=110, height=34, fg_color=RED, text_color="#FFFFFF",
                               font=ctk.CTkFont(FNT_BODY, 12, "bold"), corner_radius=24,
-                              command=lambda v=vd_id, s=sid, p=prix: self._rembourser_item(tk, v, s, p)).pack(side="right", padx=15, pady=10)
+                              command=lambda v=vd_id, s=sid, p=prix, q=qte: self._rembourser_item(tk, v, s, p, q)).pack(side="right", padx=15, pady=10)
         except Exception as e: self._st(f"Erreur : {e}", RED)
 
-    def _rembourser_item(self, tk_num, vd_id, sid, prix):
+    def _rembourser_item(self, tk_num, vd_id, sid, prix, quantite=1):
         from views.modals import RefundModal
         from database_manager import enregistrer_remboursement
         def proceed(mode):
@@ -1267,7 +1267,7 @@ class MainApp(ctk.CTk):
                 conn = get_connection(); c = conn.cursor()
                 date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 vendeur = self.vendeur_actif['nom'] if self.vendeur_actif else 'Inconnu'
-                new_tk = enregistrer_remboursement(c, tk_num, vd_id, sid, prix, mode, vendeur, date_heure)
+                new_tk = enregistrer_remboursement(c, tk_num, vd_id, sid, prix, mode, vendeur, date_heure, quantite=quantite)
                 conn.commit()
                 self._st(f"Remboursement ({mode}) effectué : {new_tk}", GRN)
                 self._rechercher_ticket_retour()

@@ -248,25 +248,48 @@ def process_sale_transaction(
         discount_dec = quantize_money(Decimal(str(discount_percent)))
         change_dec = quantize_money(Decimal(str(change_given)))
 
-        tot_htva_dec = Decimal('0.00')
-        panier_formatted = []
+        # Ventilation TVA proportionnelle à la remise réellement appliquée : on calcule
+        # d'abord le sous-total TTC brut (sans remise) pour en déduire un ratio de remise,
+        # puis on applique ce ratio à chaque ligne AVANT le calcul HT/TVA. Sans cela, le
+        # HT/TVA persisté reste calculé sur les prix bruts alors que tot_tvac_dec est déjà
+        # remisé, ce qui fait apparaître une TVA sous-évaluée voire négative dès qu'une
+        # remise globale est appliquée.
+        subtotal_brut_dec = Decimal('0.00')
+        lignes_brutes = []
         for it in cart_items:
             stock_id = it.get("stock_id") or it.get("id_stock") or it.get("id")
             px_tvac = quantize_money(Decimal(str(it.get("prix_vente_tvac") or it.get("prix_tvac") or it.get("price") or 0)))
             taux = Decimal(str(it.get("taux_tva", 0.21)))
             qty = int(it.get("quantite") or it.get("quantity") or 1)
 
-            px_htva = quantize_money(px_tvac / (Decimal('1.00') + taux))
-            tot_htva_dec += px_htva * Decimal(str(qty))
+            ligne_tvac_brute = quantize_money(px_tvac * Decimal(str(qty)))
+            subtotal_brut_dec += ligne_tvac_brute
 
-            panier_formatted.append({
+            lignes_brutes.append({
                 "stock_id": stock_id,
                 "code_barre": it.get("code_barre") or it.get("barcode") or "",
                 "nom": it.get("nom") or it.get("name") or "Article",
                 "prix_vente_tvac": float(px_tvac),
                 "quantite": qty,
-                "taux_tva": float(taux)
+                "taux_tva": float(taux),
+                "ligne_tvac_brute": ligne_tvac_brute,
             })
+
+        ratio_remise = (
+            (tot_tvac_dec / subtotal_brut_dec) if subtotal_brut_dec > Decimal('0.00') else Decimal('1.00')
+        )
+
+        tot_htva_dec = Decimal('0.00')
+        panier_formatted = []
+        for ligne in lignes_brutes:
+            taux = Decimal(str(ligne.pop("taux_tva")))
+            ligne_tvac_brute = ligne.pop("ligne_tvac_brute")
+            ligne_tvac_remisee = quantize_money(ligne_tvac_brute * ratio_remise)
+            ligne_htva = quantize_money(ligne_tvac_remisee / (Decimal('1.00') + taux))
+            tot_htva_dec += ligne_htva
+
+            ligne["taux_tva"] = float(taux)
+            panier_formatted.append(ligne)
 
         tot_tva_dec = tot_tvac_dec - tot_htva_dec
         paiements_dec = [(p[0], float(quantize_money(Decimal(str(p[1]))))) for p in payments]
@@ -292,16 +315,27 @@ def process_sale_transaction(
         conn.commit()
 
         # Scellement fiscal inaltérable (Conformité Loi Anti-fraude TVA)
+        fiscal_totals = {
+            "total_ttc": tot_tvac_dec,
+            "total_ht": tot_htva_dec,
+            "total_tva": tot_tva_dec,
+        }
         try:
             from kodo_core.services.fiscal_service import ensure_schema as ensure_fiscal_schema, seal_sale
             ensure_fiscal_schema(conn)
-            seal_sale(conn, ticket_id, {
-                "total_ttc": tot_tvac_dec,
-                "total_ht": tot_htva_dec,
-                "total_tva": tot_tva_dec,
-            })
+            seal_sale(conn, ticket_id, fiscal_totals)
         except Exception as fe:
+            # Le scellement peut échouer après le commit de la vente : on journalise la
+            # vente dans fiscal_unsealed_sales pour qu'elle soit rescellée au prochain
+            # démarrage (reseal_pending_sales) au lieu de disparaître silencieusement
+            # du journal fiscal.
             print(f"[FISCAL LEDGER WARNING] Impossible de sceller la vente {ticket_id}: {fe}")
+            try:
+                from kodo_core.services.fiscal_service import ensure_schema as ensure_fiscal_schema, record_unsealed_sale
+                ensure_fiscal_schema(conn)
+                record_unsealed_sale(conn, ticket_id, fiscal_totals, str(fe))
+            except Exception as fe2:
+                print(f"[FISCAL LEDGER WARNING] Impossible de journaliser l'échec de scellement pour {ticket_id}: {fe2}")
 
         # Nettoyage de la session Crash Recovery (panier validé avec succès)
         try:
@@ -337,6 +371,7 @@ def process_return_transaction(
     refund_price: float,
     refund_mode: str = "Espèces",
     cashier_name: str = "Admin",
+    quantity: int = 1,
     conn=None
 ) -> Dict[str, Any]:
     import database_manager
@@ -357,7 +392,8 @@ def process_return_transaction(
             prix=Decimal(str(refund_price)),
             mode=refund_mode,
             vendeur_nom=cashier_name,
-            date_heure=now_str
+            date_heure=now_str,
+            quantite=quantity
         )
 
         conn.commit()
@@ -365,7 +401,7 @@ def process_return_transaction(
         return {
             "success": True,
             "refund_ticket_number": new_ref,
-            "amount_refunded": refund_price,
+            "amount_refunded": refund_price * quantity,
             "refund_mode": refund_mode,
             "date_heure": now_str
         }
