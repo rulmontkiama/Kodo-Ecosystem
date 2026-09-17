@@ -348,14 +348,14 @@ class MigrationManager:
         if not os.path.exists(path):
             return ""
 
-        snapshots_dir = ShopConfig.get_snapshots_dir()
-        os.makedirs(snapshots_dir, exist_ok=True)
-
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        snapshot_filename = f"kodo_pos_pre_migration_{timestamp}.db"
-        snapshot_path = os.path.join(snapshots_dir, snapshot_filename)
-
         try:
+            snapshots_dir = ShopConfig.get_snapshots_dir()
+            os.makedirs(snapshots_dir, exist_ok=True)
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            snapshot_filename = f"kodo_pos_pre_migration_{timestamp}.db"
+            snapshot_path = os.path.join(snapshots_dir, snapshot_filename)
+
             shutil.copy2(path, snapshot_path)
             return snapshot_path
         except Exception as e:

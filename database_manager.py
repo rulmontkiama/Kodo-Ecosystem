@@ -357,9 +357,17 @@ def _initialiser_db_raw(conn):
             created_at_utc TEXT,
             synced_shopify INTEGER DEFAULT 0,
             shopify_order_id TEXT,
+            z_id INTEGER DEFAULT NULL,
             FOREIGN KEY (id_client) REFERENCES Clients(id)
         )
     ''')
+
+    # Migrations de colonnes manquantes sur Tickets
+    cursor.execute("PRAGMA table_info(Tickets)")
+    cols_tickets = [row[1] for row in cursor.fetchall()]
+    if 'z_id' not in cols_tickets:
+        try: cursor.execute("ALTER TABLE Tickets ADD COLUMN z_id INTEGER DEFAULT NULL")
+        except: pass
 
     # Table Ventes_Details
     cursor.execute('''
@@ -385,9 +393,21 @@ def _initialiser_db_raw(conn):
             methode_paiement TEXT,
             reference TEXT,
             signature TEXT,
-            hash_precedent TEXT
+            hash_precedent TEXT,
+            caisse_id TEXT DEFAULT 'POS-01',
+            z_id INTEGER DEFAULT NULL
         )
     ''')
+
+    # Migrations de colonnes manquantes sur Ledger_Caisse
+    cursor.execute("PRAGMA table_info(Ledger_Caisse)")
+    cols_ledger = [row[1] for row in cursor.fetchall()]
+    if 'caisse_id' not in cols_ledger:
+        try: cursor.execute("ALTER TABLE Ledger_Caisse ADD COLUMN caisse_id TEXT DEFAULT 'POS-01'")
+        except: pass
+    if 'z_id' not in cols_ledger:
+        try: cursor.execute("ALTER TABLE Ledger_Caisse ADD COLUMN z_id INTEGER DEFAULT NULL")
+        except: pass
 
     # Table Rapports_Z
     cursor.execute('''
