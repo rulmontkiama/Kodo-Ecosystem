@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.61",
-  "latest_version": "1.0.61",
-  "version": "1.0.61",
+  "latestVersion": "1.0.62",
+  "latest_version": "1.0.62",
+  "version": "1.0.62",
   "releaseDate": "2026-09-17",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.61.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.61.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.61.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.62.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.62.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.62.zip",
   "has_update": true,
-  "changelog": "v1.0.61 : Correction du bug d'enregistrement client - le champ email n'est plus bloquant lors de la soumission du formulaire."
+  "changelog": "v1.0.62 : Ajout d'un seuil d'alerte de stock global par défaut (Paramètres > Boutique), avec possibilité de le personnaliser par article."
 }
