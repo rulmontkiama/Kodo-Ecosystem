@@ -7,5 +7,5 @@
   "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.63.zip",
   "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.63.zip",
   "has_update": true,
-  "changelog": "v1.0.63 : Interface complète de gestion du seuil d'alerte : réglage global par défaut dans Paramètres, action en masse sur la sélection dans Stocks, et personnalisation individuelle par produit."
+  "changelog": "v1.0.63 : 1) Paramètres > Stock & Alertes : réglage du seuil d'alerte par défaut pour toute la boutique (persistant en SQLite). 2) Stocks : nouvelle action groupée « Seuil alerte (N) » pour modifier le seuil ou rétablir le seuil général en masse. 3) Fiche Produit : affichage du seuil par défaut en placeholder/badge, vider le champ rétablit l'héritage sans forcer 5. 4) Compteur et filtre « Alertes » : respect strict du seuil effectif de chaque article (personnalisé ou global). 5) Fichier Client : correction du blocage de l'enregistrement lié au champ email."
 }
