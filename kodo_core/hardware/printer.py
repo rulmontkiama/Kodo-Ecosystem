@@ -120,11 +120,22 @@ class ESCPOSThermalPrinter:
         self.vendor_id = vendor_id
         self.product_id = product_id
 
+        # Détection automatique de l'imprimante par défaut sous macOS / Linux si non spécifiée
+        if not self.printer_name and sys.platform in ["darwin", "linux"]:
+            try:
+                import subprocess, re
+                out_d = subprocess.check_output(["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=1).decode()
+                m_d = re.search(r':\s*(\S+)', out_d)
+                if m_d:
+                    self.printer_name = m_d.group(1)
+            except Exception:
+                pass
+
     def connect(self):
         """Vérifie si la connexion ou l'imprimante est joignable."""
         if self.host:
             try:
-                s = socket.create_connection((self.host, self.port), timeout=2)
+                s = socket.create_connection((self.host, self.port), timeout=1.5)
                 s.close()
                 return True
             except Exception:
@@ -139,17 +150,17 @@ class ESCPOSThermalPrinter:
         if not raw_bytes:
             return False
 
-        # 1. Socket réseau TCP direct (Ex: Imprimante réseau sur port 9100)
-        if self.host:
+        # 1. Socket réseau TCP direct (si hôte réseau configuré et actif)
+        if self.host and self.host not in ["127.0.0.1", "localhost"]:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5)
+                    s.settimeout(1.5)
                     s.connect((self.host, self.port))
                     s.sendall(raw_bytes)
                 print(f"[SUCCESS] Données ESC/POS envoyées via Socket IP {self.host}:{self.port}")
                 return True
             except Exception as e:
-                print(f"[ERROR Socket] Échec envoi vers {self.host}:{self.port} - {e}")
+                print(f"[INFO Socket] IP {self.host}:{self.port} non joignable ({e}). Bascule vers l'imprimante USB/Spouleur...")
 
         # 2. Impresion sous Windows (win32print / spooler)
         if sys.platform == 'win32':

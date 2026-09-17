@@ -3,6 +3,8 @@
 Routes API Système, Version, Licence et Utilisateurs/PIN - Kōdo POS Core
 """
 
+import os
+import sys
 import datetime
 import sqlite3
 from typing import Dict, Any, Tuple, Optional
@@ -454,12 +456,58 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         except Exception as e:
             return 500, {"success": False, "error": str(e)}
 
-    # 18. Impression d'un ticket test
-    elif method == "POST" and (path == "/api/printer/test" or path == "/api/settings/printer/test"):
+    # 18. Statut des imprimantes (détection USB / CUPS / Windows)
+    elif method == "GET" and (path == "/api/printers" or path == "/api/printer/status" or path == "/api/settings/printers"):
+        try:
+            import subprocess, re
+            printers_list = []
+            default_printer = None
+
+            if sys.platform in ["darwin", "linux"]:
+                try:
+                    out_d = subprocess.check_output(["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=2).decode()
+                    m_d = re.search(r':\s*(\S+)', out_d)
+                    if m_d:
+                        default_printer = m_d.group(1)
+                except Exception:
+                    pass
+
+                try:
+                    out_v = subprocess.check_output(["lpstat", "-v"], stderr=subprocess.DEVNULL, timeout=2).decode()
+                    for line in out_v.splitlines():
+                        m_v = re.search(r'p[ée]riph[ée]rique pour (\S+)\s*:\s*(.+)', line, re.IGNORECASE)
+                        if m_v:
+                            p_name = m_v.group(1)
+                            p_uri = m_v.group(2).strip()
+                            is_usb = "usb://" in p_uri.lower()
+                            printers_list.append({
+                                "name": p_name,
+                                "uri": p_uri,
+                                "is_usb": is_usb,
+                                "is_default": (p_name == default_printer)
+                            })
+                except Exception:
+                    pass
+
+            return 200, {
+                "success": True,
+                "defaultPrinter": default_printer,
+                "printers": printers_list,
+                "has_usb_printer": any(p.get("is_usb") for p in printers_list)
+            }
+        except Exception as e:
+            return 200, {"success": False, "error": str(e), "printers": []}
+
+    # 19. Impression d'un ticket test
+    elif method == "POST" and (path in [
+        "/api/printer/test", "/api/settings/printer/test", "/api/print/test",
+        "/api/printer", "/api/printers/test", "/api/hardware/printer/test"
+    ]):
         try:
             import ticket_printer
             printer_ip = data.get("printerIP") or data.get("printer_ip")
-            res = ticket_printer.imprimer_ticket_test(host=printer_ip)
+            printer_name = data.get("printerName") or data.get("printer_name")
+            res = ticket_printer.imprimer_ticket_test(printer_name=printer_name, host=printer_ip)
             return 200, {
                 "success": True,
                 "message": "Ticket de test envoyé à l'imprimante avec succès !",
@@ -469,6 +517,15 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             }
         except Exception as e:
             return 500, {"success": False, "error": f"Erreur lors de l'impression du ticket test : {str(e)}"}
+
+    # 20. Commande ouverture tiroir-caisse
+    elif method == "POST" and (path == "/api/printer/open-drawer" or path == "/api/cash-drawer/open"):
+        try:
+            import ticket_printer
+            res = ticket_printer.ouvrir_tiroir_caisse()
+            return 200, {"success": res, "message": "Signal d'ouverture envoyé au tiroir-caisse"}
+        except Exception as e:
+            return 500, {"success": False, "error": str(e)}
 
     return None
 

@@ -45,8 +45,9 @@ class KodoAPIApp:
         """
         Traite une requête HTTP API et retourne (status_code, content, headers).
         """
+        normalized_path = path.rstrip('/') if (path and path != '/') else path
         for handler in self.route_handlers:
-            res = handler(method, path, query, data)
+            res = handler(method, normalized_path, query, data)
             if res is not None:
                 if len(res) == 3:
                     status_code, content, custom_headers = res
