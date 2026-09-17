@@ -601,6 +601,58 @@ def get_ticket_logo_path():
     return None
 
 
+def get_ticket_social_path():
+    """
+    Retourne le chemin d'accès au bloc réseaux sociaux du ticket de caisse.
+    Cherche en priorité le bloc personnalisé configuré par l'utilisateur,
+    puis se replie sur le bloc Instagram par défaut de l'application.
+    Si le bloc n'existe pas sur disque mais est présent en base SQLite (Parametres), le régénère.
+    """
+    try:
+        import database_manager
+        conn = database_manager.get_connection()
+        c = conn.cursor()
+        c.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_social_b64'")
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            raw_b64 = row[0]
+            if "," in raw_b64:
+                raw_b64 = raw_b64.split(",", 1)[1]
+            import base64
+            img_bytes = base64.b64decode(raw_b64)
+            target_p = database_manager.data_path("social_ticket.png")
+            try:
+                os.makedirs(os.path.dirname(target_p), exist_ok=True)
+                with open(target_p, "wb") as f:
+                    f.write(img_bytes)
+                return target_p
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        import database_manager
+        candidate_paths = [
+            database_manager.data_path("social_ticket.png"),
+            os.path.expanduser("~/Documents/Kodo_POS/social_ticket.png"),
+            os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png"),
+            os.path.join(os.path.abspath("."), "social_ticket.png")
+        ]
+        for p in candidate_paths:
+            if os.path.exists(p) and os.path.getsize(p) > 100:
+                return p
+    except Exception:
+        pass
+
+    default_p = get_resource_path("instagram_block.png")
+    if os.path.exists(default_p) and os.path.getsize(default_p) > 100:
+        return default_p
+
+    return None
+
+
 def generer_image_ticket(contenu, numero):
     """
     Génère une image PNG du ticket complet (Logo + Texte + Instagram/QR Code)
@@ -609,7 +661,7 @@ def generer_image_ticket(contenu, numero):
     from PIL import Image, ImageDraw, ImageFont
 
     logo_path = get_ticket_logo_path()
-    insta_path = get_resource_path("instagram_block.png")
+    insta_path = get_ticket_social_path()
 
     img_logo = None
     img_insta = None
@@ -618,7 +670,7 @@ def generer_image_ticket(contenu, numero):
             img_logo = Image.open(logo_path).convert("RGBA")
         except Exception:
             pass
-    if os.path.exists(insta_path):
+    if insta_path and os.path.exists(insta_path):
         try:
             img_insta = Image.open(insta_path).convert("RGBA")
         except Exception:
@@ -769,8 +821,8 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100):
     raw_payload.extend(contenu_clean.encode('ascii', errors='replace'))
     raw_payload.extend(b"\n" + ESC_ALIGN_CENTER)
 
-    insta_path = get_resource_path("instagram_block.png")
-    if os.path.exists(insta_path):
+    insta_path = get_ticket_social_path()
+    if insta_path and os.path.exists(insta_path):
         try:
             img_insta = Image.open(insta_path)
             raw_payload.extend(pil_to_escpos_raster(img_insta))
@@ -812,11 +864,11 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100):
                     continue
 
             if p is not None:
-                if os.path.exists(logo_path):
+                if logo_path and os.path.exists(logo_path):
                     try: p.image(logo_path, impl="bitImageColumn")
                     except Exception: pass
                 p.text(contenu_clean)
-                if os.path.exists(insta_path):
+                if insta_path and os.path.exists(insta_path):
                     try: p.image(insta_path, impl="bitImageColumn")
                     except Exception: pass
                 p.cut()
