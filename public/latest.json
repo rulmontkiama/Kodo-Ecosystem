@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.53",
-  "latest_version": "1.0.53",
-  "version": "1.0.53",
+  "latestVersion": "1.0.54",
+  "latest_version": "1.0.54",
+  "version": "1.0.54",
   "releaseDate": "2026-09-17",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.53.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.53.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.53.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.54.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.54.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.54.zip",
   "has_update": true,
-  "changelog": "v1.0.53 : Correction routage API (/api/settings/social et /settings/social), messages explicites de mise a jour du moteur local et support complet du pied de ticket personnalise."
+  "changelog": "v1.0.54 : Sélection automatique de la saisie sur la caisse (focus & fast-scan immédiats), sélection prioritaire de la zone code-barres EAN à l'enregistrement d'un produit (champ non pré-rempli pour scan direct) et passage automatique à la désignation."
 }
