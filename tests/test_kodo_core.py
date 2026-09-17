@@ -174,5 +174,58 @@ class TestKodoCore(unittest.TestCase):
             self.assertTrue(res.get("has_update"))
 
 
+    def test_logo_and_social_settings(self):
+        """Vérifie le cycle de vie du bloc réseaux sociaux et la suppression propre du logo."""
+        from kodo_core.api.app import KodoAPIApp
+        from kodo_core.hardware.printer import get_ticket_social_path
+        from PIL import Image
+        from io import BytesIO
+        import base64
+
+        app = KodoAPIApp()
+
+        # 1. Image de test
+        img = Image.new("RGBA", (80, 80), (0, 128, 255, 255))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        b64_str = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        # 2. Upload / POST social
+        code, resp, _ = app.handle_request("POST", "/api/settings/social", {}, {}, {"social": b64_str})
+        self.assertEqual(code, 200)
+        self.assertTrue(resp.get("success"))
+
+        # 3. GET social
+        code, resp, _ = app.handle_request("GET", "/api/settings/social", {}, {}, {})
+        self.assertEqual(code, 200)
+        self.assertTrue(resp.get("has_social"))
+
+        # 4. get_ticket_social_path retourne le custom
+        custom_path = get_ticket_social_path()
+        self.assertIsNotNone(custom_path)
+        self.assertTrue(os.path.exists(custom_path))
+
+        # 5. DELETE social
+        code, resp, _ = app.handle_request("DELETE", "/api/settings/social", {}, {}, {})
+        self.assertEqual(code, 200)
+        self.assertTrue(resp.get("success"))
+
+        code, resp, _ = app.handle_request("GET", "/api/settings/social", {}, {}, {})
+        self.assertEqual(code, 200)
+        self.assertFalse(resp.get("has_social"))
+
+        # 6. Test suppression logo personnalisé
+        custom_logo = database_manager.data_path("logo_ticket.png")
+        os.makedirs(os.path.dirname(custom_logo), exist_ok=True)
+        with open(custom_logo, "wb") as f:
+            f.write(buf.getvalue())
+        self.assertTrue(os.path.exists(custom_logo))
+
+        code, resp, _ = app.handle_request("DELETE", "/api/settings/logo", {}, {}, {})
+        self.assertEqual(code, 200)
+        self.assertFalse(os.path.exists(custom_logo))
+
+
 if __name__ == "__main__":
     unittest.main()
+

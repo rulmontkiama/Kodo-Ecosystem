@@ -443,16 +443,159 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             candidate_paths = [
                 database_manager.data_path("logo_ticket.png"),
                 os.path.expanduser("~/Documents/Kodo_POS/logo_ticket.png"),
-                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png")
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png"),
+                os.path.join(os.path.abspath("."), "logo_ticket.png")
             ]
+            from kodo_core.hardware.printer import get_resource_path
+            default_logo = get_resource_path("logo_ticket.png")
             for p in candidate_paths:
                 try:
+                    if default_logo and os.path.abspath(p) == os.path.abspath(default_logo):
+                        continue
                     if os.path.exists(p):
                         os.remove(p)
                 except Exception:
                     pass
 
             return 200, {"success": True, "message": "Logo supprimé avec succès"}
+        except Exception as e:
+            return 500, {"success": False, "error": str(e)}
+
+    # 18. Personnalisation du Ticket : Upload du bloc Réseaux Sociaux
+    elif method == "POST" and path == "/api/settings/social":
+        try:
+            import base64
+            from io import BytesIO
+            from PIL import Image
+
+            social_b64 = data.get("social") or data.get("social_base64")
+            if not social_b64:
+                return 400, {"success": False, "error": "Données d'image manquantes (social_base64 requis)"}
+
+            if "," in social_b64:
+                social_b64 = social_b64.split(",", 1)[1]
+
+            image_data = base64.b64decode(social_b64)
+            img = Image.open(BytesIO(image_data))
+
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == 'RGBA':
+                    bg.paste(img, mask=img.split()[-1])
+                else:
+                    bg.paste(img)
+                img = bg
+
+            max_width = 384
+            if img.width > max_width:
+                ratio = max_width / float(img.width)
+                new_height = int(float(img.height) * ratio)
+                img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+
+            import os
+            target_path = database_manager.data_path("social_ticket.png")
+            try:
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                img.save(target_path, format="PNG")
+            except Exception as e:
+                print(f"[WARN] Sauvegarde social data_path: {e}")
+
+            for alt_dir in [
+                os.path.expanduser("~/Documents/Kodo_POS"),
+                os.path.expanduser("~/Library/Application Support/Kodo_POS"),
+                os.path.abspath(".")
+            ]:
+                try:
+                    os.makedirs(alt_dir, exist_ok=True)
+                    img.save(os.path.join(alt_dir, "social_ticket.png"), format="PNG")
+                except Exception:
+                    pass
+
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            stored_b64 = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_custom', '1')")
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_b64', ?)", (stored_b64,))
+            conn.commit()
+            conn.close()
+
+            return 200, {
+                "success": True,
+                "message": "Bloc réseaux sociaux enregistré avec succès !",
+                "width": img.width,
+                "height": img.height,
+                "social_url": stored_b64
+            }
+        except Exception as e:
+            return 500, {"success": False, "error": f"Erreur lors du traitement du bloc réseaux sociaux : {str(e)}"}
+
+    # 18b. Obtenir le statut et l'URL du bloc réseaux sociaux actuel
+    elif method == "GET" and path == "/api/settings/social":
+        try:
+            import os
+            import base64
+
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_social_b64'")
+                row = cursor.fetchone()
+                conn.close()
+                if row and row[0] and len(row[0]) > 50:
+                    return 200, {"has_social": True, "social_url": row[0]}
+            except Exception:
+                pass
+
+            candidate_paths = [
+                database_manager.data_path("social_ticket.png"),
+                os.path.expanduser("~/Documents/Kodo_POS/social_ticket.png"),
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png"),
+                os.path.join(os.path.abspath("."), "social_ticket.png")
+            ]
+            for target_path in candidate_paths:
+                if os.path.exists(target_path) and os.path.getsize(target_path) > 100:
+                    with open(target_path, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("utf-8")
+                    return 200, {"has_social": True, "social_url": f"data:image/png;base64,{b64}"}
+
+            return 200, {"has_social": False}
+        except Exception as e:
+            return 500, {"has_social": False, "error": str(e)}
+
+    # 18c. Supprimer le bloc réseaux sociaux personnalisé (retour au bloc par défaut)
+    elif method == "DELETE" and path == "/api/settings/social":
+        try:
+            import os
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM Parametres WHERE cle IN ('receipt_social_custom', 'receipt_social_b64')")
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+            candidate_paths = [
+                database_manager.data_path("social_ticket.png"),
+                os.path.expanduser("~/Documents/Kodo_POS/social_ticket.png"),
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png"),
+                os.path.join(os.path.abspath("."), "social_ticket.png")
+            ]
+            from kodo_core.hardware.printer import get_resource_path
+            default_social = get_resource_path("instagram_block.png")
+            for p in candidate_paths:
+                try:
+                    if default_social and os.path.abspath(p) == os.path.abspath(default_social):
+                        continue
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+
+            return 200, {"success": True, "message": "Bloc réseaux sociaux supprimé avec succès"}
         except Exception as e:
             return 500, {"success": False, "error": str(e)}
 
