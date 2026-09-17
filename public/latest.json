@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.55",
-  "latest_version": "1.0.55",
-  "version": "1.0.55",
+  "latestVersion": "1.0.56",
+  "latest_version": "1.0.56",
+  "version": "1.0.56",
   "releaseDate": "2026-09-17",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.55.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.55.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.55.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.56.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.56.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.56.zip",
   "has_update": true,
-  "changelog": "v1.0.55 : Correction et sauvegarde persistante des grilles de déclinaisons de tailles personnalisées (Catégories et fiche Produit), sélection automatique du scan caisse et focus prioritaire EAN à la création de produit."
+  "changelog": "v1.0.56 : Quantité par défaut fixée à 0 sur toutes les déclinaisons de tailles pour la saisie propre du stock, saisie directe du stock par taille sans clic répétitif, et initialisation sans valeurs aléatoires."
 }
