@@ -108,7 +108,7 @@ class ZReportEngine:
 
             # Conversion des Decimals en floats pour la sérialisation
             for key in ["total_tvac", "total_htva", "total_tva", "total_remises", "total_especes",
-                        "total_carte", "total_apports", "total_prelevements"]:
+                        "total_carte", "total_qr", "total_avoir", "total_apports", "total_prelevements"]:
                 if key in bilan and isinstance(bilan[key], Decimal):
                     bilan[key] = float(bilan[key])
 
@@ -123,6 +123,7 @@ class ZReportEngine:
         cls,
         caisse_id: str = "POS-01",
         fond_caisse_reel: float = 0.0,
+        fond_caisse_matin: float = 0.0,
         vendeur: str = "Admin",
         conn=None
     ) -> Dict[str, Any]:
@@ -130,9 +131,11 @@ class ZReportEngine:
         Exécute et scelle la clôture comptable Z journalière (NF525).
         """
         fond_dec = Decimal(str(fond_caisse_reel))
+        fond_matin_dec = Decimal(str(fond_caisse_matin))
         res = enregistrer_cloture_caisse(
             caisse_id=caisse_id,
             fond_caisse_reel=fond_dec,
+            fond_caisse_matin=fond_matin_dec,
             vendeur=vendeur,
             conn=conn
         )

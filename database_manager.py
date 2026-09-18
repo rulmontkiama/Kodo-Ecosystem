@@ -1130,11 +1130,22 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
         ledger_ids = [row[0] for row in ledger_rows]
         tot_esp = Decimal("0.00")
         tot_carte = Decimal("0.00")
+        tot_qr = Decimal("0.00")
+        tot_avoir = Decimal("0.00")
 
+        # Classification explicite par moyen de paiement : un split binaire espèces/carte
+        # (tout ce qui n'est pas "espèces" tombait dans "carte") gonflait à tort le total
+        # carte bancaire avec les paiements QR et les remboursements/débits en Avoir
+        # (carte cadeau) — aucun de ces deux n'a jamais transité par le terminal CB.
         for _id, m, mt in ledger_rows:
             mt_dec = Decimal(str(mt or "0.00"))
-            if m and str(m).lower() in ["espèces", "especes", "cash"]:
+            methode = str(m or "").strip().lower()
+            if methode in ("espèces", "especes", "cash"):
                 tot_esp += mt_dec
+            elif methode == "qr":
+                tot_qr += mt_dec
+            elif methode in ("avoir", "carte cadeau", "carte_cadeau", "gift card", "giftcard"):
+                tot_avoir += mt_dec
             else:
                 tot_carte += mt_dec
 
@@ -1166,6 +1177,8 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
             "total_remises": tot_remises,
             "total_especes": tot_esp,
             "total_carte": tot_carte,
+            "total_qr": tot_qr,
+            "total_avoir": tot_avoir,
             "total_apports": tot_apports,
             "total_prelevements": tot_prelevements,
             "ticket_ids": ticket_ids,
@@ -1175,7 +1188,7 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
         if should_close:
             conn.close()
 
-def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.00"), vendeur="Admin", conn=None):
+def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.00"), fond_caisse_matin=Decimal("0.00"), vendeur="Admin", conn=None):
     from audit_trail import calculer_hash_cloture
 
     should_close = False
@@ -1194,8 +1207,15 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         now_utc = datetime.datetime.utcnow().isoformat() + "Z"
 
+        # L'écart caisse compare le comptage PHYSIQUE COMPLET du tiroir (billets + pièces,
+        # fond initial inclus) au théorique attendu (fond initial + ventes espèces du jour
+        # + apports - prélèvements). Comparer fond_caisse_reel directement à total_especes
+        # (sans le fond initial) faisait apparaître un écart artificiellement gonflé du
+        # montant exact du fond de caisse, à chaque clôture.
         fond_reel_dec = Decimal(str(fond_caisse_reel))
-        ecart = (fond_reel_dec - bilan["total_especes"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        fond_matin_dec = Decimal(str(fond_caisse_matin))
+        theorique_especes = fond_matin_dec + bilan["total_especes"] + bilan["total_apports"] - bilan["total_prelevements"]
+        ecart = (fond_reel_dec - theorique_especes).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         curr_hash = calculer_hash_cloture(
             hash_prec, now_str, caisse_id,

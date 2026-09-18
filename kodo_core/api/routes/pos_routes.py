@@ -275,10 +275,12 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
     # 8. Clôture Z de Caisse
     elif method == "POST" and path == "/api/cloture-z":
         fond_caisse = float(data.get('fondCaisseReel', 0))
+        fond_caisse_matin = float(data.get('fondCaisseMatin', 0))
         vendeur = data.get('vendeur', 'Admin')
         result = ZReportEngine.close_z_report(
             caisse_id="POS-01",
             fond_caisse_reel=fond_caisse,
+            fond_caisse_matin=fond_caisse_matin,
             vendeur=vendeur
         )
         return 200, {"success": True, "cloture": result}
