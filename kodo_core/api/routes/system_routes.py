@@ -80,11 +80,13 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
     elif method == "POST" and path == "/api/users":
         name = data.get('name') or data.get('nom')
         role = data.get('role', 'Caissier')
-        pin = data.get('pinCode') or data.get('pin', '0000')
+        pin = str(data.get('pinCode') or data.get('pin') or '').strip()
         is_admin = 1 if role == 'Gérant' else 0
 
         if not name:
             return 400, {"error": "Le nom de l'utilisateur est obligatoire"}
+        if len(pin) != 4 or not pin.isdigit():
+            return 400, {"error": "Le code PIN doit comporter 4 chiffres."}
 
         hashed_pin = hash_pin(pin)
         conn = get_connection()
@@ -120,7 +122,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
     # 10. Vérification du code PIN
     elif method == "POST" and path == "/api/pin/verify":
-        pin = data.get('pin', '')
+        pin = str(data.get('pin', '')).strip()
         conn = get_connection()
         cursor = conn.cursor()
         p_hash = hash_pin(pin)
@@ -128,19 +130,32 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         # Vérifier dans Vendeurs
         cursor.execute("SELECT id, nom, role_admin FROM Vendeurs WHERE pin=?", (p_hash,))
         user = cursor.fetchone()
-        conn.close()
 
         if user:
+            conn.close()
             role_str = 'Gérant' if user[2] == 1 else 'Caissier'
             return 200, {"valid": True, "user": {"id": str(user[0]), "name": user[1], "role": role_str}}
-        else:
-            return 401, {"valid": False, "error": "Code PIN incorrect"}
+
+        # Aucun Gérant dans Vendeurs : le PIN maître (pin_admin) fait foi
+        cursor.execute("SELECT COUNT(*) FROM Vendeurs WHERE role_admin=1")
+        no_admin = cursor.fetchone()[0] == 0
+        master_ok = False
+        if no_admin:
+            cursor.execute("SELECT 1 FROM Parametres WHERE cle='pin_admin' AND valeur=?", (p_hash,))
+            master_ok = cursor.fetchone() is not None
+        conn.close()
+
+        if master_ok:
+            return 200, {"valid": True, "user": {"id": "0", "name": "Administrateur", "role": "Gérant"}}
+        return 401, {"valid": False, "error": "Code PIN incorrect"}
 
     # 11. Modification du code PIN
     elif method == "POST" and path == "/api/pin/update":
         old_pin = str(data.get('oldPin', '')).strip()
         new_pin = str(data.get('newPin', '')).strip()
         user_id = data.get('userId')
+        if str(user_id or '').strip() in ('', '0', 'None', 'null', 'undefined'):
+            user_id = None  # "0" = administrateur maître (base sans vendeur)
 
         if len(new_pin) != 4 or not new_pin.isdigit():
             return 400, {"success": False, "error": "Le nouveau code PIN doit comporter 4 chiffres."}
@@ -150,27 +165,55 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         old_hash = hash_pin(old_pin)
         new_hash = hash_pin(new_pin)
 
-        cursor.execute("SELECT id FROM Vendeurs WHERE pin=?", (old_hash,))
-        valid_user = cursor.fetchone()
+        # Ancien PIN : doit correspondre à un vendeur, ou au PIN maître (tant qu'aucun Gérant n'existe)
+        cursor.execute("SELECT id, role_admin FROM Vendeurs WHERE pin=?", (old_hash,))
+        matched = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) FROM Vendeurs WHERE role_admin=1")
+        no_admin = cursor.fetchone()[0] == 0
+        master_ok = False
+        if not matched and no_admin:
+            cursor.execute("SELECT 1 FROM Parametres WHERE cle='pin_admin' AND valeur=?", (old_hash,))
+            master_ok = cursor.fetchone() is not None
 
-        if not valid_user and old_pin != "0000":
-            cursor.execute("SELECT valeur FROM Parametres WHERE cle='pin_admin' AND valeur=?", (old_hash,))
-            if cursor.fetchone():
-                valid_user = True
-
-        if valid_user or old_pin == "0000":
-            if user_id:
-                cursor.execute("UPDATE Vendeurs SET pin=? WHERE id=?", (new_hash, user_id))
-            else:
-                cursor.execute("UPDATE Vendeurs SET pin=? WHERE role_admin=1", (new_hash,))
-
-            cursor.execute("UPDATE Parametres SET valeur=? WHERE cle='pin_admin'", (new_hash,))
-            conn.commit()
-            conn.close()
-            return 200, {"success": True, "message": "Code PIN mis à jour avec succès !"}
-        else:
+        if not matched and not master_ok:
             conn.close()
             return 400, {"success": False, "error": "L'ancien code PIN est incorrect."}
+
+        # Cible : l'utilisateur demandé (seulement si l'ancien PIN est le sien ou celui d'un gérant),
+        # sinon le vendeur dont l'ancien PIN a été saisi.
+        if user_id and matched and str(matched[0]) != str(user_id) and matched[1] != 1:
+            conn.close()
+            return 400, {"success": False, "error": "L'ancien code PIN est incorrect."}
+        target_id = user_id or (matched[0] if matched else None)
+
+        if target_id:
+            cursor.execute("SELECT id, role_admin FROM Vendeurs WHERE id=?", (target_id,))
+            target = cursor.fetchone()
+            if not target:
+                conn.close()
+                return 400, {"success": False, "error": "Utilisateur introuvable."}
+            cursor.execute("SELECT 1 FROM Vendeurs WHERE pin=? AND id!=?", (new_hash, target[0]))
+            taken = cursor.fetchone() is not None
+            if not taken and no_admin and target[1] != 1:
+                cursor.execute("SELECT 1 FROM Parametres WHERE cle='pin_admin' AND valeur=?", (new_hash,))
+                taken = cursor.fetchone() is not None
+            if taken:
+                conn.close()
+                return 400, {"success": False, "error": "Ce code PIN est déjà utilisé par un autre utilisateur."}
+            cursor.execute("UPDATE Vendeurs SET pin=? WHERE id=?", (new_hash, target[0]))
+            update_master = target[1] == 1
+        else:
+            update_master = True
+
+        # Le PIN maître ne suit que les changements du gérant (ou du PIN maître lui-même)
+        if update_master:
+            cursor.execute("""
+                INSERT INTO Parametres (cle, valeur) VALUES ('pin_admin', ?)
+                ON CONFLICT(cle) DO UPDATE SET valeur=excluded.valeur
+            """, (new_hash,))
+        conn.commit()
+        conn.close()
+        return 200, {"success": True, "message": "Code PIN mis à jour avec succès !"}
 
 
     # 12. Récupérer les paramètres de l'établissement et de synchronisation
