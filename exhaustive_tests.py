@@ -108,7 +108,7 @@ def test_return_logic(tnum, sid, vd_id):
     try:
         conn = get_connection(); c = conn.cursor()
         date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        new_tk = enregistrer_remboursement(c, tnum, vd_id, sid, Decimal("121.00"), "Espèces", "Admin", date_heure)
+        new_tk, _refund_total = enregistrer_remboursement(c, tnum, vd_id, sid, Decimal("121.00"), "Espèces", "Admin", date_heure)
         conn.commit()
         
         c.execute("SELECT quantite_actuelle FROM Stocks WHERE id=?", (sid,))

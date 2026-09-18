@@ -122,7 +122,8 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
                 cashier_name=vendeur,
                 caisse_id="POS-01",
                 discount_percent=remise,
-                change_given=rendu
+                change_given=rendu,
+                gift_card_code=data.get('giftCardCode')
             )
         except ValueError as ve:
             # Rejet métier légitime (stock insuffisant, paiement insuffisant, article
@@ -335,6 +336,55 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             "userName": vendeur,
             "date_heure": now_str
         }
+
+    # 9ter. Cartes Cadeaux / Avoirs — émission et consultation réelles côté serveur.
+    # Avant cette route, un avoir "émis" depuis Retours/Avoirs ne vivait qu'en mémoire
+    # navigateur (localStorage) : invisible d'une autre caisse et jamais vérifiable à la
+    # dépense (cf. le contrôle de redemption dans /api/sales ci-dessus).
+    elif method == "GET" and path == "/api/gift-cards":
+        return 200, database_manager.lister_cartes_cadeaux()
+
+    elif method == "POST" and path == "/api/gift-cards":
+        try:
+            montant = float(data.get("amount", 0))
+        except (TypeError, ValueError):
+            return 400, {"error": "Montant invalide"}
+
+        conn = database_manager.get_connection()
+        try:
+            cursor = conn.cursor()
+            carte = database_manager.emettre_carte_cadeau(
+                cursor=cursor,
+                montant=montant,
+                code=data.get("code"),
+                client_id=data.get("clientId"),
+                client_nom=data.get("clientName"),
+                notes=data.get("notes"),
+                emis_par=data.get("userName") or data.get("cashierName") or "Admin",
+                prefix=(data.get("prefix") or "AVOIR"),
+            )
+            conn.commit()
+        except ValueError as ve:
+            conn.rollback()
+            return 400, {"error": str(ve)}
+        finally:
+            conn.close()
+
+        return 200, {"success": True, **carte}
+
+    elif method == "POST" and path == "/api/gift-cards/void":
+        code = data.get("code")
+        conn = database_manager.get_connection()
+        try:
+            cursor = conn.cursor()
+            database_manager.annuler_carte_cadeau(cursor, code)
+            conn.commit()
+        except ValueError as ve:
+            conn.rollback()
+            return 400, {"error": str(ve)}
+        finally:
+            conn.close()
+        return 200, {"success": True}
 
     # 10. Crash Recovery : Sauvegarde / Récupération du panier actif
     elif method == "POST" and path == "/api/cart/session":

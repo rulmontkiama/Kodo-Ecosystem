@@ -8,6 +8,7 @@ les annulations et les retours/remboursements avec certification NF525.
 
 import json
 import datetime
+import sqlite3
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Dict, Any, Optional, Tuple
@@ -231,7 +232,8 @@ def process_sale_transaction(
     caisse_id: str = "POS-01",
     discount_percent: float = 0.0,
     change_given: float = 0.0,
-    conn=None
+    conn=None,
+    gift_card_code: Optional[str] = None
 ) -> Dict[str, Any]:
     import database_manager
     should_close = False
@@ -367,25 +369,54 @@ def process_sale_transaction(
                 f"Paiement insuffisant : {reste_du_dec} restant dû sur un total de {tot_tvac_dec}."
             )
 
+        # Redemption réelle de carte cadeau/avoir : sans ce contrôle serveur, choisir
+        # "Avoir" comme moyen de paiement validait la vente pour n'importe quel code
+        # (même inventé ou vide), sans jamais vérifier ni débiter une vraie carte —
+        # une vente "gratuite" indistinguable d'une vente payée dans le ledger. Le débit
+        # se fait dans la MÊME transaction que la vente (avant tout INSERT/UPDATE de
+        # celle-ci) : si la vente échoue derrière, le rollback global annule aussi le débit.
+        for methode_p, montant_p in paiements_dec:
+            if str(methode_p or "").strip().lower() in ("avoir", "carte cadeau", "carte_cadeau", "gift card", "giftcard"):
+                database_manager.utiliser_carte_cadeau(cursor, gift_card_code, montant_p, user_name=cashier_name)
+
         paiements_payload = [(p[0], float(p[1])) for p in paiements_dec]
         main_payment_method = paiements_payload[0][0] if paiements_payload else "CB"
 
-        ticket_id = database_manager.enregistrer_vente(
-            cursor=cursor,
-            numero_ticket=num_ticket,
-            total_tvac=float(tot_tvac_dec),
-            total_htva=float(tot_htva_dec),
-            total_tva=float(tot_tva_dec),
-            remise=float(remise_montant_dec),
-            methode_paiement=main_payment_method,
-            id_client=client_id,
-            rendu_monnaie=float(rendu_dec),
-            panier=panier_formatted,
-            vendeur_nom=cashier_name,
-            date_heure=now_str,
-            paiements=paiements_payload,
-            caisse_id=caisse_id
-        )
+        # Retry borné sur collision de numero_ticket (contrainte UNIQUE) : le serveur HTTP
+        # est mono-thread, donc ceci ne peut survenir qu'entre deux processus caisse
+        # distincts partageant le même fichier SQLite (multi-caisse) ayant lu le même
+        # MAX(numero_ticket) avant que l'un des deux ne commite. Plutôt que de faire
+        # échouer une vente réellement payée par le client sur cette rare course, on
+        # régénère un numéro et on retente (la contrainte UNIQUE garantit qu'aucun
+        # doublon ne peut jamais être inséré silencieusement).
+        ticket_id = None
+        last_integrity_error = None
+        for _attempt in range(5):
+            try:
+                ticket_id = database_manager.enregistrer_vente(
+                    cursor=cursor,
+                    numero_ticket=num_ticket,
+                    total_tvac=float(tot_tvac_dec),
+                    total_htva=float(tot_htva_dec),
+                    total_tva=float(tot_tva_dec),
+                    remise=float(remise_montant_dec),
+                    methode_paiement=main_payment_method,
+                    id_client=client_id,
+                    rendu_monnaie=float(rendu_dec),
+                    panier=panier_formatted,
+                    vendeur_nom=cashier_name,
+                    date_heure=now_str,
+                    paiements=paiements_payload,
+                    caisse_id=caisse_id
+                )
+                break
+            except sqlite3.IntegrityError as ie:
+                if "numero_ticket" not in str(ie):
+                    raise
+                last_integrity_error = ie
+                num_ticket = database_manager.generer_numero_ticket(cursor)
+        if ticket_id is None:
+            raise last_integrity_error
 
         conn.commit()
 

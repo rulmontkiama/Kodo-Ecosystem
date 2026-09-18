@@ -336,6 +336,63 @@ class MigrationManager:
                 # et le ledger sans jamais vérifier combien avait déjà été remboursé.
                 "ALTER TABLE Ventes_Details ADD COLUMN refund_of_vd_id INTEGER DEFAULT NULL"
             ]
+        },
+        {
+            "version": "1.4.0",
+            "description": "Auto-réparation de dérive de schéma : Audit_Trail, Cartes_Cadeaux et Shopify_Sync "
+                            "avaient été ajoutées au SQL de la migration 1.0.0 après coup, donc toute base déjà "
+                            "marquée '1.0.0' comme appliquée (avant cet ajout) ne les a jamais reçues. Comme le "
+                            "suivi de version se fait par identifiant de migration (et non par instruction), ces "
+                            "tables ne pouvaient plus jamais être créées rétroactivement. Cette migration est "
+                            "volontairement idempotente (IF NOT EXISTS) pour combler l'écart sur toute base réelle "
+                            "existante, sans toucher aux données déjà présentes.",
+            "sql": [
+                """CREATE TABLE IF NOT EXISTS Audit_Trail (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    event_type TEXT NOT NULL,
+                    entity_name TEXT NOT NULL,
+                    entity_id TEXT,
+                    user_name TEXT,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    previous_hash TEXT,
+                    current_hash TEXT NOT NULL,
+                    signature TEXT
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_audit_trail_timestamp ON Audit_Trail(timestamp)",
+                """CREATE TABLE IF NOT EXISTS Cartes_Cadeaux (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT UNIQUE NOT NULL,
+                    solde_initial DECIMAL NOT NULL,
+                    solde_actuel DECIMAL NOT NULL,
+                    date_creation DATETIME DEFAULT CURRENT_TIMESTAMP
+                )""",
+                """CREATE TABLE IF NOT EXISTS Shopify_Sync (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    shopify_id TEXT NOT NULL,
+                    last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'synced',
+                    details TEXT
+                )"""
+            ]
+        },
+        {
+            "version": "1.5.0",
+            "description": "Cartes_Cadeaux/Avoirs : traçabilité (bénéficiaire, motif, statut, émetteur) et "
+                            "durcissement anti-fraude de la redemption. Le paiement par 'Avoir' en caisse "
+                            "n'était vérifié ni créé côté serveur : n'importe quel code (même inventé) "
+                            "validait une vente en 2 clics sans aucune contrepartie réelle, et une carte "
+                            "valide pouvait être réutilisée indéfiniment sans jamais voir son solde décrémenté.",
+            "sql": [
+                "ALTER TABLE Cartes_Cadeaux ADD COLUMN notes TEXT DEFAULT NULL",
+                "ALTER TABLE Cartes_Cadeaux ADD COLUMN client_id INTEGER DEFAULT NULL",
+                "ALTER TABLE Cartes_Cadeaux ADD COLUMN client_nom TEXT DEFAULT NULL",
+                "ALTER TABLE Cartes_Cadeaux ADD COLUMN status TEXT DEFAULT 'active'",
+                "ALTER TABLE Cartes_Cadeaux ADD COLUMN emis_par TEXT DEFAULT NULL"
+            ]
         }
     ]
 

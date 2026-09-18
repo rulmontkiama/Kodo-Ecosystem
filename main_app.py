@@ -1285,7 +1285,7 @@ class MainApp(ctk.CTk):
                 conn = get_connection(); c = conn.cursor()
                 date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 vendeur = self.vendeur_actif['nom'] if self.vendeur_actif else 'Inconnu'
-                new_tk = enregistrer_remboursement(c, tk_num, vd_id, sid, prix, mode, vendeur, date_heure, quantite=quantite)
+                new_tk, _refund_total = enregistrer_remboursement(c, tk_num, vd_id, sid, prix, mode, vendeur, date_heure, quantite=quantite)
                 conn.commit()
                 self._st(f"Remboursement ({mode}) effectué : {new_tk}", GRN)
                 self._rechercher_ticket_retour()

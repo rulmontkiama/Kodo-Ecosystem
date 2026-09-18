@@ -6,7 +6,7 @@ import csv
 import datetime
 import os
 import json
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection
 
 EXPORT_DIR = "Exports_Kodo_POS"
@@ -47,8 +47,8 @@ def export_comptable_belge():
     for date_heure, ticket, code, nom, tvac, taux, methode in rows:
         tvac_d = Decimal(str(tvac))
         taux_d = Decimal(str(taux))
-        htva   = (tvac_d / (Decimal("1") + taux_d)).quantize(Decimal("0.0001"))
-        tva    = (tvac_d - htva).quantize(Decimal("0.0001"))
+        htva   = (tvac_d / (Decimal("1") + taux_d)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        tva    = (tvac_d - htva).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
         records.append({
             "Date":              date_heure,
             "Numéro Ticket":     ticket,
@@ -385,9 +385,9 @@ def sauvegarder_rapport_z_journalier(comptage_details=None):
                     ventilation_tva[t_taux] = {"base_htva": Decimal("0.00"), "montant_tva": Decimal("0.00"), "ttc": Decimal("0.00")}
                 
                 l_ttc = Decimal(str(p_tvac)) * Decimal(str(qte))
-                l_htva = (l_ttc / (Decimal("1") + Decimal(t_taux))).quantize(Decimal("0.01"))
+                l_htva = (l_ttc / (Decimal("1") + Decimal(t_taux))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 l_tva = l_ttc - l_htva
-                
+
                 ventilation_tva[t_taux]["ttc"] += l_ttc
                 ventilation_tva[t_taux]["base_htva"] += l_htva
                 ventilation_tva[t_taux]["montant_tva"] += l_tva
@@ -396,7 +396,7 @@ def sauvegarder_rapport_z_journalier(comptage_details=None):
             # On utilise le taux par défaut de 21%
             t_taux = "0.21"
             l_ttc = tvac_d
-            l_htva = (l_ttc / Decimal("1.21")).quantize(Decimal("0.01"))
+            l_htva = (l_ttc / Decimal("1.21")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             l_tva = l_ttc - l_htva
             
             ventilation_tva[t_taux]["ttc"] += l_ttc
@@ -455,7 +455,7 @@ def calculer_rapport_z_virtuel(date_str, c):
     premier_ticket = tickets[0][1] if tickets else ""
     dernier_ticket = tickets[-1][1] if tickets else ""
     
-    from decimal import Decimal
+    from decimal import Decimal, ROUND_HALF_UP
     ca_ttc_total = Decimal("0.00")
     ventilation_tva = {
         "0.21": {"base_htva": Decimal("0.00"), "montant_tva": Decimal("0.00"), "ttc": Decimal("0.00")},
@@ -499,16 +499,16 @@ def calculer_rapport_z_virtuel(date_str, c):
                     ventilation_tva[t_taux] = {"base_htva": Decimal("0.00"), "montant_tva": Decimal("0.00"), "ttc": Decimal("0.00")}
                 
                 l_ttc = Decimal(str(p_tvac)) * Decimal(str(qte))
-                l_htva = (l_ttc / (Decimal("1") + Decimal(t_taux))).quantize(Decimal("0.01"))
+                l_htva = (l_ttc / (Decimal("1") + Decimal(t_taux))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 l_tva = l_ttc - l_htva
-                
+
                 ventilation_tva[t_taux]["ttc"] += l_ttc
                 ventilation_tva[t_taux]["base_htva"] += l_htva
                 ventilation_tva[t_taux]["montant_tva"] += l_tva
         else:
             t_taux = "0.21"
             l_ttc = tvac_d
-            l_htva = (l_ttc / Decimal("1.21")).quantize(Decimal("0.01"))
+            l_htva = (l_ttc / Decimal("1.21")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             l_tva = l_ttc - l_htva
             
             ventilation_tva[t_taux]["ttc"] += l_ttc

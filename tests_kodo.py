@@ -97,7 +97,7 @@ def run_tests():
     vd_id = c.fetchone()[0]
     
     date_heure_remb = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_tk = enregistrer_remboursement(c, num_ticket, vd_id, sid, Decimal("24.20"), "Bancontact", "Vendeur 1", date_heure_remb)
+    new_tk, _refund_total = enregistrer_remboursement(c, num_ticket, vd_id, sid, Decimal("24.20"), "Bancontact", "Vendeur 1", date_heure_remb)
     conn.commit()
     print(f"✅ Remboursement enregistré : {new_tk}")
     

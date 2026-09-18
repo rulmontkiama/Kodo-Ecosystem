@@ -9,7 +9,7 @@ import tempfile
 import subprocess
 import datetime
 import unicodedata
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 # Configuration du backend USB sous macOS / Windows si disponible
 try:
@@ -373,7 +373,7 @@ def generer_ticket(numero, panier, total_tvac, remise,
             p_unit = Decimal(str(p_unit))
         p_total = p_unit * qte
 
-        htva = (p_total / (Decimal("1") + t)).quantize(Decimal("0.01"))
+        htva = (p_total / (Decimal("1") + t)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         tva = p_total - htva
 
         total_htva_accum += htva

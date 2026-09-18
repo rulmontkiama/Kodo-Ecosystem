@@ -5,7 +5,7 @@ Assure la rétrocompatibilité complète vers kodo_core.domain.* et kodo_core.db
 """
 
 import sqlite3
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import datetime
 import os
 import sys
@@ -191,6 +191,64 @@ def _initialiser_db_raw(conn):
         CREATE TABLE IF NOT EXISTS Parametres (
             cle TEXT PRIMARY KEY,
             valeur TEXT
+        )
+    ''')
+
+    # Filet de sécurité : ces 3 tables sont censées être créées par MigrationManager
+    # (versions 1.0.0 / 1.4.0), mais toute base dont la migration correspondante échoue
+    # silencieusement (cf. le except Exception large de initialiser_db ci-dessus) ne doit
+    # jamais se retrouver sans elles. IF NOT EXISTS les rend sans danger à répéter ici.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Audit_Trail (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            event_type TEXT NOT NULL,
+            entity_name TEXT NOT NULL,
+            entity_id TEXT,
+            user_name TEXT,
+            action TEXT NOT NULL,
+            details TEXT,
+            previous_hash TEXT,
+            current_hash TEXT NOT NULL,
+            signature TEXT
+        )
+    ''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_trail_timestamp ON Audit_Trail(timestamp)")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Cartes_Cadeaux (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            solde_initial DECIMAL NOT NULL,
+            solde_actuel DECIMAL NOT NULL,
+            date_creation DATETIME DEFAULT CURRENT_TIMESTAMP,
+            notes TEXT DEFAULT NULL,
+            client_id INTEGER DEFAULT NULL,
+            client_nom TEXT DEFAULT NULL,
+            status TEXT DEFAULT 'active',
+            emis_par TEXT DEFAULT NULL
+        )
+    ''')
+    cursor.execute("PRAGMA table_info(Cartes_Cadeaux)")
+    cols_cartes_cadeaux = [row[1] for row in cursor.fetchall()]
+    for col, ddl in (
+        ("notes", "ALTER TABLE Cartes_Cadeaux ADD COLUMN notes TEXT DEFAULT NULL"),
+        ("client_id", "ALTER TABLE Cartes_Cadeaux ADD COLUMN client_id INTEGER DEFAULT NULL"),
+        ("client_nom", "ALTER TABLE Cartes_Cadeaux ADD COLUMN client_nom TEXT DEFAULT NULL"),
+        ("status", "ALTER TABLE Cartes_Cadeaux ADD COLUMN status TEXT DEFAULT 'active'"),
+        ("emis_par", "ALTER TABLE Cartes_Cadeaux ADD COLUMN emis_par TEXT DEFAULT NULL"),
+    ):
+        if col not in cols_cartes_cadeaux:
+            try: cursor.execute(ddl)
+            except Exception: pass
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Shopify_Sync (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            shopify_id TEXT NOT NULL,
+            last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'synced',
+            details TEXT
         )
     ''')
 
@@ -646,7 +704,11 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
 
     for methode, montant_paiement in paiements:
         montant_reel = Decimal(str(montant_paiement))
-        if methode == "Espèces" and rendu_monnaie > 0:
+        # Comparaison insensible à la casse/accents (cf. total_especes plus bas) : un
+        # matching exact-string ("Espèces" seul) laisserait passer "espèces"/"ESPECES"/
+        # "cash" sans déduire le rendu de monnaie, gonflant le montant encaissé loggé
+        # dans Ledger_Caisse et créant un faux écart de caisse à la clôture Z.
+        if str(methode or "").strip().lower() in ("espèces", "especes", "cash") and rendu_monnaie > 0:
             montant_reel -= Decimal(str(rendu_monnaie))
 
         sig_ledger, hash_ledger = signer_ledger(cursor, 'VENTE', montant_reel, methode, numero_ticket, date_heure)
@@ -709,8 +771,8 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
             f"vd_id={vd_id} (vendu={qte_vendue}, déjà remboursé={deja_rembourse}, demandé={quantite})."
         )
 
-    total_tvac = -(prix_unitaire * Decimal(str(quantite))).quantize(Decimal('0.01'))
-    total_htva = (total_tvac / (Decimal('1.00') + taux_tva)).quantize(Decimal('0.01'))
+    total_tvac = -(prix_unitaire * Decimal(str(quantite))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    total_htva = (total_tvac / (Decimal('1.00') + taux_tva)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     total_tva = total_tvac - total_htva
 
     import time
@@ -818,7 +880,7 @@ def enregistrer_mouvement_caisse(cursor, type_mouvement, montant, motif, vendeur
     if type_mouvement not in ("APPORT", "PRELEVEMENT"):
         raise ValueError(f"Type de mouvement de caisse invalide : {type_mouvement!r}")
 
-    montant_dec = Decimal(str(montant)).quantize(Decimal('0.01'))
+    montant_dec = Decimal(str(montant)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     if montant_dec <= Decimal('0.00'):
         raise ValueError("Le montant d'un mouvement de caisse doit être strictement positif.")
 
@@ -860,6 +922,151 @@ def lister_mouvements_caisse(caisse_id="POS-01", conn=None):
     finally:
         if should_close:
             conn.close()
+
+
+def _generer_code_carte_cadeau(cursor, prefix="AVOIR"):
+    """Génère un code de carte cadeau/avoir garanti unique (retry sur collision)."""
+    import random
+    for _ in range(20):
+        code = f"{prefix}-{random.randint(100000, 999999)}"
+        cursor.execute("SELECT 1 FROM Cartes_Cadeaux WHERE code = ?", (code,))
+        if cursor.fetchone() is None:
+            return code
+    raise ValueError("Impossible de générer un code de carte cadeau unique.")
+
+
+def emettre_carte_cadeau(cursor, montant, code=None, client_id=None, client_nom=None, notes=None, emis_par=None, prefix="AVOIR"):
+    """Émet une carte cadeau / bon d'avoir réel, persisté et traçable (NF525).
+
+    Sans cette persistance, un avoir « émis » n'existait qu'en mémoire côté navigateur
+    (React state / localStorage) : invisible depuis une autre caisse, jamais audité, et
+    surtout jamais vérifiable au moment de la dépense (cf. `utiliser_carte_cadeau`).
+    """
+    montant_dec = Decimal(str(montant)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    if montant_dec <= Decimal('0.00'):
+        raise ValueError("Le montant d'une carte cadeau/avoir doit être strictement positif.")
+
+    final_code = (code or "").strip().upper() or _generer_code_carte_cadeau(cursor, prefix)
+    cursor.execute("SELECT 1 FROM Cartes_Cadeaux WHERE code = ?", (final_code,))
+    if cursor.fetchone() is not None:
+        raise ValueError(f"Le code de carte cadeau {final_code!r} existe déjà.")
+
+    cursor.execute("""
+        INSERT INTO Cartes_Cadeaux (code, solde_initial, solde_actuel, notes, client_id, client_nom, status, emis_par)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+    """, (final_code, float(montant_dec), float(montant_dec), notes, client_id, client_nom, emis_par))
+
+    try:
+        from kodo_core.db.audit_trail import record_audit_event
+        record_audit_event(cursor, "CARTE_CADEAU_EMISE", "Cartes_Cadeaux", final_code, emis_par or "", "EMISSION",
+                            f"Montant initial {montant_dec} EUR" + (f" - {notes}" if notes else ""))
+    except Exception:
+        pass
+
+    return {
+        "code": final_code,
+        "initialAmount": float(montant_dec),
+        "remainingAmount": float(montant_dec),
+    }
+
+
+def lister_cartes_cadeaux(conn=None):
+    """Liste toutes les cartes cadeaux/avoirs émis, soldes actuels inclus."""
+    should_close = False
+    if conn is None:
+        conn = get_connection()
+        should_close = True
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, code, solde_initial, solde_actuel, date_creation, notes, client_id, client_nom, status
+            FROM Cartes_Cadeaux ORDER BY id DESC
+        """)
+        return [
+            {
+                "id": str(r[0]),
+                "code": r[1],
+                "initialAmount": float(r[2]),
+                "remainingAmount": float(r[3]),
+                "createdAt": r[4],
+                "notes": r[5],
+                "clientId": r[6],
+                "clientName": r[7],
+                "status": r[8] or "active",
+            }
+            for r in c.fetchall()
+        ]
+    finally:
+        if should_close:
+            conn.close()
+
+
+def utiliser_carte_cadeau(cursor, code, montant_a_utiliser, user_name=None):
+    """Débite une carte cadeau/avoir pour un règlement en caisse (NF525).
+
+    Sans cette vérification serveur, sélectionner « Avoir » comme moyen de paiement
+    validait la vente pour n'importe quel code (même inventé, même vide), sans aucune
+    contrepartie réelle ; et une carte valide pouvait être réutilisée indéfiniment car
+    rien ne décrémentait jamais son solde. Le solde est relu et débité dans la MÊME
+    transaction que la vente : si la vente échoue derrière, tout est annulé ensemble.
+    """
+    code_norm = str(code or "").strip().upper()
+    if not code_norm:
+        raise ValueError("Code de carte cadeau/avoir manquant.")
+
+    montant_dec = Decimal(str(montant_a_utiliser)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    if montant_dec <= Decimal('0.00'):
+        raise ValueError("Le montant à débiter sur la carte cadeau doit être strictement positif.")
+
+    cursor.execute("SELECT id, solde_actuel, status FROM Cartes_Cadeaux WHERE code = ?", (code_norm,))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError(f"Carte cadeau/avoir introuvable : {code_norm}")
+
+    carte_id, solde_actuel, status = row
+    solde_dec = Decimal(str(solde_actuel))
+    if (status or "active") != "active":
+        raise ValueError(f"Carte cadeau/avoir {code_norm} invalidée (statut : {status}).")
+    if solde_dec <= Decimal('0.00'):
+        raise ValueError(f"Carte cadeau/avoir {code_norm} déjà épuisée (solde 0,00 €).")
+    if montant_dec > solde_dec:
+        raise ValueError(
+            f"Solde insuffisant sur la carte {code_norm} : {solde_dec} € disponible pour {montant_dec} € demandé."
+        )
+
+    nouveau_solde = solde_dec - montant_dec
+    cursor.execute("UPDATE Cartes_Cadeaux SET solde_actuel = ? WHERE id = ? AND solde_actuel = ?",
+                   (float(nouveau_solde), carte_id, float(solde_actuel)))
+    if cursor.rowcount != 1:
+        # Le solde a changé entre la lecture et l'écriture (utilisation concurrente de la
+        # même carte) : on refuse plutôt que de risquer un double-débit silencieux.
+        raise ValueError(f"Conflit de mise à jour sur la carte {code_norm}, merci de réessayer.")
+
+    try:
+        from kodo_core.db.audit_trail import record_audit_event
+        record_audit_event(cursor, "CARTE_CADEAU_UTILISEE", "Cartes_Cadeaux", code_norm, user_name or "", "DEBIT",
+                            f"Débit {montant_dec} EUR - solde restant {nouveau_solde} EUR")
+    except Exception:
+        pass
+
+    return montant_dec
+
+
+def annuler_carte_cadeau(cursor, code):
+    """Invalide une carte cadeau/avoir (mise à solde 0, statut 'annulee') sans jamais
+    supprimer la ligne : une carte cadeau émise reste une pièce comptable, comme un
+    ticket ou un mouvement de caisse."""
+    code_norm = str(code or "").strip().upper()
+    cursor.execute("SELECT id FROM Cartes_Cadeaux WHERE code = ?", (code_norm,))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError(f"Carte cadeau/avoir introuvable : {code_norm}")
+    cursor.execute("UPDATE Cartes_Cadeaux SET solde_actuel = 0, status = 'annulee' WHERE id = ?", (row[0],))
+    try:
+        from kodo_core.db.audit_trail import record_audit_event
+        record_audit_event(cursor, "CARTE_CADEAU_ANNULEE", "Cartes_Cadeaux", code_norm, "", "ANNULATION", "")
+    except Exception:
+        pass
 
 
 def sauvegarder_panier_en_attente(panier, total_tvac, client_id=None, client_nom=None, remise=Decimal('0.00'), note="", conn=None):
@@ -988,7 +1195,7 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
         now_utc = datetime.datetime.utcnow().isoformat() + "Z"
 
         fond_reel_dec = Decimal(str(fond_caisse_reel))
-        ecart = (fond_reel_dec - bilan["total_especes"]).quantize(Decimal("0.01"))
+        ecart = (fond_reel_dec - bilan["total_especes"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         curr_hash = calculer_hash_cloture(
             hash_prec, now_str, caisse_id,

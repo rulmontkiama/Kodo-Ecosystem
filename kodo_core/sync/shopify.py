@@ -12,7 +12,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection, signer_ticket, signer_ledger
 
 logger = logging.getLogger("kodo_core.sync.shopify")
@@ -405,7 +405,7 @@ class ShopifySync:
                     except Exception:
                         pass
 
-                prix_achat_htva = (prix_vente_tvac / Decimal("2.5")).quantize(Decimal("0.01"))
+                prix_achat_htva = (prix_vente_tvac / Decimal("2.5")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
                 c.execute("""
                     INSERT OR REPLACE INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, en_solde, prix_solde_tvac)

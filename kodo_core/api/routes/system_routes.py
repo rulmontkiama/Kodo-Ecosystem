@@ -7,7 +7,7 @@ import os
 import sys
 import datetime
 import sqlite3
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Tuple, Optional
 
 import database_manager
@@ -232,7 +232,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 return 400, {"error": f"Fond de caisse invalide : {fond_caisse_val!r} n'est pas un montant numérique."}
             if fond_caisse_dec < 0:
                 return 400, {"error": "Le fond de caisse ne peut pas être négatif."}
-            fond_caisse_val = str(fond_caisse_dec.quantize(Decimal('0.01')))
+            fond_caisse_val = str(fond_caisse_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
         conn = get_connection()
         cursor = conn.cursor()

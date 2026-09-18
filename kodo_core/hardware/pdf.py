@@ -5,7 +5,7 @@ Supporte le bilan Z (jour/mois/année), reçus A4/A5/ticket, factures vectoriell
 import os
 import sqlite3
 import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from reportlab.lib.pagesizes import A4, A5
 from reportlab.lib import colors
@@ -753,12 +753,12 @@ def generer_etiquettes_pdf(nom, code_barre, taille, prix, prix_solde, qte, outpu
         story.append(Spacer(1, 3))
         
         if prix_solde:
-            p_orig = Decimal(str(prix)).quantize(Decimal("0.01"))
-            p_solde = Decimal(str(prix_solde)).quantize(Decimal("0.01"))
+            p_orig = Decimal(str(prix)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            p_solde = Decimal(str(prix_solde)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             txt_price = f"<font color='#86868B'><s>{p_orig:.2f} €</s></font>  <b><font color='#FF3B30'>{p_solde:.2f} € SOLDE</font></b>"
             story.append(Paragraph(txt_price, style_price))
         else:
-            p_reg = Decimal(str(prix)).quantize(Decimal("0.01"))
+            p_reg = Decimal(str(prix)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             story.append(Paragraph(f"<b>{p_reg:.2f} €</b>", style_price))
             
         if page_idx < qte - 1:
@@ -864,9 +864,9 @@ def generer_facture_pdf(numero_facture, date_facture, client_info, items, totaux
         taux = Decimal(str(item.get("taux_tva", 0.21)))
 
         p_total_tvac = pu_tvac * qte
-        htva = (p_total_tvac / (Decimal("1") + taux)).quantize(Decimal("0.01"))
+        htva = (p_total_tvac / (Decimal("1") + taux)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         tva = p_total_tvac - htva
-        pu_htva = (pu_tvac / (Decimal("1") + taux)).quantize(Decimal("0.01"))
+        pu_htva = (pu_tvac / (Decimal("1") + taux)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         total_htva += htva
         total_tva += tva

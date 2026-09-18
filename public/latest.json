@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.66",
-  "latest_version": "1.0.66",
-  "version": "1.0.66",
+  "latestVersion": "1.0.67",
+  "latest_version": "1.0.67",
+  "version": "1.0.67",
   "releaseDate": "2026-09-18",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.66.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.66.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.66.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.67.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.67.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.67.zip",
   "has_update": true,
-  "changelog": "v1.0.66 :\n• Fiabilisation complète caisse & clôture Z : les apports/prélèvements de caisse sont désormais enregistrés en base (ne disparaissent plus au redémarrage), le fond de caisse et la ventilation TVA du bilan Z sont recalculés et vérifiés côté serveur.\n• Renforcement de la sécurité financière : le prix de vente, le rendu de monnaie et les remboursements sont systématiquement revérifiés côté serveur à partir du catalogue et des ventes réelles, avec contrôles anti-survente et anti-remboursement en double.\n• Écran Retours & Avoirs connecté aux vraies ventes : recherche d'un ticket réel, suivi de la quantité déjà remboursée par article, bons d'avoir émis uniquement pour un montant vérifié."
+  "changelog": "v1.0.67 :\n• Cartes cadeaux & avoirs réellement sécurisés : un avoir émis en Retours est désormais persisté et vérifié côté serveur (code réel, solde suffisant, débité une seule fois, jamais réutilisable au-delà de son solde).\n• Une vente refusée par le serveur (stock, paiement ou avoir insuffisant) n'est plus jamais affichée comme réussie : l'écran de caisse attend la confirmation réelle avant d'imprimer le ticket et de vider le panier.\n• Auto-réparation des bases existantes si des tables manquaient (Audit_Trail, Cartes_Cadeaux, Shopify_Sync) et arrondi bancaire strict appliqué de façon uniforme sur tous les calculs de vente, remboursement et export comptable."
 }

@@ -89,6 +89,9 @@ class ShopConfig:
     @classmethod
     def get_db_path(cls, db_name: str = "kodo_pos.db") -> str:
         """Retourne le chemin vers la base de données SQLite locale isolée."""
+        override = os.environ.get("KODO_DB_PATH")
+        if override:
+            return override
         return os.path.join(cls.get_db_dir(), db_name)
 
     @classmethod
