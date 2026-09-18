@@ -94,7 +94,7 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
                 "quantite": item.get('quantity', 1),
                 "prix_vente_tvac": float(prod.get('price', 0)),
                 "taux_tva": float(prod.get('vat_rate', 0.21)),
-                "taille": item.get('size', '')
+                "taille": item.get('size') or item.get('selectedSize') or ''
             })
 
         # Support Split Payment (Paiements multiples CB/Espèces/QR)
