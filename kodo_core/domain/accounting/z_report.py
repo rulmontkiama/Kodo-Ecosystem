@@ -14,7 +14,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Optional
 
 import database_manager
-from database_manager import get_connection, generer_bilan_z_journalier, enregistrer_cloture_caisse
+from database_manager import (
+    get_connection, generer_bilan_z_journalier, enregistrer_cloture_caisse, lister_jours_non_clotures,
+)
 import export_manager
 
 TWO_DECIMALS = Decimal('0.01')
@@ -32,7 +34,7 @@ class ZReportEngine:
     """
 
     @classmethod
-    def get_daily_z_summary(cls, caisse_id: str = "POS-01", conn=None) -> Dict[str, Any]:
+    def get_daily_z_summary(cls, caisse_id: str = "POS-01", conn=None, jusqu_au: Optional[str] = None) -> Dict[str, Any]:
         """
         Génère le bilan des ventes en cours non encore clôturées pour la journée/session.
         Inclut la ventilation de TVA par taux et le détail des modes de règlement.
@@ -43,7 +45,8 @@ class ZReportEngine:
             should_close = True
 
         try:
-            bilan = generer_bilan_z_journalier(caisse_id=caisse_id, conn=conn)
+            bilan = generer_bilan_z_journalier(caisse_id=caisse_id, conn=conn, jusqu_au=jusqu_au)
+            bilan["jours_en_attente"] = lister_jours_non_clotures(caisse_id=caisse_id, conn=conn)
 
             # Ventilation de TVA par taux : DOIT porter exactement sur le même ensemble
             # de tickets que le bilan ci-dessus (caisse_id + z_id IS NULL). L'ancienne
@@ -108,7 +111,8 @@ class ZReportEngine:
 
             # Conversion des Decimals en floats pour la sérialisation
             for key in ["total_tvac", "total_htva", "total_tva", "total_remises", "total_especes",
-                        "total_carte", "total_qr", "total_avoir", "total_apports", "total_prelevements"]:
+                        "total_carte", "total_qr", "total_avoir", "total_apports", "total_prelevements",
+                        "regularisation_rendu", "ecart_reglements"]:
                 if key in bilan and isinstance(bilan[key], Decimal):
                     bilan[key] = float(bilan[key])
 
@@ -122,22 +126,24 @@ class ZReportEngine:
     def close_z_report(
         cls,
         caisse_id: str = "POS-01",
-        fond_caisse_reel: float = 0.0,
+        fond_caisse_reel: Optional[float] = 0.0,
         fond_caisse_matin: float = 0.0,
         vendeur: str = "Admin",
-        conn=None
+        conn=None,
+        jusqu_au: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Exécute et scelle la clôture comptable Z journalière (NF525).
         """
-        fond_dec = Decimal(str(fond_caisse_reel))
+        fond_dec = None if fond_caisse_reel is None else Decimal(str(fond_caisse_reel))
         fond_matin_dec = Decimal(str(fond_caisse_matin))
         res = enregistrer_cloture_caisse(
             caisse_id=caisse_id,
             fond_caisse_reel=fond_dec,
             fond_caisse_matin=fond_matin_dec,
             vendeur=vendeur,
-            conn=conn
+            conn=conn,
+            jusqu_au=jusqu_au
         )
         return res
 

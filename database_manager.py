@@ -1085,8 +1085,57 @@ def supprimer_panier_en_attente(panier_id, conn=None):
     from kodo_core.domain.sales.cart_engine import delete_parked_cart
     return delete_parked_cart(panier_id, conn=conn)
 
-def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
+_MODES_ESPECES = ("espèces", "especes", "cash")
+_MODES_QR = ("qr", "qr_code", "qr code", "qrcode", "virement")
+_MODES_AVOIR = ("avoir", "carte cadeau", "carte_cadeau", "gift card", "giftcard")
+
+
+def classer_moyen_paiement(methode):
+    """Range un libellé de moyen de paiement dans 'especes' | 'qr' | 'avoir' | 'carte'.
+
+    Les anciennes versions de la caisse enregistrent le QR sous "QR_Code" (et la carte sous
+    "Bancontact") : sans cette normalisation partagée, tout ce qui n'était pas exactement
+    "qr" tombait dans "carte" et gonflait à tort le total carte bancaire de la clôture Z.
+    """
+    m = str(methode or "").strip().lower()
+    if m in _MODES_ESPECES:
+        return "especes"
+    if m in _MODES_QR:
+        return "qr"
+    if m in _MODES_AVOIR:
+        return "avoir"
+    return "carte"
+
+
+def lister_jours_non_clotures(caisse_id="POS-01", conn=None):
+    """Jours (AAAA-MM-JJ) ayant des tickets non encore clôturés, du plus ancien au plus récent."""
+    should_close = False
+    if conn is None:
+        conn = get_connection()
+        should_close = True
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT substr(date_heure, 1, 10) AS jour, COUNT(*), COALESCE(SUM(total_tvac), 0)
+            FROM Tickets WHERE caisse_id = ? AND z_id IS NULL
+            GROUP BY jour ORDER BY jour ASC
+        """, (caisse_id,))
+        return [
+            {"jour": r[0], "nb_tickets": r[1], "total_tvac": float(Decimal(str(r[2] or "0")).quantize(Decimal("0.01")))}
+            for r in c.fetchall()
+        ]
+    finally:
+        if should_close:
+            conn.close()
+
+
+def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
     """Agrège les ventes/mouvements non encore comptés dans un Z, pour UNE caisse donnée.
+
+    `jusqu_au` (AAAA-MM-JJ, optionnel) limite le bilan aux tickets/mouvements datés au plus de ce
+    jour INCLUS. Comme tout ce qui est antérieur est toujours inclus, on ne peut jamais « sauter »
+    un jour : la séquence des Z reste continue et chronologique (exigence NF525). Sans `jusqu_au`,
+    tout ce qui n'est pas encore clôturé est compté (comportement historique).
 
     Le filtrage se fait par (caisse_id, z_id IS NULL) plutôt que par une comparaison de
     date : une comparaison de date sur `Ledger_Caisse`/`Tickets` ignorait `caisse_id`,
@@ -1104,10 +1153,15 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
     try:
         c = conn.cursor()
 
+        filtre_date = ""
+        params_date = ()
+        if jusqu_au:
+            filtre_date = " AND substr(date_heure, 1, 10) <= ?"
+            params_date = (str(jusqu_au),)
+
         c.execute("""
-            SELECT id, total_tvac, total_htva, total_tva, remise
-            FROM Tickets WHERE caisse_id = ? AND z_id IS NULL
-        """, (caisse_id,))
+            SELECT id, total_tvac, total_htva, total_tva, remise, numero_ticket
+            FROM Tickets WHERE caisse_id = ? AND z_id IS NULL""" + filtre_date, (caisse_id,) + params_date)
         ticket_rows = c.fetchall()
 
         ticket_ids = [row[0] for row in ticket_rows]
@@ -1122,9 +1176,8 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
         # Ledger_Caisse (ex. apports/prélèvements de caisse) serait compté à tort comme
         # du chiffre d'affaires, gonflant ou faussant total_especes/total_carte.
         c.execute("""
-            SELECT id, methode_paiement, montant
-            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('VENTE', 'REMBOURSEMENT')
-        """, (caisse_id,))
+            SELECT id, methode_paiement, montant, reference, type_mouvement
+            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('VENTE', 'REMBOURSEMENT')""" + filtre_date, (caisse_id,) + params_date)
         ledger_rows = c.fetchall()
 
         ledger_ids = [row[0] for row in ledger_rows]
@@ -1133,29 +1186,50 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
         tot_qr = Decimal("0.00")
         tot_avoir = Decimal("0.00")
 
-        # Classification explicite par moyen de paiement : un split binaire espèces/carte
-        # (tout ce qui n'est pas "espèces" tombait dans "carte") gonflait à tort le total
-        # carte bancaire avec les paiements QR et les remboursements/débits en Avoir
-        # (carte cadeau) — aucun de ces deux n'a jamais transité par le terminal CB.
-        for _id, m, mt in ledger_rows:
+        # Classification explicite par moyen de paiement (cf. classer_moyen_paiement) : aucun
+        # paiement QR ni avoir n'a jamais transité par le terminal CB.
+        lignes_par_ticket = {}
+        for _id, m, mt, ref, tm in ledger_rows:
             mt_dec = Decimal(str(mt or "0.00"))
-            methode = str(m or "").strip().lower()
-            if methode in ("espèces", "especes", "cash"):
+            classe = classer_moyen_paiement(m)
+            if classe == "especes":
                 tot_esp += mt_dec
-            elif methode == "qr":
+            elif classe == "qr":
                 tot_qr += mt_dec
-            elif methode in ("avoir", "carte cadeau", "carte_cadeau", "gift card", "giftcard"):
+            elif classe == "avoir":
                 tot_avoir += mt_dec
             else:
                 tot_carte += mt_dec
+            if tm == "VENTE":
+                lignes_par_ticket.setdefault(ref, []).append((classe, mt_dec))
+
+        # Régularisation du rendu de monnaie : d'anciennes versions déduisaient le rendu deux
+        # fois dans le journal de caisse (montant encaissé = total - rendu au lieu du total).
+        # Pour un ticket réglé UNIQUEMENT en espèces, l'encaissement réel est le total du ticket
+        # (le rendu est déjà exclu du total). On complète donc les espèces de la différence, sans
+        # toucher aux écritures signées du journal. Sans effet avec les versions corrigées
+        # (journal == total). Les tickets mixtes ne sont pas devinés : ils ressortent dans
+        # `ecart_reglements`.
+        regularisation_rendu = Decimal("0.00")
+        for row in ticket_rows:
+            total_tk = Decimal(str(row[1] or "0.00"))
+            lignes = lignes_par_ticket.get(row[5])
+            if not lignes or total_tk <= Decimal("0.00"):
+                continue
+            if all(classe == "especes" for classe, _mt in lignes):
+                manque = total_tk - sum((mt for _c, mt in lignes), Decimal("0.00"))
+                if manque > Decimal("0.00"):
+                    regularisation_rendu += manque
+        tot_esp += regularisation_rendu
+
+        ecart_reglements = (tot_tvac - (tot_esp + tot_carte + tot_qr + tot_avoir)).quantize(Decimal("0.01"))
 
         # Apports/prélèvements de la période en cours (non encore clôturés) : suivis
         # séparément du chiffre d'affaires pour ne pas fausser total_especes/total_carte,
         # mais nécessaires pour calculer le théorique caisse (fond + ventes + mouvements).
         c.execute("""
             SELECT id, type_mouvement, montant
-            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('APPORT', 'PRELEVEMENT')
-        """, (caisse_id,))
+            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('APPORT', 'PRELEVEMENT')""" + filtre_date, (caisse_id,) + params_date)
         mouvement_rows = c.fetchall()
 
         mouvement_ids = [row[0] for row in mouvement_rows]
@@ -1179,6 +1253,9 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
             "total_carte": tot_carte,
             "total_qr": tot_qr,
             "total_avoir": tot_avoir,
+            "regularisation_rendu": regularisation_rendu,
+            "ecart_reglements": ecart_reglements,
+            "jusqu_au": jusqu_au,
             "total_apports": tot_apports,
             "total_prelevements": tot_prelevements,
             "ticket_ids": ticket_ids,
@@ -1188,7 +1265,23 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
         if should_close:
             conn.close()
 
-def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.00"), fond_caisse_matin=Decimal("0.00"), vendeur="Admin", conn=None):
+def _assurer_colonne_periode_z(cursor):
+    """Ajoute à Clotures_Caisse les colonnes récentes si absentes : periode_jusqu_au (dernier jour
+    couvert par le Z), total_qr et total_avoir (sans elles, un Z réglé en QR/avoir apparaîtrait
+    avec espèces = carte = 0). Ces colonnes ne font pas partie du hash de la chaîne NF525."""
+    cursor.execute("PRAGMA table_info(Clotures_Caisse)")
+    existantes = [row[1] for row in cursor.fetchall()]
+    for col, ddl in (("periode_jusqu_au", "TEXT"), ("total_qr", "DECIMAL DEFAULT '0.00'"), ("total_avoir", "DECIMAL DEFAULT '0.00'")):
+        if col not in existantes:
+            cursor.execute(f"ALTER TABLE Clotures_Caisse ADD COLUMN {col} {ddl}")
+
+
+def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.00"), fond_caisse_matin=Decimal("0.00"), vendeur="Admin", conn=None, jusqu_au=None):
+    """Scelle un Z. `jusqu_au` (AAAA-MM-JJ) clôture au plus ce jour inclus (cf. generer_bilan_z_journalier).
+
+    `fond_caisse_reel=None` = pas de comptage physique (rattrapage d'un ancien jour) : l'écart
+    n'est alors pas applicable et vaut 0.
+    """
     from audit_trail import calculer_hash_cloture
 
     should_close = False
@@ -1198,7 +1291,8 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
 
     try:
         c = conn.cursor()
-        bilan = generer_bilan_z_journalier(caisse_id, conn=conn)
+        _assurer_colonne_periode_z(c)
+        bilan = generer_bilan_z_journalier(caisse_id, conn=conn, jusqu_au=jusqu_au)
 
         c.execute("SELECT current_hash FROM Clotures_Caisse WHERE caisse_id=? ORDER BY id DESC LIMIT 1", (caisse_id,))
         last_row = c.fetchone()
@@ -1212,9 +1306,12 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
         # + apports - prélèvements). Comparer fond_caisse_reel directement à total_especes
         # (sans le fond initial) faisait apparaître un écart artificiellement gonflé du
         # montant exact du fond de caisse, à chaque clôture.
-        fond_reel_dec = Decimal(str(fond_caisse_reel))
         fond_matin_dec = Decimal(str(fond_caisse_matin))
         theorique_especes = fond_matin_dec + bilan["total_especes"] + bilan["total_apports"] - bilan["total_prelevements"]
+        if fond_caisse_reel is None:
+            fond_reel_dec = theorique_especes.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            fond_reel_dec = Decimal(str(fond_caisse_reel))
         ecart = (fond_reel_dec - theorique_especes).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         curr_hash = calculer_hash_cloture(
@@ -1226,13 +1323,15 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
             INSERT INTO Clotures_Caisse (
                 date_cloture, caisse_id, total_ventes_tvac, total_htva, total_tva,
                 total_especes, total_carte, total_remises, total_tickets,
-                fond_caisse_reel, ecart, vendeur, hash_precedent, current_hash, signature, created_at_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fond_caisse_reel, ecart, vendeur, hash_precedent, current_hash, signature, created_at_utc,
+                periode_jusqu_au, total_qr, total_avoir
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             now_str, caisse_id, float(bilan["total_tvac"]), float(bilan["total_htva"]), float(bilan["total_tva"]),
             float(bilan["total_especes"]), float(bilan["total_carte"]), float(bilan["total_remises"]),
             bilan["nb_tickets"], float(fond_reel_dec), float(ecart), vendeur,
-            hash_prec, curr_hash, curr_hash, now_utc
+            hash_prec, curr_hash, curr_hash, now_utc, jusqu_au,
+            float(bilan["total_qr"]), float(bilan["total_avoir"])
         ))
         z_id = c.lastrowid
 
@@ -1256,6 +1355,8 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
             "date": now_str,
             "current_hash": curr_hash,
             "total_tvac": float(bilan["total_tvac"]),
+            "nb_tickets": bilan["nb_tickets"],
+            "jusqu_au": jusqu_au,
             "ecart": float(ecart)
         }
     finally:

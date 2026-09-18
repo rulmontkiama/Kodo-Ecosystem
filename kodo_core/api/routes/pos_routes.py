@@ -4,6 +4,7 @@ Routes API Point de Vente (POS) & Mouvements de Caisse - Kōdo POS Core
 """
 
 import json
+import re
 import datetime
 from decimal import Decimal
 from typing import Dict, Any, Tuple, Optional
@@ -265,7 +266,6 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         if not ticket_ids:
             return 400, {"error": "ID ticket manquant"}
 
-        import re
         digits = re.findall(r'\d+', str(ticket_ids[0]))
         if digits:
             db_id = int(digits[0])
@@ -274,20 +274,29 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
 
     # 8. Clôture Z de Caisse
     elif method == "POST" and path == "/api/cloture-z":
-        fond_caisse = float(data.get('fondCaisseReel', 0))
-        fond_caisse_matin = float(data.get('fondCaisseMatin', 0))
+        # fondCaisseReel absent/null = pas de comptage physique (rattrapage d'un ancien jour).
+        raw_reel = data.get('fondCaisseReel', 0)
+        fond_caisse = None if raw_reel is None else float(raw_reel)
+        fond_caisse_matin = float(data.get('fondCaisseMatin', 0) or 0)
         vendeur = data.get('vendeur', 'Admin')
+        jusqu_au = data.get('jusquAu') or None
+        if jusqu_au is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(jusqu_au)):
+            return 400, {"success": False, "error": "Date de clôture invalide (attendu AAAA-MM-JJ)"}
         result = ZReportEngine.close_z_report(
             caisse_id="POS-01",
             fond_caisse_reel=fond_caisse,
             fond_caisse_matin=fond_caisse_matin,
-            vendeur=vendeur
+            vendeur=vendeur,
+            jusqu_au=jusqu_au
         )
         return 200, {"success": True, "cloture": result}
 
-    # 9. Résumé du Z du jour non clôturé
+    # 9. Résumé du Z non clôturé (optionnellement limité à un jour : ?jusqu_au=AAAA-MM-JJ)
     elif method == "GET" and path == "/api/cloture-z/summary":
-        summary = ZReportEngine.get_daily_z_summary(caisse_id="POS-01")
+        jusqu_au = (query.get("jusqu_au") or [None])[0] if isinstance(query, dict) else None
+        if jusqu_au is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(jusqu_au)):
+            return 400, {"error": "Date invalide (attendu AAAA-MM-JJ)"}
+        summary = ZReportEngine.get_daily_z_summary(caisse_id="POS-01", jusqu_au=jusqu_au)
         return 200, summary
 
     # 9bis. Mouvements de caisse (apports / prélèvements d'espèces)

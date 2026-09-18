@@ -85,3 +85,13 @@ dont le DMG embarque le chargeur signé (`patch_loader.py`) :
 - **Tests isolés** : tout test qui appelle `apply_remote_update_sync` doit rediriger `HOME`/`KODO_DB_PATH` et bloquer les copies
   hors `/tmp` (voir `test_updater` dans `tests_patching.py`) : l'updater écrit dans `~/…/version.json`, la base réelle et
   `/Applications/Kodo_POS.app`.
+
+### Clôture Z (règles à ne pas casser)
+- Une Z couvre tout ce qui n'est pas encore clôturé (`z_id IS NULL`). S'il y a plusieurs jours en attente, l'interface les
+  clôture UN PAR UN, du plus ancien au plus récent (`jusquAu` = dernier jour inclus, tout l'antérieur est toujours inclus) :
+  jamais de jour sauté (séquence NF525 continue). Un ancien jour rattrapé n'a pas de comptage physique (`fondCaisseReel=null`).
+- Classification des règlements : TOUJOURS via `database_manager.classer_moyen_paiement` (les anciennes versions écrivent
+  « QR_Code » / « Bancontact »). Le journal de caisse signé n'est jamais modifié ; les corrections (rendu de monnaie déduit
+  deux fois par d'anciennes versions) se font dans le calcul du bilan (`regularisation_rendu`, `ecart_reglements`).
+- Le client Mac lit sa base dans `~/Documents/Kodo_POS/db/kodo_pos.db` (hors de l'application : une réinstallation la conserve).
+- `.gitignore` : les `public/backend_*.zip` sont autorisés (sinon le patch annoncé dans `latest.json` est introuvable).
