@@ -60,8 +60,28 @@ Pour déployer une nouvelle version (ex: `v1.0.XX`) :
 2. **Compiler le frontend** : `npm run build` dans `kōdo-pos-3`.
 3. **Mettre à jour le dist de l'app** : Copier le contenu de `kōdo-pos-3/dist` vers `/Volumes/Extreme SSD/KIAMA/Kōdo POS/dist`.
 4. **Créer le zip OTA** : Compresser `dist/` vers `public/dist_v1.0.XX.zip`.
+   **Puis le SIGNER (obligatoire)** : `python3 scripts/release/kodo_release.py sign-dist public/dist_v1.0.XX.zip --version 1.0.XX`
+   → crée `public/dist_v1.0.XX.zip.sig`, à committer avec le zip. Les clients dont le DMG contient le chargeur signé
+   REFUSENT tout zip sans signature valide. La clé privée (`~/.kodo_signing/`) ne quitte jamais le Mac du développeur.
 5. **Incrémenter les versions** :
    - `public/latest.json` : nouvelle version, lien zip et changelog détaillé.
    - `kodo_core/services/updater.py` : `CURRENT_VERSION = "1.0.XX"`.
    - `src/components/Modals/WhatsNewModal.tsx` & `Sidebar.tsx` & `App.tsx`.
 6. **Git** : Committer, tagger `v1.0.XX` et pousser sur GitHub (`git push origin main && git push origin v1.0.XX`).
+
+### Correctif backend Python à distance (optionnel, sans nouveau DMG)
+
+Une mise à jour OTA ne touche que l'interface. Pour corriger aussi du Python (`kodo_core/`, routes, etc.) chez les clients
+dont le DMG embarque le chargeur signé (`patch_loader.py`) :
+- `python3 scripts/release/kodo_release.py make-patch --version 1.0.XX --base <version du DMG> --since <tag précédent>`
+  → crée et signe `public/backend_v1.0.XX.zip(.sig)` et affiche le bloc `backendPatch` à ajouter dans `public/latest.json`
+  ET `src/app/api/version/route.ts` (même version que le dist). `--empty` ramène les clients au code de leur DMG.
+- `--base` = `kodo_base.BASE_VERSION` du DMG visé (alignée automatiquement sur `CURRENT_VERSION` par `build_final_pro.sh`).
+- **Non patchables à distance (nouveau DMG requis)** : `patch_loader.py`, `kodo_ed25519.py`, `kodo_base.py`, `launch_app.py`,
+  `kodo_core/services/updater.py`, ainsi que tout `__init__.py`.
+- Le client vérifie tout (signature, base, version croissante, chemins, empreintes) avant d'écrire, applique le backend puis
+  l'interface (annulation du backend si l'interface échoue), relance l'app, et revient seul au code précédent si le démarrage
+  échoue 3 fois de suite. Tester avant publication : `python3 tests_patching.py` (isolé, ne touche à aucune donnée réelle).
+- **Tests isolés** : tout test qui appelle `apply_remote_update_sync` doit rediriger `HOME`/`KODO_DB_PATH` et bloquer les copies
+  hors `/tmp` (voir `test_updater` dans `tests_patching.py`) : l'updater écrit dans `~/…/version.json`, la base réelle et
+  `/Applications/Kodo_POS.app`.

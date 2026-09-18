@@ -58,6 +58,10 @@ hiddenimports = [
     'kodo_core.domain.live.live_manager',
     'kodo_core.services.cash_session_service',
     'server_pos',
+    # Racine de confiance des mises à jour signées (chargeur de patchs backend)
+    'patch_loader',
+    'kodo_base',
+    'kodo_ed25519',
     'database_manager',
     'audit_trail',
     'backup_manager',
@@ -75,6 +79,13 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 tmp_ret = collect_all('barcode')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+# Certificats CA pour la vérification TLS des mises à jour (kodo_core.services.updater.build_ssl_context)
+try:
+    tmp_ret = collect_all('certifi')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+except Exception:
+    print("WARNING: certifi introuvable - la vérification TLS des mises à jour utilisera les CA système.")
 
 a = Analysis(
     ['launch_app.py'],

@@ -15,8 +15,11 @@ import zipfile
 import tempfile
 import datetime
 import sqlite3
+import urllib.parse
 import urllib.request
 import urllib.error
+
+import patch_loader
 
 CURRENT_VERSION = "1.0.71"
 
@@ -45,6 +48,43 @@ if not logger.handlers:
 class UpdateError(Exception):
     """Exception levée en cas d'erreur durant le processus de mise à jour."""
     pass
+
+
+# Hôtes et préfixes de chemin autorisés pour télécharger un patch. Le corps de /api/apply-update
+# est contrôlé par l'appelant (CORS ouvert sur le serveur local) : il ne doit jamais pouvoir
+# désigner une URL arbitraire.
+TRUSTED_PATCH_SOURCES = {
+    "raw.githubusercontent.com": "/rulmontkiama/Kodo-Ecosystem/",
+    "github.com": "/rulmontkiama/Kodo-Ecosystem/",
+    "kodo-solutions-web.vercel.app": "/",
+    "kodo-solutions.vercel.app": "/",
+}
+
+
+def is_trusted_patch_url(url: str) -> bool:
+    """Vrai si l'URL est en HTTPS et pointe vers une source de patch autorisée."""
+    try:
+        parsed = urllib.parse.urlparse(str(url))
+    except Exception:
+        return False
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
+    prefix = TRUSTED_PATCH_SOURCES.get((parsed.hostname or "").lower())
+    return prefix is not None and parsed.path.startswith(prefix)
+
+
+def build_ssl_context() -> ssl.SSLContext:
+    """
+    Contexte TLS avec vérification du certificat ET du nom d'hôte, toujours activée.
+    Utilise le magasin de certificats certifi s'il est présent (Python macOS/PyInstaller n'embarque
+    pas toujours les CA système) ; sans lui, on retombe sur le magasin par défaut. En cas d'échec de
+    validation, la mise à jour échoue : on ne dégrade jamais vers une connexion non vérifiée.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 def parse_version(v_str: str) -> tuple:
@@ -129,9 +169,7 @@ def check_for_updates_sync(current_version: str = None) -> dict:
     candidates = []
     last_err = "Aucun serveur de mise à jour joignable."
 
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = build_ssl_context()
 
     for url in UPDATE_ENDPOINTS:
         try:
@@ -190,69 +228,143 @@ def check_for_updates_sync(current_version: str = None) -> dict:
     else:
         data["has_update"] = bool(data.get("has_update", False))
 
+    # Un autre endpoint de MÊME version peut porter l'annonce du patch backend (ex. latest.json GitHub)
+    if not (data.get("backendPatch") or data.get("backend_patch")):
+        for _v, other in candidates:
+            same = str(other.get("latestVersion") or other.get("latest_version") or other.get("version") or "").lstrip("v")
+            if same == str(data.get("latest_version")) and (other.get("backendPatch") or other.get("backend_patch")):
+                data["backendPatch"] = other.get("backendPatch") or other.get("backend_patch")
+                break
+
     data["current_version"] = curr_ver
     return data
 
 
+MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024
+MAX_SIGNATURE_BYTES = 4096
+
+
+def _download(url: str, ctx, cap: int = MAX_DOWNLOAD_BYTES, timeout: int = 45) -> bytes:
+    """Télécharge `url` en mémoire (HTTPS vérifié), avec plafond de taille."""
+    req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
+    chunks, total = [], 0
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as response:
+        while True:
+            chunk = response.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > cap:
+                raise UpdateError("Fichier de mise à jour trop volumineux.")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _download_signed(urls: list, ctx) -> tuple:
+    """Télécharge le premier miroir autorisé qui fournit l'archive ET sa signature `<url>.sig`."""
+    last_err = None
+    for url in urls:
+        if not is_trusted_patch_url(url):
+            continue
+        try:
+            payload = _download(url, ctx)
+            signature = _download(url + ".sig", ctx, cap=MAX_SIGNATURE_BYTES).decode("ascii", "replace")
+            logger.info(f"Téléchargement réussi depuis : {url}")
+            return payload, signature, url
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Échec téléchargement depuis {url} ({e}), tentative suivante...")
+    raise UpdateError(f"Impossible de télécharger la mise à jour ({last_err})")
+
+
+def _backend_patch_info(clean_ver: str):
+    """
+    Patch backend annoncé par les serveurs de mise à jour pour cette version (ou None).
+    L'URL vient du serveur de mise à jour, jamais de la requête HTTP locale.
+    """
+    data = check_for_updates_sync()
+    # Les infos doivent décrire EXACTEMENT la version demandée. Sinon (serveurs injoignables, fichier
+    # local plus ancien, nouvelle release entre-temps) on refuse plutôt que d'installer l'interface
+    # sans le correctif backend qui l'accompagne.
+    if str(data.get("latest_version") or "").lstrip("v") != clean_ver:
+        raise UpdateError("Impossible de confirmer le contenu de la mise à jour (serveur injoignable ou version modifiée). Réessayez.")
+    info = data.get("backendPatch") or data.get("backend_patch")
+    if isinstance(info, dict) and str(info.get("version", "")).lstrip("v") == clean_ver and info.get("url"):
+        return info
+    return None
+
+
 def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
     """
-    Télécharge et applique l'update en effectuant un overlay in-place (dirs_exist_ok=True)
-    du dossier dist sans verrouiller les fichiers sous macOS/Windows.
+    Installe une mise à jour SIGNÉE : interface (dist) et, si la release en contient un, correctif
+    backend. Tout est téléchargé et vérifié (signature, version, plage de base, chemins, empreintes)
+    AVANT toute écriture. Le backend est appliqué en premier (atomique) ; si l'interface échoue
+    ensuite, il est annulé. Le backend ne prend effet qu'après redémarrage (relancé automatiquement).
     """
     if not patch_url:
         return {"success": False, "error": "URL de patch/release manquante."}
 
-    clean_ver = str(target_ver).lstrip("v")
+    clean_ver = str(target_ver or "").strip().lstrip("v")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", clean_ver):
+        return {"success": False, "error": "Numéro de version invalide."}
+    if not is_trusted_patch_url(patch_url):
+        logger.warning(f"URL de patch refusée (source non autorisée) : {patch_url}")
+        return {"success": False, "error": "URL de patch non autorisée."}
+
     logger.info(f"Début du téléchargement et installation de la mise à jour v{clean_ver} depuis {patch_url}...")
     dist_dir = get_target_dist_dir()
-
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = build_ssl_context()
 
     tmp_path = None
     extract_dir = None
-    # 1. Téléchargement avec headers navigateur réel et fallbacks automatiques
+    backend = None
+    backend_committed = False
+
+    # Miroirs de la MÊME version (les signatures rendent le choix du miroir sans risque)
     urls_to_try = [patch_url]
-    fallback_urls = [
+    for fb in (
         f"https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v{clean_ver}.zip",
-        f"https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.20.zip",
         f"https://github.com/rulmontkiama/Kodo-Ecosystem/raw/main/public/dist_v{clean_ver}.zip",
         f"https://kodo-solutions-web.vercel.app/dist_v{clean_ver}.zip",
         f"https://kodo-solutions.vercel.app/dist_v{clean_ver}.zip",
-    ]
-    for fb in fallback_urls:
+    ):
         if fb not in urls_to_try:
             urls_to_try.append(fb)
 
-    downloaded = False
-    last_dl_err = None
-
-    for candidate_url in urls_to_try:
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-                req = urllib.request.Request(candidate_url, headers=DEFAULT_HEADERS)
-                with urllib.request.urlopen(req, context=ctx, timeout=45) as response:
-                    shutil.copyfileobj(response, tmp)
-                tmp_path = tmp.name
-                downloaded = True
-                logger.info(f"Téléchargement réussi depuis : {candidate_url}")
-                break
-        except Exception as dl_e:
-            last_dl_err = dl_e
-            logger.warning(f"Échec téléchargement depuis {candidate_url} ({dl_e}), tentative suivante...")
-            continue
-
-    if not downloaded or not tmp_path:
-        return {"success": False, "error": f"Impossible de télécharger la mise à jour ({last_dl_err})"}
-
     try:
-        # 2. Extraction dans un répertoire temporaire
+        # 1. Télécharger et VÉRIFIER tout, sans rien écrire
+        dist_zip, dist_sig, _used = _download_signed(urls_to_try, ctx)
+        if not patch_loader.verify_signature("dist", clean_ver, dist_zip, dist_sig):
+            logger.error("Signature de l'interface invalide ou absente : mise à jour refusée.")
+            return {"success": False, "error": "Signature de la mise à jour invalide ou absente : installation refusée."}
+
+        info = _backend_patch_info(clean_ver)
+        if info:
+            b_zip, b_sig, _ = _download_signed([str(info["url"])], ctx)
+            try:
+                backend = (patch_loader.prepare_bundle(b_zip, b_sig, clean_ver), b_zip, b_sig)
+            except patch_loader.PatchAlreadyInstalled:
+                backend = None
+            except patch_loader.PatchError as e:
+                logger.error(f"Correctif backend refusé : {e}")
+                return {"success": False, "error": f"Correctif backend refusé : {e}"}
+
+        # 2. Correctif backend (écriture atomique, actif au redémarrage)
+        restart_required = False
+        if backend:
+            patch_loader.commit_bundle(*backend)
+            backend_committed = True
+            restart_required = True
+
+        # 3. Interface : extraction dans un répertoire temporaire
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+            tmp.write(dist_zip)
+            tmp_path = tmp.name
         extract_dir = tempfile.mkdtemp()
         with zipfile.ZipFile(tmp_path, "r") as zip_ref:
             zip_ref.extractall(extract_dir)
 
-        # 3. Recherche de la racine 'dist' dans les fichiers extraits
+        # 4. Recherche de la racine 'dist' dans les fichiers extraits
         dist_src = None
         for root, dirs, files in os.walk(extract_dir):
             if "dist" in dirs:
@@ -267,7 +379,7 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
 
         os.makedirs(dist_dir, exist_ok=True)
 
-        # 4. Overlay in-place sans suppression préalable pour éviter les verrous de fichiers
+        # 5. Overlay in-place sans suppression préalable pour éviter les verrous de fichiers
         shutil.copytree(dist_src, dist_dir, dirs_exist_ok=True)
         logger.info(f"Overlay in-place appliqué avec succès dans : {dist_dir}")
 
@@ -283,7 +395,7 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
         except Exception:
             pass
 
-        # 5. Enregistrement persistant de la version installée
+        # 6. Enregistrement persistant de la version installée
         ver_info = {
             "version": clean_ver,
             "installed_at": datetime.datetime.now().isoformat(),
@@ -312,14 +424,28 @@ def apply_remote_update_sync(patch_url: str, target_ver: str) -> dict:
         except Exception:
             pass
 
+        message = f"Mise à jour v{clean_ver} installée avec succès dans {dist_dir} !"
+        restarting = bool(restart_required and patch_loader.can_restart())
+        if restarting:
+            message += " Le logiciel va redémarrer pour appliquer le correctif."
+            patch_loader.schedule_restart()
         return {
             "success": True,
-            "message": f"Mise à jour v{clean_ver} installée avec succès dans {dist_dir} !",
+            "message": message,
             "dist_dir": dist_dir,
-            "version": clean_ver
+            "version": clean_ver,
+            "backend_patched": bool(backend),
+            "restart_required": restart_required,
+            "restarting": restarting,
         }
     except Exception as e:
         logger.error(f"Erreur durant l'application de la mise à jour : {e}")
+        if backend_committed:
+            try:
+                patch_loader.rollback_last_install()
+                logger.warning("Correctif backend annulé (l'installation de l'interface a échoué).")
+            except Exception as rb_e:
+                logger.error(f"Annulation du correctif backend impossible : {rb_e}")
         return {"success": False, "error": str(e)}
     finally:
         if tmp_path and os.path.exists(tmp_path):

@@ -50,6 +50,10 @@ fi
 echo "⚡ Copie du frontend React Vite..."
 python3 -c "import shutil, glob; src = glob.glob('/Users/kiamarulmont/Desktop/*k*do-pos-3*/dist')[0]; shutil.rmtree('$SRC_DIR/dist', ignore_errors=True); shutil.copytree(src, '$SRC_DIR/dist')" 2>/dev/null || true
 
+# 1.6 VERSION DE BASE DU DMG (référence des patchs backend signés : kodo_base.BASE_VERSION)
+echo "🔏 Alignement de la version de base des correctifs backend..."
+(cd "$SRC_DIR" && python3 scripts/release/kodo_release.py stamp-base) || { echo "❌ Impossible d'aligner kodo_base.BASE_VERSION."; exit 1; }
+
 # 2. PRÉPARATION DU DOSSIER DE BUILD APFS
 echo "📦 Copie miroir vers APFS pour la compilation PyInstaller..."
 rm -rf "$APFS_BUILD"

@@ -16,6 +16,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+# Correctifs backend signés : à activer AVANT tout import de server_pos / kodo_core, pour que
+# les modules patchés remplacent ceux embarqués. Ne lève jamais (repli sur le code du DMG).
+import patch_loader
+patch_loader.activate()
+
 from server_pos import run_server
 
 import urllib.request
@@ -37,6 +42,7 @@ def wait_for_server(timeout=15):
             with urllib.request.urlopen(req, timeout=1) as resp:
                 if resp.status == 200:
                     print("✅ [KODO POS] Serveur local prêt et opérationnel.")
+                    patch_loader.mark_healthy()  # confirme qu'un éventuel patch backend démarre bien
                     return True
         except Exception:
             time.sleep(0.15)
