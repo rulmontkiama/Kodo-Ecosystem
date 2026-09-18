@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.67",
-  "latest_version": "1.0.67",
-  "version": "1.0.67",
+  "latestVersion": "1.0.68",
+  "latest_version": "1.0.68",
+  "version": "1.0.68",
   "releaseDate": "2026-09-18",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.67.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.67.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.67.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.68.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.68.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.68.zip",
   "has_update": true,
-  "changelog": "v1.0.67 :\n• Cartes cadeaux & avoirs réellement sécurisés : un avoir émis en Retours est désormais persisté et vérifié côté serveur (code réel, solde suffisant, débité une seule fois, jamais réutilisable au-delà de son solde).\n• Une vente refusée par le serveur (stock, paiement ou avoir insuffisant) n'est plus jamais affichée comme réussie : l'écran de caisse attend la confirmation réelle avant d'imprimer le ticket et de vider le panier.\n• Auto-réparation des bases existantes si des tables manquaient (Audit_Trail, Cartes_Cadeaux, Shopify_Sync) et arrondi bancaire strict appliqué de façon uniforme sur tous les calculs de vente, remboursement et export comptable."
+  "changelog": "v1.0.68 :\n• Correction critique : une vente refusée par le serveur (stock insuffisant, paiement insuffisant, avoir invalide) pouvait, dans certains cas, être quand même affichée comme encaissée en Caisse et en Live Shopping — la confirmation de vente vérifie désormais explicitement le succès réel renvoyé par le serveur, plus jamais une simple absence d'erreur.\n• Même correction appliquée à l'annulation d'avoir, à l'émission d'avoir (Retours & Gestion des avoirs) et à l'enregistrement des mouvements de caisse.\n• Live Shopping : l'encaissement d'un panier client est maintenant bloqué si la vente est refusée côté serveur (le panier reste « en attente », rien n'est marqué encaissé à tort).\n• Live Shopping : correction du bouton de panier de démonstration (test interne) qui générait des réservations invisibles pour l'admin."
 }
