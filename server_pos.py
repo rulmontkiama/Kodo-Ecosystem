@@ -70,6 +70,9 @@ def get_dist_dir():
         meipass_dist = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "dist")
         if is_dist_valid(meipass_dist):
             return meipass_dist
+        resources_dist = os.path.normpath(os.path.join(os.path.dirname(sys.executable), "..", "Resources", "dist"))
+        if is_dist_valid(resources_dist):
+            return resources_dist
         return meipass_dist
 
     # 3. En mode développement / source, prioriser le dist local ou Desktop

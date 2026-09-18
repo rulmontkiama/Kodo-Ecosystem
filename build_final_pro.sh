@@ -54,7 +54,7 @@ python3 -c "import shutil, glob; src = glob.glob('/Users/kiamarulmont/Desktop/*k
 echo "📦 Copie miroir vers APFS pour la compilation PyInstaller..."
 rm -rf "$APFS_BUILD"
 mkdir -p "$APFS_BUILD"
-cp -R "$SRC_DIR/"* "$APFS_BUILD/" 2>/dev/null || true
+rsync -a --exclude='.git' --exclude='Installation_Pack' --exclude='public' --exclude='releases' --exclude='*.dmg' --exclude='*.zip' --exclude='Backups_*' --exclude='Exports_*' --exclude='.npm-cache' --exclude='__pycache__' "$SRC_DIR/" "$APFS_BUILD/"
 
 # 3. COMPILATION PYINSTALLER SUR APFS
 echo "📦 Compilation PyInstaller..."
@@ -63,7 +63,8 @@ WORK_DIR="/tmp/kodo_work_$$"
 rm -rf "$DIST_DIR" "$WORK_DIR"
 
 cd "$APFS_BUILD"
-python3.12 -m PyInstaller --noconfirm --distpath "$DIST_DIR" --workpath "$WORK_DIR" Kodo_POS.spec
+export PYINSTALLER_CONFIG_DIR="/tmp/pyi_cache_$$"
+python3.12 -m PyInstaller --clean --noconfirm --distpath "$DIST_DIR" --workpath "$WORK_DIR" Kodo_POS.spec
 
 if [ $? -ne 0 ]; then
     echo "❌ Erreur lors de la compilation PyInstaller."
@@ -109,25 +110,28 @@ xattr -cr "$PACK_DIR" || true
 
 # Installation directe dans /Applications
 echo "📲 Installation directe dans /Applications..."
-rm -rf "/Applications/$APP_NAME.app"
-cp -R "$PACK_DIR/$APP_NAME.app" /Applications/
+rm -rf "/Applications/$APP_NAME.app" 2>/dev/null || true
+cp -R "$PACK_DIR/$APP_NAME.app" /Applications/ 2>/dev/null || true
 codesign --force --deep --sign - "/Applications/$APP_NAME.app" 2>/dev/null || true
-xattr -cr "/Applications/$APP_NAME.app" || true
+xattr -cr "/Applications/$APP_NAME.app" 2>/dev/null || true
 
 # 5. GÉNÉRATION DE INSTALLATION_KODO_POS_MACOS.ZIP VIA DITTO
 echo "📦 Génération de Installation_Kodo_POS_macOS.zip..."
-rm -f "$SRC_DIR/Installation_Kodo_POS_macOS.zip" ~/Desktop/Installation_Kodo_POS_macOS.zip
-ditto -c -k --sequesterRsrc "$PACK_DIR" ~/Desktop/Installation_Kodo_POS_macOS.zip
-cp ~/Desktop/Installation_Kodo_POS_macOS.zip "$SRC_DIR/Installation_Kodo_POS_macOS.zip" 2>/dev/null || true
+rm -f "$SRC_DIR/Installation_Kodo_POS_macOS.zip" "$SRC_DIR/public/Installation_Kodo_POS_macOS.zip"
+ditto -c -k --sequesterRsrc "$PACK_DIR" "$SRC_DIR/Installation_Kodo_POS_macOS.zip"
+cp "$SRC_DIR/Installation_Kodo_POS_macOS.zip" "$SRC_DIR/public/Installation_Kodo_POS_macOS.zip" 2>/dev/null || true
+cp "$SRC_DIR/Installation_Kodo_POS_macOS.zip" ~/Desktop/Installation_Kodo_POS_macOS.zip 2>/dev/null || true
 
 # 6. GÉNÉRATION DU DMG MACOS
 echo "💿 Création de l'image disque DMG macOS..."
 rm -rf /tmp/dmg_build && mkdir -p /tmp/dmg_build
 cp -R "$PACK_DIR/$APP_NAME.app" /tmp/dmg_build/
 cp "$PACK_DIR/IMPORTANT_LISEZ_MOI.txt" /tmp/dmg_build/ 2>/dev/null || true
-rm -f "$SRC_DIR/$DMG_NAME" ~/Desktop/"$DMG_NAME"
-hdiutil create -volname "Kodo POS" -srcfolder /tmp/dmg_build -ov -format UDZO ~/Desktop/"$DMG_NAME"
-cp ~/Desktop/"$DMG_NAME" "$SRC_DIR/$DMG_NAME" 2>/dev/null || true
+rm -f "$SRC_DIR/$DMG_NAME" "$SRC_DIR/public/$DMG_NAME"
+hdiutil create -volname "Kodo POS" -srcfolder /tmp/dmg_build -ov -format UDZO "$SRC_DIR/$DMG_NAME"
+cp "$SRC_DIR/$DMG_NAME" "$SRC_DIR/public/$DMG_NAME" 2>/dev/null || true
+cp "$SRC_DIR/$DMG_NAME" ~/Desktop/"$DMG_NAME" 2>/dev/null || true
+(cd "$SRC_DIR/dist" && zip -r -X "$SRC_DIR/public/dist_v1.0.65.zip" .) 2>/dev/null || true
 rm -rf /tmp/dmg_build "$DIST_DIR" "$WORK_DIR" "$BUILD_DIR" "$APFS_BUILD"
 
 # 7. GÉNÉRATION DU PACK WINDOWS (Kodo_POS_v1.0.45_Windows_Pack.zip)
