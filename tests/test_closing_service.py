@@ -122,6 +122,39 @@ def test_z_report_ventilates_by_payment_mode(conn):
     assert payments_by_mode["CARTE"].nombre_transactions == 1
 
 
+def test_z_report_computes_transaction_count_and_average_basket(conn):
+    record_validated_sale(
+        conn,
+        date_heure="2026-09-10T09:00:00+00:00",
+        mode_paiement="ESPECES",
+        vat_lines=_sale_20_percent("12.00", "10.00", "2.00"),
+    )
+    record_validated_sale(
+        conn,
+        date_heure="2026-09-10T10:00:00+00:00",
+        mode_paiement="ESPECES",
+        vat_lines=_sale_20_percent("6.00", "5.00", "1.00"),
+    )
+    record_validated_sale(
+        conn,
+        date_heure="2026-09-10T11:00:00+00:00",
+        mode_paiement="CARTE",
+        vat_lines=_sale_20_percent("24.00", "20.00", "4.00"),
+    )
+
+    report = compute_z_report(conn, z_number=1)
+
+    assert report.nombre_transactions == 3
+    assert report.panier_moyen == Decimal("14.00")
+
+
+def test_z_report_with_no_sales_has_zero_transactions_and_average(conn):
+    report = compute_z_report(conn, z_number=1)
+
+    assert report.nombre_transactions == 0
+    assert report.panier_moyen == Decimal("0.00")
+
+
 def test_z_report_sums_total_discounts(conn):
     record_validated_sale(
         conn,

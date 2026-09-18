@@ -41,5 +41,7 @@ class ZReport:
     taxes: List[TaxBreakdown]
     payments: List[PaymentBreakdown]
     total_discounts: Decimal
+    nombre_transactions: int
+    panier_moyen: Decimal
     signature_hash: str
     previous_z_hash: Optional[str] = None

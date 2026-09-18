@@ -257,6 +257,13 @@ def compute_z_report(
             f"Un rapport Z portant le numéro {z_number} existe déjà."
         ) from exc
 
+    nombre_transactions = len(sale_ids)
+    panier_moyen = (
+        quantize_money(total_ttc / nombre_transactions)
+        if nombre_transactions
+        else Decimal("0.00")
+    )
+
     return ZReport(
         z_number=z_number,
         date_debut=date_debut,
@@ -267,6 +274,8 @@ def compute_z_report(
         taxes=tax_breakdowns,
         payments=payment_breakdowns,
         total_discounts=total_discounts,
+        nombre_transactions=nombre_transactions,
+        panier_moyen=panier_moyen,
         signature_hash=signature_hash,
         previous_z_hash=previous_z_hash,
     )
