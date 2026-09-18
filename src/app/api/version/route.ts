@@ -2,14 +2,17 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
   return NextResponse.json({
-    latestVersion: "1.0.52",
-    latest_version: "1.0.52",
-    version: "1.0.52",
-    releaseDate: "2026-09-17",
-    downloadUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.52.zip",
-    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.52.zip",
-    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.52.zip",
+    version: "v1.0.69",
+    latestVersion: "1.0.69",
+    latest_version: "v1.0.69",
     has_update: true,
-    changelog: "v1.0.52 : Personnalisation complète du pied de ticket avec générateur QR Code grand format (80mm / 512 dots), modèles prédéfinis (Instagram, Avis Google, TikTok, E-shop, Wi-Fi), textes d'accroche/liens configurables et aperçu en direct.",
+    releaseDate: "2026-09-18",
+    download_url: "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
+    downloadUrl: "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
+    dmgUrl: "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
+    dmg_url: "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
+    distPatchUrl: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.69.zip",
+    dist_patch_url: "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.69.zip",
+    changelog: "v1.0.69 :\n• Clôture Z : le fond de caisse ne se réinitialise plus en silence — un échec d'enregistrement est désormais signalé au caissier au lieu d'afficher une fausse confirmation.\n• Clôture Z : le total « Règlements Carte Bancaire » n'inclut plus à tort les remboursements en Avoir ni les paiements QR (affichés désormais séparément).\n• Clôture Z : l'écart de caisse compare enfin le comptage physique complet du tiroir au vrai théorique attendu (fond initial + ventes espèces + apports/prélèvements), au lieu d'ignorer le fond de caisse initial dans le calcul.\n• Cette mise à jour corrige des données comptables : pour que la clôture du jour soit entièrement fiable, une réinstallation complète de l'application (nouveau DMG) est recommandée en plus de cette mise à jour automatique."
   });
 }
