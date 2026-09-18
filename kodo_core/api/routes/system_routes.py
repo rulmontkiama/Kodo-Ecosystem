@@ -7,6 +7,7 @@ import os
 import sys
 import datetime
 import sqlite3
+from decimal import Decimal
 from typing import Dict, Any, Tuple, Optional
 
 import database_manager
@@ -224,15 +225,24 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         auto_sync = data.get("autoSyncStock")
         sync_orders = data.get("syncOrders")
 
+        if fond_caisse_val is not None:
+            try:
+                fond_caisse_dec = Decimal(str(fond_caisse_val))
+            except Exception:
+                return 400, {"error": f"Fond de caisse invalide : {fond_caisse_val!r} n'est pas un montant numérique."}
+            if fond_caisse_dec < 0:
+                return 400, {"error": "Le fond de caisse ne peut pas être négatif."}
+            fond_caisse_val = str(fond_caisse_dec.quantize(Decimal('0.01')))
+
         conn = get_connection()
         cursor = conn.cursor()
         if fond_caisse_val is not None:
-            try:
-                from kodo_core.services.cash_session_service import set_fond_caisse_matin
-                set_fond_caisse_matin(cursor, str(fond_caisse_val))
-                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('fond_caisse_matin', ?)", (str(fond_caisse_val),))
-            except Exception:
-                pass
+            # Erreur non journalisée ici de façon volontairement fatale : un échec silencieux
+            # (`except: pass`) faisait auparavant croire au commerçant que son fond de caisse
+            # avait été sauvegardé (success: true) alors que rien n'avait été persisté.
+            from kodo_core.services.cash_session_service import set_fond_caisse_matin
+            set_fond_caisse_matin(cursor, fond_caisse_val)
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('fond_caisse_matin', ?)", (fond_caisse_val,))
 
         if store_name:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_name', ?)", (store_name,))

@@ -325,6 +325,17 @@ class MigrationManager:
                        SELECT RAISE(ABORT, 'Suppression interdite : mouvement de caisse scelle (piste audit).');
                    END"""
             ]
+        },
+        {
+            "version": "1.3.0",
+            "description": "Traçabilité des remboursements (anti-survente/anti-doublon) et durcissement anti-fraude",
+            "sql": [
+                # Relie une ligne de remboursement (quantite négative) à la ligne de vente
+                # d'origine qu'elle rembourse. Sans ce lien, rien n'empêchait de rembourser
+                # indéfiniment la même ligne (même vd_id) : chaque appel recréditait le stock
+                # et le ledger sans jamais vérifier combien avait déjà été remboursé.
+                "ALTER TABLE Ventes_Details ADD COLUMN refund_of_vd_id INTEGER DEFAULT NULL"
+            ]
         }
     ]
 

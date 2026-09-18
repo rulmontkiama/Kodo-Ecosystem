@@ -45,55 +45,70 @@ class ZReportEngine:
         try:
             bilan = generer_bilan_z_journalier(caisse_id=caisse_id, conn=conn)
 
-            # Ventilation de TVA par taux pour les tickets de cette clôture
+            # Ventilation de TVA par taux : DOIT porter exactement sur le même ensemble
+            # de tickets que le bilan ci-dessus (caisse_id + z_id IS NULL). L'ancienne
+            # requête comparait `date_heure > dernière_date_de_cloture` sans filtrer par
+            # caisse_id : elle mélangeait les tickets de toutes les caisses et pouvait
+            # diverger du vrai total facturé (tickets à la même seconde que la clôture,
+            # horloge modifiée, etc.).
+            #
+            # De plus, Ventes_Details.prix_unitaire_tvac stocke le prix unitaire BRUT (avant
+            # remise globale) : sommer quantite*prix_unitaire_tvac donne donc le total AVANT
+            # remise, qui dépasse structurellement Tickets.total_tvac (net) dès qu'une remise
+            # est appliquée. On pondère chaque ticket par son propre ratio net/brut (le même
+            # calcul que celui déjà fait au moment de la vente dans process_sale_transaction)
+            # pour que la somme de la ventilation corresponde exactement au total facturé.
             cursor = conn.cursor()
-            cursor.execute("SELECT MAX(date_cloture) FROM Clotures_Caisse WHERE caisse_id=?", (caisse_id,))
-            last_z = cursor.fetchone()
-            last_z_date = last_z[0] if last_z else None
-
-            if last_z_date:
-                cursor.execute("""
-                    SELECT p.taux_tva, 
-                           SUM(v.quantite * v.prix_unitaire_tvac) as tvac
-                    FROM Tickets t
-                    JOIN Ventes_Details v ON v.id_ticket = t.id
-                    LEFT JOIN Stocks s ON v.id_stock = s.id
-                    LEFT JOIN Produits p ON s.id_produit = p.id
-                    WHERE t.date_heure > ?
-                    GROUP BY p.taux_tva
-                """, (last_z_date,))
-            else:
-                cursor.execute("""
-                    SELECT p.taux_tva, 
-                           SUM(v.quantite * v.prix_unitaire_tvac) as tvac
-                    FROM Tickets t
-                    JOIN Ventes_Details v ON v.id_ticket = t.id
-                    LEFT JOIN Stocks s ON v.id_stock = s.id
-                    LEFT JOIN Produits p ON s.id_produit = p.id
-                    GROUP BY p.taux_tva
-                """)
-
-            rows = cursor.fetchall()
             vat_breakdown: Dict[str, Dict[str, float]] = {}
 
-            for r in rows:
-                taux = Decimal(str(r[0])) if r[0] is not None else Decimal('0.21')
-                tvac_d = quantize_money(r[1])
-                htva_d = quantize_money(tvac_d / (Decimal('1.00') + taux))
-                tva_d = tvac_d - htva_d
+            if bilan["ticket_ids"]:
+                placeholders = ",".join("?" for _ in bilan["ticket_ids"])
+                cursor.execute(f"""
+                    SELECT t.id, t.total_tvac, p.taux_tva, SUM(v.quantite * v.prix_unitaire_tvac) as tvac_brut
+                    FROM Tickets t
+                    JOIN Ventes_Details v ON v.id_ticket = t.id
+                    LEFT JOIN Stocks s ON v.id_stock = s.id
+                    LEFT JOIN Produits p ON s.id_produit = p.id
+                    WHERE t.id IN ({placeholders})
+                    GROUP BY t.id, p.taux_tva
+                """, bilan["ticket_ids"])
+                rows = cursor.fetchall()
 
-                rate_label = f"{float(taux)*100:.1f}%".rstrip('0').rstrip('.') + "%"
-                vat_breakdown[rate_label] = {
-                    "htva": float(htva_d),
-                    "tva": float(tva_d),
-                    "tvac": float(tvac_d),
-                    "rate": float(taux)
-                }
+                gross_by_ticket: Dict[int, Decimal] = {}
+                lines_by_ticket: Dict[int, list] = {}
+                net_by_ticket: Dict[int, Decimal] = {}
+                for t_id, t_total_tvac, taux, tvac_brut in rows:
+                    taux_dec = Decimal(str(taux)) if taux is not None else Decimal('0.21')
+                    tvac_brut_dec = Decimal(str(tvac_brut or "0.00"))
+                    gross_by_ticket[t_id] = gross_by_ticket.get(t_id, Decimal('0.00')) + tvac_brut_dec
+                    net_by_ticket[t_id] = Decimal(str(t_total_tvac or "0.00"))
+                    lines_by_ticket.setdefault(t_id, []).append((taux_dec, tvac_brut_dec))
+
+                accum: Dict[Decimal, Decimal] = {}
+                for t_id, lines in lines_by_ticket.items():
+                    gross_total = gross_by_ticket.get(t_id, Decimal('0.00'))
+                    net_total = net_by_ticket.get(t_id, Decimal('0.00'))
+                    ratio = (net_total / gross_total) if gross_total > Decimal('0.00') else Decimal('1.00')
+                    for taux_dec, tvac_brut_dec in lines:
+                        tvac_net = quantize_money(tvac_brut_dec * ratio)
+                        accum[taux_dec] = accum.get(taux_dec, Decimal('0.00')) + tvac_net
+
+                for taux_dec, tvac_d in accum.items():
+                    htva_d = quantize_money(tvac_d / (Decimal('1.00') + taux_dec))
+                    tva_d = tvac_d - htva_d
+                    rate_label = f"{float(taux_dec)*100:.1f}%".rstrip('0').rstrip('.') + "%"
+                    vat_breakdown[rate_label] = {
+                        "htva": float(htva_d),
+                        "tva": float(tva_d),
+                        "tvac": float(tvac_d),
+                        "rate": float(taux_dec)
+                    }
 
             bilan["vat_breakdown"] = vat_breakdown
 
             # Conversion des Decimals en floats pour la sérialisation
-            for key in ["total_tvac", "total_htva", "total_tva", "total_remises", "total_especes", "total_carte"]:
+            for key in ["total_tvac", "total_htva", "total_tva", "total_remises", "total_especes",
+                        "total_carte", "total_apports", "total_prelevements"]:
                 if key in bilan and isinstance(bilan[key], Decimal):
                     bilan[key] = float(bilan[key])
 

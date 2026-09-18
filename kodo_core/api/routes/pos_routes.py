@@ -113,16 +113,23 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         if not payments:
             payments = [(mode_paiement, total_ttc)]
 
-        res = process_sale_transaction(
-            cart_items=cart_items,
-            total_tvac=total_ttc,
-            payments=payments,
-            client_id=id_client,
-            cashier_name=vendeur,
-            caisse_id="POS-01",
-            discount_percent=remise,
-            change_given=rendu
-        )
+        try:
+            res = process_sale_transaction(
+                cart_items=cart_items,
+                total_tvac=total_ttc,
+                payments=payments,
+                client_id=id_client,
+                cashier_name=vendeur,
+                caisse_id="POS-01",
+                discount_percent=remise,
+                change_given=rendu
+            )
+        except ValueError as ve:
+            # Rejet métier légitime (stock insuffisant, paiement insuffisant, article
+            # introuvable...) : sans ce try/except, l'exception remontait non gérée
+            # jusqu'au serveur HTTP, qui ne renvoie alors aucune réponse JSON exploitable
+            # au frontend (connexion coupée au lieu d'un message d'erreur clair).
+            return 400, {"error": str(ve)}
 
         if data.get('printReceipt', False):
             try:
@@ -132,25 +139,41 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
 
         return 200, {"success": True, "receiptNumber": res["numero_ticket"], "ticket": res}
 
-    # 3. Traitement d'un retour / remboursement
+    # 3. Recherche d'un ticket par numéro, avec quantité restant remboursable par ligne
+    elif method == "GET" and path == "/api/sales/lookup":
+        numero = (query.get("ticket") or query.get("numero") or query.get("receiptNumber") or [None])[0]
+        if not numero:
+            return 400, {"error": "Paramètre 'ticket' manquant"}
+        result = database_manager.rechercher_ticket_pour_remboursement(numero)
+        if not result:
+            return 404, {"error": f"Ticket introuvable ou non remboursable : {numero}"}
+        return 200, result
+
+    # 3bis. Traitement d'un retour / remboursement
     elif method == "POST" and (path == "/api/sales/return" or path == "/api/sales/refund"):
         orig_ticket = data.get("ticket_number") or data.get("receiptNumber")
-        vd_id = data.get("sales_detail_id") or data.get("detail_id") or 1
+        vd_id = data.get("sales_detail_id") or data.get("detail_id")
         stock_id = data.get("stock_id")
         price = float(data.get("price") or data.get("amount") or 0.0)
         mode = data.get("mode") or data.get("paymentMethod") or "Espèces"
         vendeur = data.get("vendeur") or data.get("cashierName") or "Admin"
         quantity = int(data.get("quantity") or data.get("quantite") or 1)
 
-        res = process_return_transaction(
-            original_ticket_number=orig_ticket,
-            sales_detail_id=vd_id,
-            stock_id=stock_id,
-            refund_price=price,
-            refund_mode=mode,
-            cashier_name=vendeur,
-            quantity=quantity
-        )
+        if not orig_ticket or not vd_id:
+            return 400, {"error": "ticket_number et sales_detail_id sont requis"}
+
+        try:
+            res = process_return_transaction(
+                original_ticket_number=orig_ticket,
+                sales_detail_id=vd_id,
+                stock_id=stock_id,
+                refund_price=price,
+                refund_mode=mode,
+                cashier_name=vendeur,
+                quantity=quantity
+            )
+        except ValueError as ve:
+            return 400, {"error": str(ve)}
         return 200, res
 
     # 3bis. Réimpression d'un ticket existant
@@ -263,6 +286,55 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
     elif method == "GET" and path == "/api/cloture-z/summary":
         summary = ZReportEngine.get_daily_z_summary(caisse_id="POS-01")
         return 200, summary
+
+    # 9bis. Mouvements de caisse (apports / prélèvements d'espèces)
+    elif method == "GET" and path == "/api/cash-movements":
+        mouvements = database_manager.lister_mouvements_caisse(caisse_id="POS-01")
+        return 200, mouvements
+
+    elif method == "POST" and path == "/api/cash-movements":
+        mvt_type = str(data.get("type", "")).lower()
+        type_mouvement = "APPORT" if mvt_type == "apport" else "PRELEVEMENT" if mvt_type == "prelevement" else None
+        if type_mouvement is None:
+            return 400, {"error": "Type de mouvement invalide (attendu: 'apport' ou 'prelevement')"}
+
+        try:
+            montant = float(data.get("amount", 0))
+        except (TypeError, ValueError):
+            return 400, {"error": "Montant invalide"}
+
+        motif = str(data.get("reason", "")).strip()
+        vendeur = data.get("userName") or data.get("vendeur") or "Admin"
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = database_manager.get_connection()
+        try:
+            cursor = conn.cursor()
+            mvt_id = database_manager.enregistrer_mouvement_caisse(
+                cursor=cursor,
+                type_mouvement=type_mouvement,
+                montant=montant,
+                motif=motif,
+                vendeur_nom=vendeur,
+                date_heure=now_str,
+                caisse_id="POS-01"
+            )
+            conn.commit()
+        except ValueError as ve:
+            conn.rollback()
+            return 400, {"error": str(ve)}
+        finally:
+            conn.close()
+
+        return 200, {
+            "success": True,
+            "id": mvt_id,
+            "type": mvt_type,
+            "amount": montant,
+            "reason": motif,
+            "userName": vendeur,
+            "date_heure": now_str
+        }
 
     # 10. Crash Recovery : Sauvegarde / Récupération du panier actif
     elif method == "POST" and path == "/api/cart/session":

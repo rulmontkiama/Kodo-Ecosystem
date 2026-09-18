@@ -244,36 +244,89 @@ def process_sale_transaction(
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         num_ticket = database_manager.generer_numero_ticket(cursor)
 
-        tot_tvac_dec = quantize_money(Decimal(str(total_tvac)))
-        discount_dec = quantize_money(Decimal(str(discount_percent)))
-        change_dec = quantize_money(Decimal(str(change_given)))
+        if not cart_items:
+            raise ValueError("Panier vide : impossible d'enregistrer une vente sans article.")
 
-        # Ventilation TVA proportionnelle à la remise réellement appliquée : on calcule
-        # d'abord le sous-total TTC brut (sans remise) pour en déduire un ratio de remise,
-        # puis on applique ce ratio à chaque ligne AVANT le calcul HT/TVA. Sans cela, le
-        # HT/TVA persisté reste calculé sur les prix bruts alors que tot_tvac_dec est déjà
-        # remisé, ce qui fait apparaître une TVA sous-évaluée voire négative dès qu'une
-        # remise globale est appliquée.
+        # Remise globale bornée [0, 100] : une valeur négative (survalorisation) ou
+        # supérieure à 100% n'a aucun sens métier et produirait un total négatif.
+        discount_dec = max(Decimal('0'), min(Decimal('100'), Decimal(str(discount_percent))))
+
+        # SÉCURITÉ FINANCIÈRE : le prix et le taux de TVA de chaque ligne sont TOUJOURS
+        # relus depuis Produits/Stocks (source d'autorité), jamais acceptés tels quels
+        # depuis le client. `total_tvac` fourni par l'appelant n'est plus utilisé pour le
+        # calcul : sans ce recalcul serveur, n'importe quel client (DevTools, appel API
+        # direct) pouvait vendre un article catalogué à 500€ pour 0,01€ tout en décrémentant
+        # le vrai stock, le serveur se contentant d'enregistrer tel quel le total annoncé.
         subtotal_brut_dec = Decimal('0.00')
         lignes_brutes = []
+        stock_cache: Dict[Any, Any] = {}
+        qty_demandee_par_stock: Dict[Any, int] = {}
         for it in cart_items:
             stock_id = it.get("stock_id") or it.get("id_stock") or it.get("id")
-            px_tvac = quantize_money(Decimal(str(it.get("prix_vente_tvac") or it.get("prix_tvac") or it.get("price") or 0)))
-            taux = Decimal(str(it.get("taux_tva", 0.21)))
+            if not stock_id:
+                raise ValueError("Article sans stock_id : vente refusée (prix non vérifiable).")
+
+            if stock_id not in stock_cache:
+                cursor.execute("""
+                    SELECT s.id, s.quantite_actuelle, p.prix_vente_tvac, p.prix_solde_tvac, p.en_solde, p.taux_tva, p.nom, p.code_barre
+                    FROM Stocks s JOIN Produits p ON s.id_produit = p.id
+                    WHERE s.id = ?
+                """, (stock_id,))
+                stock_cache[stock_id] = cursor.fetchone()
+
+            prod_row = stock_cache[stock_id]
+            if not prod_row:
+                raise ValueError(f"Article introuvable en base (stock_id={stock_id}) : vente refusée.")
+
+            _sid, dispo, prix_catalogue, prix_solde, en_solde, taux_db, nom_db, code_barre_db = prod_row
+            prix_autoritaire = (
+                Decimal(str(prix_solde)) if (en_solde and prix_solde is not None) else Decimal(str(prix_catalogue or 0))
+            )
+            px_tvac = quantize_money(prix_autoritaire)
+            taux = Decimal(str(taux_db if taux_db is not None else 0.21))
+
             qty = int(it.get("quantite") or it.get("quantity") or 1)
+            if qty <= 0:
+                raise ValueError(f"Quantité invalide ({qty}) pour stock_id={stock_id} : vente refusée.")
+
+            qty_demandee_par_stock[stock_id] = qty_demandee_par_stock.get(stock_id, 0) + qty
 
             ligne_tvac_brute = quantize_money(px_tvac * Decimal(str(qty)))
             subtotal_brut_dec += ligne_tvac_brute
 
             lignes_brutes.append({
                 "stock_id": stock_id,
-                "code_barre": it.get("code_barre") or it.get("barcode") or "",
-                "nom": it.get("nom") or it.get("name") or "Article",
+                "code_barre": code_barre_db or it.get("code_barre") or it.get("barcode") or "",
+                "nom": nom_db or it.get("nom") or it.get("name") or "Article",
                 "prix_vente_tvac": float(px_tvac),
                 "quantite": qty,
                 "taux_tva": float(taux),
                 "ligne_tvac_brute": ligne_tvac_brute,
             })
+
+        # Garde anti-survente en TEMPS RÉEL : uniquement sur ce chemin (vente directe au
+        # comptoir), pas dans enregistrer_vente lui-même — ce dernier est aussi rejoué par
+        # OfflineSyncEngine pour des ventes hors-ligne déjà physiquement conclues, qu'on ne
+        # peut pas rejeter après coup (cf. stratégie Last-Write-Wins de la synchro offline).
+        for sid, qty_totale in qty_demandee_par_stock.items():
+            dispo = stock_cache[sid][1]
+            dispo = int(dispo) if dispo is not None else 0
+            if dispo < qty_totale:
+                raise ValueError(
+                    f"Stock insuffisant pour l'article (stock_id={sid}) : disponible={dispo}, demandé={qty_totale}"
+                )
+
+        tot_tvac_dec = quantize_money(subtotal_brut_dec * (Decimal('1.00') - discount_dec / Decimal('100.00')))
+
+        try:
+            total_annonce_dec = quantize_money(Decimal(str(total_tvac)))
+            if abs(total_annonce_dec - tot_tvac_dec) > Decimal('0.01'):
+                print(
+                    f"[VENTE WARNING] Total annoncé par le client ({total_annonce_dec}) diffère du total "
+                    f"recalculé serveur ({tot_tvac_dec}) pour le ticket {num_ticket} — le total serveur fait foi."
+                )
+        except Exception:
+            pass
 
         ratio_remise = (
             (tot_tvac_dec / subtotal_brut_dec) if subtotal_brut_dec > Decimal('0.00') else Decimal('1.00')
@@ -292,8 +345,30 @@ def process_sale_transaction(
             panier_formatted.append(ligne)
 
         tot_tva_dec = tot_tvac_dec - tot_htva_dec
-        paiements_dec = [(p[0], float(quantize_money(Decimal(str(p[1]))))) for p in payments]
-        main_payment_method = paiements_dec[0][0] if paiements_dec else "CB"
+
+        # Remise réellement accordée en EUROS (et non le pourcentage brut) : le pourcentage
+        # seul, stocké tel quel dans Tickets.remise, faisait additionner des "10" (pour 10%)
+        # comme des euros dans le total_remises du bilan Z et des exports comptables.
+        remise_montant_dec = quantize_money(subtotal_brut_dec - tot_tvac_dec)
+
+        paiements_dec = []
+        for p in payments:
+            montant_p = quantize_money(Decimal(str(p[1])))
+            if montant_p <= Decimal('0.00'):
+                raise ValueError(f"Montant de paiement invalide ({montant_p}) pour le mode {p[0]!r}.")
+            paiements_dec.append((p[0], montant_p))
+
+        # Rendu de monnaie recalculé serveur (jamais celui fourni par le client) : sans ce
+        # recalcul, un `changeGiven` falsifié pouvait faire passer l'encaissement espèces
+        # enregistré en dessous (voire en négatif) du montant réellement perçu en caisse.
+        rendu_dec, reste_du_dec = CartEngine.calculate_change_due(tot_tvac_dec, paiements_dec)
+        if reste_du_dec > Decimal('0.00'):
+            raise ValueError(
+                f"Paiement insuffisant : {reste_du_dec} restant dû sur un total de {tot_tvac_dec}."
+            )
+
+        paiements_payload = [(p[0], float(p[1])) for p in paiements_dec]
+        main_payment_method = paiements_payload[0][0] if paiements_payload else "CB"
 
         ticket_id = database_manager.enregistrer_vente(
             cursor=cursor,
@@ -301,14 +376,14 @@ def process_sale_transaction(
             total_tvac=float(tot_tvac_dec),
             total_htva=float(tot_htva_dec),
             total_tva=float(tot_tva_dec),
-            remise=float(discount_dec),
+            remise=float(remise_montant_dec),
             methode_paiement=main_payment_method,
             id_client=client_id,
-            rendu_monnaie=float(change_dec),
+            rendu_monnaie=float(rendu_dec),
             panier=panier_formatted,
             vendeur_nom=cashier_name,
             date_heure=now_str,
-            paiements=paiements_dec,
+            paiements=paiements_payload,
             caisse_id=caisse_id
         )
 
@@ -352,7 +427,7 @@ def process_sale_transaction(
             "total_tvac": float(tot_tvac_dec),
             "total_htva": float(tot_htva_dec),
             "total_tva": float(tot_tva_dec),
-            "rendu_monnaie": float(change_dec)
+            "rendu_monnaie": float(rendu_dec)
         }
 
     except Exception as e:
@@ -384,7 +459,11 @@ def process_return_transaction(
         cursor = conn.cursor()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        new_ref = database_manager.enregistrer_remboursement(
+        # `refund_price` (fourni par l'appelant) n'est PAS utilisé pour le calcul financier
+        # réel : enregistrer_remboursement relit toujours le prix vendu en base et renvoie
+        # le montant réellement remboursé, qu'on utilise ici pour la réponse plutôt que la
+        # valeur annoncée par le client (potentiellement falsifiée).
+        new_ref, montant_reel_rembourse = database_manager.enregistrer_remboursement(
             cursor=cursor,
             ticket_origine=original_ticket_number,
             vd_id=sales_detail_id,
@@ -401,7 +480,7 @@ def process_return_transaction(
         return {
             "success": True,
             "refund_ticket_number": new_ref,
-            "amount_refunded": refund_price * quantity,
+            "amount_refunded": float(-montant_reel_rembourse),
             "refund_mode": refund_mode,
             "date_heure": now_str
         }

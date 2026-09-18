@@ -1,11 +1,11 @@
 {
-  "latestVersion": "1.0.65",
-  "latest_version": "1.0.65",
-  "version": "1.0.65",
+  "latestVersion": "1.0.66",
+  "latest_version": "1.0.66",
+  "version": "1.0.66",
   "releaseDate": "2026-09-18",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.65.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.65.zip",
-  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.65.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.66.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.66.zip",
+  "downloadUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.66.zip",
   "has_update": true,
-  "changelog": "v1.0.65 :\n• Sélection automatique de la taille : Dès qu'un vêtement ou article avec déclinaisons est bipé ou sélectionné, une fenêtre tactile propose les tailles disponibles et les stocks restants en temps réel.\n• Gestion multi-tailles dans le panier : Affichage distinct de chaque taille avec pastille dédiée et lignes indépendantes pour le même modèle.\n• Décompte d'inventaire précis par taille : Décrémentation automatique du stock de la taille vendue lors de l'encaissement et mention sur le ticket.\n• Résolution écran blanc page Stocks : Correction définitive du crash d'affichage sur l'onglet des stocks et ajout d'un interrupteur dans les Paramètres pour activer/désactiver la demande de taille."
+  "changelog": "v1.0.66 :\n• Fiabilisation complète caisse & clôture Z : les apports/prélèvements de caisse sont désormais enregistrés en base (ne disparaissent plus au redémarrage), le fond de caisse et la ventilation TVA du bilan Z sont recalculés et vérifiés côté serveur.\n• Renforcement de la sécurité financière : le prix de vente, le rendu de monnaie et les remboursements sont systématiquement revérifiés côté serveur à partir du catalogue et des ventes réelles, avec contrôles anti-survente et anti-remboursement en double.\n• Écran Retours & Avoirs connecté aux vraies ventes : recherche d'un ticket réel, suivi de la quantité déjà remboursée par article, bons d'avoir émis uniquement pour un montant vérifié."
 }

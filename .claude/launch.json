@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kodo-pos-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd '/Users/kiamarulmont/Desktop/kōdo-pos-3' && npm run dev"],
+      "port": 3000
+    }
+  ]
+}

@@ -381,10 +381,18 @@ def _initialiser_db_raw(conn):
             id_stock INTEGER,
             quantite INTEGER,
             prix_unitaire_tvac DECIMAL,
+            refund_of_vd_id INTEGER DEFAULT NULL,
             FOREIGN KEY (id_ticket) REFERENCES Tickets(id) ON DELETE CASCADE,
             FOREIGN KEY (id_stock) REFERENCES Stocks(id)
         )
     ''')
+
+    # Migrations de colonnes manquantes sur Ventes_Details
+    cursor.execute("PRAGMA table_info(Ventes_Details)")
+    cols_ventes_details = [row[1] for row in cursor.fetchall()]
+    if 'refund_of_vd_id' not in cols_ventes_details:
+        try: cursor.execute("ALTER TABLE Ventes_Details ADD COLUMN refund_of_vd_id INTEGER DEFAULT NULL")
+        except: pass
 
     # Table Ledger_Caisse
     cursor.execute('''
@@ -609,10 +617,19 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
 
     ticket_id = cursor.lastrowid
 
+    # NOTE: la disponibilité du stock n'est PAS vérifiée ici. `enregistrer_vente` est
+    # aussi le primitif de rejeu utilisé par OfflineSyncEngine pour valider a posteriori
+    # des ventes déjà physiquement conclues sur des caisses déconnectées (stratégie
+    # Last-Write-Wins) : une vente qui a réellement eu lieu en boutique ne peut pas être
+    # rejetée après coup sous prétexte que 2 caisses ont vendu le dernier article en même
+    # temps hors-ligne — le stock doit pouvoir passer sous 0 et être flagué pour audit
+    # (cf. OfflineSyncEngine). Le contrôle de disponibilité en temps réel se fait un niveau
+    # au-dessus, dans process_sale_transaction, avant tout enregistrement.
     for it in panier:
         s_id = it.get("stock_id")
         px = it.get("prix_vente_tvac", 0)
         qty = it.get("quantite", 1)
+
         cursor.execute("""
             INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac)
             VALUES (?, ?, ?, ?)
@@ -644,29 +661,61 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
 def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mode, vendeur_nom, date_heure, quantite=1, caisse_id="POS-01"):
     """Enregistre un remboursement (NF525).
 
-    `prix` est le prix UNITAIRE (tel que stocké dans Ventes_Details.prix_unitaire_tvac) ;
-    `quantite` est le nombre d'unités réellement retournées. Le stock réintégré et le
-    montant remboursé sont proportionnels à `quantite`, plutôt qu'un +1/-1 fixe qui
-    désynchronise le stock dès qu'un retour porte sur plus d'une unité.
+    Le prix, le taux de TVA et le stock à recréditer sont TOUJOURS relus depuis la
+    ligne de vente d'origine (`Ventes_Details`/`Produits`) plutôt que fournis par
+    l'appelant : un `prix` ou `stock_id` arbitraire transmis par le client ne sont
+    jamais utilisés pour le calcul financier réel. `ticket_origine` est vérifié
+    contre le ticket réellement propriétaire de `vd_id`, et la quantité déjà
+    remboursée pour cette ligne (via `refund_of_vd_id`) est déduite pour empêcher
+    tout remboursement en double ou au-delà de la quantité effectivement vendue.
     """
     cursor.execute("""
-        SELECT p.taux_tva
+        SELECT vd.quantite, vd.prix_unitaire_tvac, vd.id_stock, t.numero_ticket, p.taux_tva
         FROM Ventes_Details vd
-        JOIN Stocks s ON vd.id_stock = s.id
-        JOIN Produits p ON s.id_produit = p.id
+        JOIN Tickets t ON vd.id_ticket = t.id
+        LEFT JOIN Stocks s ON vd.id_stock = s.id
+        LEFT JOIN Produits p ON s.id_produit = p.id
         WHERE vd.id = ?
     """, (vd_id,))
     row = cursor.fetchone()
-    taux_tva = Decimal(str(row[0])) if row else Decimal('0.21')
+    if not row:
+        raise ValueError(f"Ligne de vente introuvable (vd_id={vd_id}) : remboursement refusé.")
+
+    qte_vendue, prix_unitaire_origine, id_stock_origine, numero_ticket_origine, taux_tva_row = row
+
+    if ticket_origine and str(ticket_origine) != str(numero_ticket_origine):
+        raise ValueError(
+            f"Incohérence ticket/ligne : vd_id={vd_id} appartient au ticket {numero_ticket_origine}, "
+            f"pas à {ticket_origine}. Remboursement refusé."
+        )
+
+    if qte_vendue is None or qte_vendue <= 0:
+        raise ValueError(f"La ligne vd_id={vd_id} n'est pas une ligne de vente valide (déjà un remboursement ?).")
+
+    taux_tva = Decimal(str(taux_tva_row)) if taux_tva_row is not None else Decimal('0.21')
+    prix_unitaire = Decimal(str(prix_unitaire_origine))
+
+    cursor.execute("SELECT COALESCE(SUM(-quantite), 0) FROM Ventes_Details WHERE refund_of_vd_id = ?", (vd_id,))
+    deja_rembourse = cursor.fetchone()[0] or 0
 
     quantite = int(quantite) if quantite else 1
-    total_tvac = -(Decimal(str(prix)) * Decimal(str(quantite))).quantize(Decimal('0.01'))
+    if quantite <= 0:
+        raise ValueError("La quantité remboursée doit être strictement positive.")
+
+    restant_remboursable = int(qte_vendue) - int(deja_rembourse)
+    if quantite > restant_remboursable:
+        raise ValueError(
+            f"Remboursement refusé : {restant_remboursable} unité(s) restent remboursables sur "
+            f"vd_id={vd_id} (vendu={qte_vendue}, déjà remboursé={deja_rembourse}, demandé={quantite})."
+        )
+
+    total_tvac = -(prix_unitaire * Decimal(str(quantite))).quantize(Decimal('0.01'))
     total_htva = (total_tvac / (Decimal('1.00') + taux_tva)).quantize(Decimal('0.01'))
     total_tva = total_tvac - total_htva
 
     import time
     timestamp_suffix = str(int(time.time()))[-5:]
-    new_tk = f"REF-{ticket_origine}-{timestamp_suffix}"
+    new_tk = f"REF-{numero_ticket_origine}-{timestamp_suffix}"
 
     signature, hash_prec = signer_ticket(cursor, new_tk, total_tvac, date_heure, caisse_id=caisse_id)
 
@@ -677,12 +726,12 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
 
     ticket_id = cursor.lastrowid
 
-    if stock_id:
-        cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?", (quantite, stock_id))
+    if id_stock_origine:
+        cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?", (quantite, id_stock_origine))
         cursor.execute("""
-            INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac)
-            VALUES (?, ?, ?, ?)
-        """, (ticket_id, stock_id, -quantite, prix))
+            INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac, refund_of_vd_id)
+            VALUES (?, ?, ?, ?, ?)
+        """, (ticket_id, id_stock_origine, -quantite, prix_unitaire, vd_id))
 
     sig_ledger, hash_ledger = signer_ledger(cursor, 'REMBOURSEMENT', total_tvac, mode, new_tk, date_heure)
     cursor.execute("""
@@ -690,7 +739,127 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
         VALUES (?, 'REMBOURSEMENT', ?, ?, ?, ?, ?, ?, ?)
     """, (vendeur_nom, float(total_tvac), mode, new_tk, date_heure, sig_ledger, hash_ledger, caisse_id))
 
-    return new_tk
+    return new_tk, total_tvac
+
+
+def rechercher_ticket_pour_remboursement(numero_ticket, conn=None):
+    """Recherche un ticket de vente par numéro et retourne ses lignes avec la quantité
+    encore remboursable par ligne (vendue - déjà remboursée via refund_of_vd_id).
+
+    Source d'autorité pour l'écran Retours : sans ce lookup, l'UI n'avait aucun moyen de
+    vérifier qu'un numéro de ticket / un article / un prix tapés à la main correspondaient
+    à une vente réellement enregistrée.
+    """
+    should_close = False
+    if conn is None:
+        conn = get_connection()
+        should_close = True
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, numero_ticket, date_heure, total_tvac, methode_paiement, vendeur_nom, id_client
+            FROM Tickets WHERE numero_ticket = ?
+        """, (numero_ticket,))
+        t = c.fetchone()
+        if not t or t[3] is None or float(t[3]) <= 0:
+            # Introuvable, ou c'est un ticket de remboursement (total négatif) : on ne
+            # rembourse pas un remboursement.
+            return None
+
+        ticket_id, num, date_heure, total_tvac, methode, vendeur, id_client = t
+
+        c.execute("""
+            SELECT vd.id, vd.id_stock, vd.quantite, vd.prix_unitaire_tvac,
+                   COALESCE(p.nom, 'Article'), s.taille
+            FROM Ventes_Details vd
+            LEFT JOIN Stocks s ON vd.id_stock = s.id
+            LEFT JOIN Produits p ON s.id_produit = p.id
+            WHERE vd.id_ticket = ? AND vd.quantite > 0 AND vd.refund_of_vd_id IS NULL
+            ORDER BY vd.id ASC
+        """, (ticket_id,))
+        lignes = []
+        for vd_id, stock_id, qte_vendue, prix_unitaire, nom, taille in c.fetchall():
+            c.execute("SELECT COALESCE(SUM(-quantite), 0) FROM Ventes_Details WHERE refund_of_vd_id = ?", (vd_id,))
+            deja_rembourse = c.fetchone()[0] or 0
+            lignes.append({
+                "vd_id": vd_id,
+                "stock_id": stock_id,
+                "name": nom,
+                "size": taille or "",
+                "unitPrice": float(prix_unitaire),
+                "quantitySold": int(qte_vendue),
+                "quantityRefunded": int(deja_rembourse),
+                "quantityRemaining": int(qte_vendue) - int(deja_rembourse),
+            })
+
+        return {
+            "ticketId": ticket_id,
+            "numero_ticket": num,
+            "date_heure": date_heure,
+            "total_tvac": float(total_tvac),
+            "methode_paiement": methode,
+            "vendeur_nom": vendeur or "",
+            "lines": lignes,
+        }
+    finally:
+        if should_close:
+            conn.close()
+
+
+def enregistrer_mouvement_caisse(cursor, type_mouvement, montant, motif, vendeur_nom, date_heure, caisse_id="POS-01"):
+    """Enregistre un apport ou un prélèvement d'espèces (NF525), scellé et chaîné
+    comme toute autre écriture de Ledger_Caisse.
+
+    Sans persistance backend, ces mouvements ne vivaient qu'en mémoire côté frontend
+    (React state) et disparaissaient au moindre rechargement de page, désynchronisant
+    durablement le théorique caisse affiché lors du comptage / de la clôture Z.
+    """
+    type_mouvement = str(type_mouvement or "").upper()
+    if type_mouvement not in ("APPORT", "PRELEVEMENT"):
+        raise ValueError(f"Type de mouvement de caisse invalide : {type_mouvement!r}")
+
+    montant_dec = Decimal(str(montant)).quantize(Decimal('0.01'))
+    if montant_dec <= Decimal('0.00'):
+        raise ValueError("Le montant d'un mouvement de caisse doit être strictement positif.")
+
+    signature, hash_prec = signer_ledger(cursor, type_mouvement, montant_dec, "Espèces", motif or "", date_heure)
+    cursor.execute("""
+        INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent, caisse_id)
+        VALUES (?, ?, ?, 'Espèces', ?, ?, ?, ?, ?)
+    """, (vendeur_nom, type_mouvement, float(montant_dec), motif or "", date_heure, signature, hash_prec, caisse_id))
+
+    return cursor.lastrowid
+
+
+def lister_mouvements_caisse(caisse_id="POS-01", conn=None):
+    """Liste les apports/prélèvements de la période en cours (non encore clôturés)."""
+    should_close = False
+    if conn is None:
+        conn = get_connection()
+        should_close = True
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, type_mouvement, montant, reference, vendeur, date_heure
+            FROM Ledger_Caisse
+            WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('APPORT', 'PRELEVEMENT')
+            ORDER BY id ASC
+        """, (caisse_id,))
+        rows = c.fetchall()
+        return [
+            {
+                "id": r[0],
+                "type": "apport" if r[1] == "APPORT" else "prelevement",
+                "amount": float(r[2]),
+                "reason": r[3] or "",
+                "userName": r[4] or "",
+                "date_heure": r[5],
+            }
+            for r in rows
+        ]
+    finally:
+        if should_close:
+            conn.close()
 
 
 def sauvegarder_panier_en_attente(panier, total_tvac, client_id=None, client_nom=None, remise=Decimal('0.00'), note="", conn=None):
@@ -741,9 +910,13 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
         tot_tva = sum((Decimal(str(row[3] or "0.00")) for row in ticket_rows), Decimal("0.00"))
         tot_remises = sum((Decimal(str(row[4] or "0.00")) for row in ticket_rows), Decimal("0.00"))
 
+        # Seuls les mouvements de VENTE/REMBOURSEMENT alimentent le chiffre d'affaires
+        # espèces/carte : sans ce filtre, tout autre type de mouvement présent dans
+        # Ledger_Caisse (ex. apports/prélèvements de caisse) serait compté à tort comme
+        # du chiffre d'affaires, gonflant ou faussant total_especes/total_carte.
         c.execute("""
             SELECT id, methode_paiement, montant
-            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL
+            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('VENTE', 'REMBOURSEMENT')
         """, (caisse_id,))
         ledger_rows = c.fetchall()
 
@@ -758,6 +931,25 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
             else:
                 tot_carte += mt_dec
 
+        # Apports/prélèvements de la période en cours (non encore clôturés) : suivis
+        # séparément du chiffre d'affaires pour ne pas fausser total_especes/total_carte,
+        # mais nécessaires pour calculer le théorique caisse (fond + ventes + mouvements).
+        c.execute("""
+            SELECT id, type_mouvement, montant
+            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('APPORT', 'PRELEVEMENT')
+        """, (caisse_id,))
+        mouvement_rows = c.fetchall()
+
+        mouvement_ids = [row[0] for row in mouvement_rows]
+        tot_apports = Decimal("0.00")
+        tot_prelevements = Decimal("0.00")
+        for _id, tm, mt in mouvement_rows:
+            mt_dec = Decimal(str(mt or "0.00"))
+            if tm == "APPORT":
+                tot_apports += mt_dec
+            elif tm == "PRELEVEMENT":
+                tot_prelevements += mt_dec
+
         return {
             "caisse_id": caisse_id,
             "nb_tickets": nb_tickets,
@@ -767,8 +959,10 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None):
             "total_remises": tot_remises,
             "total_especes": tot_esp,
             "total_carte": tot_carte,
+            "total_apports": tot_apports,
+            "total_prelevements": tot_prelevements,
             "ticket_ids": ticket_ids,
-            "ledger_ids": ledger_ids,
+            "ledger_ids": ledger_ids + mouvement_ids,
         }
     finally:
         if should_close:
