@@ -999,3 +999,96 @@ def generer_recu_pdf(numero_ticket, date_heure, items, totaux, paiements, shop_i
     doc.build(story)
     print(f"Reçu PDF vectoriel généré : {save_path}")
     return save_path
+
+
+# ---------------------------------------------------------------------------
+# 6. BORDEREAUX DE LIVRAISON (commandes issues du Live Shopping)
+# ---------------------------------------------------------------------------
+
+def generer_bordereaux_livraison_pdf(orders, save_path):
+    """
+    Génère un PDF A4 avec un bordereau de livraison par page (une page par commande).
+
+    `orders` : liste de dicts {numero_ticket, session_reference, client_nom, telephone, email,
+    adresse, mode_paiement, reference_paiement, date_commande, lignes: [{nom, variante, sku, quantite}]}
+    (voir LiveBridge.get_delivery_orders). `save_path` : chemin ou fichier-like (BytesIO).
+    """
+    from xml.sax.saxutils import escape
+    from kodo_core.db.connection import get_connection
+
+    shop_name, shop_addr, shop_tel = "Kōdo POS", "", ""
+    try:
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT nom_magasin, adresse, telephone FROM ShopInfo ORDER BY id LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                shop_name, shop_addr, shop_tel = row[0] or shop_name, row[1] or "", row[2] or ""
+            # Même source que l'export du stock et les autres PDF : Parametres.shop_name prime
+            configured = get_param(cur, "shop_name", "")
+            if configured:
+                shop_name = configured
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # Les textes clients viennent d'un fichier externe : échappés pour ne pas casser le rendu XML
+    esc = lambda v: escape(str(v or ""))
+
+    doc = SimpleDocTemplate(save_path, pagesize=A4, leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    styles = getSampleStyleSheet()
+    s_title = ParagraphStyle('BdlTitle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=20, leading=24, textColor=C_PRIMARY)
+    s_shop = ParagraphStyle('BdlShop', parent=styles['Normal'], fontName='Helvetica', fontSize=9, leading=12, textColor=C_SECONDARY)
+    s_text = ParagraphStyle('BdlText', parent=styles['Normal'], fontName='Helvetica', fontSize=10, leading=14)
+    s_label = ParagraphStyle('BdlLabel', parent=s_text, fontName='Helvetica-Bold', fontSize=8, textColor=C_SECONDARY)
+
+    story = []
+    for i, o in enumerate(orders):
+        if i:
+            story.append(PageBreak())
+        story.append(Paragraph("BORDEREAU DE LIVRAISON", s_title))
+        story.append(Paragraph(f"<b>{esc(shop_name)}</b> · {esc(shop_addr)} {esc(shop_tel)}", s_shop))
+        story.append(Spacer(1, 14))
+
+        ref_rows = [[Paragraph("RÉFÉRENCE COMMANDE", s_label), Paragraph("SESSION LIVE", s_label), Paragraph("DATE COMMANDE", s_label)],
+                    [Paragraph(esc(o.get("numero_ticket")), s_text), Paragraph(esc(o.get("session_reference")), s_text),
+                     Paragraph(esc(o.get("date_commande")[:10] if o.get("date_commande") else ""), s_text)]]
+        t_ref = Table(ref_rows, colWidths=[6 * cm, 7 * cm, 5 * cm])
+        t_ref.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), C_LIGHT_BG), ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                   ('LEFTPADDING', (0, 0), (-1, -1), 8), ('TOPPADDING', (0, 0), (-1, -1), 5),
+                                   ('BOTTOMPADDING', (0, 0), (-1, -1), 5)]))
+        story.append(t_ref)
+        story.append(Spacer(1, 14))
+
+        adresse = esc(o.get("adresse")).replace(",", "<br/>") if o.get("adresse") else "<i>Adresse non renseignée</i>"
+        story.append(Paragraph("DESTINATAIRE", s_label))
+        story.append(Paragraph(f"<b>{esc(o.get('client_nom'))}</b>", s_text))
+        story.append(Paragraph(adresse, s_text))
+        if o.get("telephone"):
+            story.append(Paragraph(f"Tél. : {esc(o.get('telephone'))}", s_text))
+        if o.get("email"):
+            story.append(Paragraph(esc(o.get("email")), s_text))
+        story.append(Spacer(1, 16))
+
+        rows = [[Paragraph("<b>Article</b>", s_text), Paragraph("<b>Variante</b>", s_text),
+                 Paragraph("<b>SKU</b>", s_text), Paragraph("<b>Qté</b>", s_text)]]
+        total_qty = 0
+        for l in o.get("lignes", []):
+            total_qty += int(l.get("quantite") or 0)
+            rows.append([Paragraph(esc(l.get("nom")), s_text), Paragraph(esc(l.get("variante")), s_text),
+                         Paragraph(esc(l.get("sku")), s_text), Paragraph(str(l.get("quantite", 1)), s_text)])
+        t_items = Table(rows, colWidths=[7 * cm, 4 * cm, 5 * cm, 2 * cm], repeatRows=1)
+        t_items.setStyle(TableStyle([('LINEBELOW', (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E5EA")),
+                                     ('BACKGROUND', (0, 0), (-1, 0), C_LIGHT_BG), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+        story.append(t_items)
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f"<b>{total_qty}</b> article(s) — <b>Réglé</b> ({esc(o.get('mode_paiement'))}"
+                               f"{' · réf. ' + esc(o.get('reference_paiement')) if o.get('reference_paiement') else ''})", s_text))
+        story.append(Spacer(1, 40))
+        story.append(Paragraph("Signature du destinataire à la réception : ______________________________", s_shop))
+
+    doc.build(story)
+    return save_path

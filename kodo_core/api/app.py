@@ -16,6 +16,7 @@ from kodo_core.api.routes.stats_routes import handle_stats_request
 from kodo_core.api.routes.backup_routes import handle_backup_request
 from kodo_core.api.routes.system_routes import handle_system_request
 from kodo_core.api.routes.live_routes import handle_live_request
+from kodo_core.api.routes.live_bridge_routes import handle_live_bridge_request
 
 
 class KodoAPIApp:
@@ -31,7 +32,8 @@ class KodoAPIApp:
             handle_stats_request,
             handle_backup_request,
             handle_system_request,
-            handle_live_request
+            handle_live_request,
+            handle_live_bridge_request
         ]
 
     def handle_request(
