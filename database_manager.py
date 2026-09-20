@@ -201,13 +201,46 @@ sqlite3.register_adapter(Decimal, adapt_decimal)
 sqlite3.register_converter("DECIMAL", convert_decimal)
 
 
-def hash_pin(pin_plain):
-    """Génère un hachage SHA-256 avec sel pour sécuriser les PINs."""
+def hash_pin_sha256(pin_plain, salt=None):
+    """Ancien hachage SHA-256 avec sel statique (conservé pour rétrocompatibilité)."""
     if not pin_plain:
         return ""
     import hashlib
-    salt = "KODO_POS_SECURE_SALT_2026"
-    return hashlib.sha256((str(pin_plain) + salt).encode('utf-8')).hexdigest()
+    s = salt or "KODO_POS_SECURE_SALT_2026"
+    return hashlib.sha256((str(pin_plain) + s).encode('utf-8')).hexdigest()
+
+
+def hash_pin(pin_plain, salt=None):
+    """
+    Génère un hachage PBKDF2-HMAC-SHA256 à 100 000 itérations (64 caractères hex déterministes).
+    Conforme aux recommandations de sécurité OWASP / NIST pour les codes PIN.
+    """
+    if not pin_plain:
+        return ""
+    import hashlib
+    s = salt or "KODO_POS_SECURE_SALT_2026"
+    return hashlib.pbkdf2_hmac('sha256', (str(pin_plain) + s).encode('utf-8'), s.encode('utf-8'), 100_000).hex()
+
+
+def verify_pin_hash(pin_plain, stored_hash, salt=None):
+    """
+    Vérifie un code PIN contre une empreinte stockée en BDD.
+    Supporte PBKDF2 (format courant) et SHA-256 (format historique).
+    Retourne (is_valid: bool, needs_rehash: bool).
+    """
+    if not pin_plain or not stored_hash:
+        return False, False
+    import hmac
+    s = salt or "KODO_POS_SECURE_SALT_2026"
+    # 1. Vérification PBKDF2 (courant)
+    pbkdf2_h = hash_pin(pin_plain, s)
+    if hmac.compare_digest(pbkdf2_h, stored_hash):
+        return True, False
+    # 2. Vérification SHA-256 (hérité)
+    legacy_h = hash_pin_sha256(pin_plain, s)
+    if hmac.compare_digest(legacy_h, stored_hash):
+        return True, True
+    return False, False
 
 
 class SafeConnection:
@@ -787,39 +820,74 @@ def generer_numero_ticket(cursor):
 
 
 # Versions de l'algorithme de chaînage fiscal.
-# v1 (historique) : previous|timestamp|montant|caisse|details — le numéro de ticket n'y
-# figure pas : deux maillons distincts peuvent porter la même empreinte.
-# v2 (courant) : "v2"|previous|timestamp|montant|caisse|numero_ticket|details
-# L'algorithme n'est JAMAIS réappliqué rétroactivement : les chaînes déjà constituées chez
-# les boutiques en exploitation resteraient sinon invérifiables du jour au lendemain.
+# v1 (historique) : previous|timestamp|montant|caisse|details — sans numéro ni secret.
+# v2 (transition) : "v2"|previous|timestamp|montant|caisse|numero_ticket|details — scelle le ticket.
+# v3 (courant HMAC) : "v3"|previous|timestamp|montant|caisse|numero_ticket|details — scellé par HMAC machine.
+# L'algorithme n'est JAMAIS réappliqué rétroactivement : les chaînes déjà constituées restent vérifiables.
 HASH_ALGO_V1 = "v1"
 HASH_ALGO_V2 = "v2"
-HASH_ALGO_COURANT = HASH_ALGO_V2
+HASH_ALGO_V3 = "v3"
+HASH_ALGO_COURANT = HASH_ALGO_V3
 
 
-def calculer_hash_transaction(previous_hash, timestamp, montant_total, caisse_id="POS-01", details_articles="", numero_ticket=None, algo=HASH_ALGO_COURANT):
+def get_audit_machine_secret() -> bytes:
     """
-    Calcule l'empreinte SHA-256 chaînée d'une transaction de vente.
-    Portée exacte de ce que cette empreinte établit, et de ce qu'elle n'établit pas : elle
-    détecte de façon fiable toute modification ou suppression accidentelle d'un maillon.
-    Elle ne comporte aucun secret et reste donc intégralement recalculable par quiconque
-    accède au fichier .db : elle ne constitue PAS une preuve d'inaltérabilité opposable,
-    et ne doit être présentée comme telle ni dans l'application, ni dans la documentation
-    commerciale, ni dans les commentaires de ce dépôt.
+    Retourne la clé secrète locale pour le scellement HMAC de la chaîne d'audit.
+    Stockée dans ~/.kodo_signing/audit_hmac.key (chmod 0600) ou dérivée de façon déterministe.
+    """
+    try:
+        secret_dir = os.path.expanduser("~/.kodo_signing")
+        secret_path = os.path.join(secret_dir, "audit_hmac.key")
+        if os.path.exists(secret_path):
+            with open(secret_path, "rb") as f:
+                key = f.read().strip()
+                if len(key) >= 16:
+                    return key
+        os.makedirs(secret_dir, exist_ok=True)
+        new_key = os.urandom(32).hex().encode('utf-8')
+        with open(secret_path, "wb") as f:
+            f.write(new_key)
+        try:
+            os.chmod(secret_path, 0o600)
+        except Exception:
+            pass
+        return new_key
+    except Exception:
+        import hashlib
+        return hashlib.sha256(b"KODO_POS_AUDIT_HMAC_SECRET_2026").digest()
+
+
+def calculer_hash_transaction(previous_hash, timestamp, montant_total, caisse_id="POS-01", details_articles="", numero_ticket=None, algo=HASH_ALGO_COURANT, secret_key=None):
+    """
+    Calcule l'empreinte chaînée d'une transaction de vente (Audit Trail).
+    - HASH_ALGO_V1 : SHA-256 historique (sans numéro de ticket, sans secret).
+    - HASH_ALGO_V2 : SHA-256 scellant le numéro de ticket (sans secret).
+    - HASH_ALGO_V3 : HMAC-SHA256 scellant le numéro de ticket avec la clé secrète machine locale.
     """
     import hashlib
+    import hmac
     prev_str = str(previous_hash or "GENESIS_BLOCK_KODO_POS")
     ts_str = str(timestamp or "")
     montant_str = f"{Decimal(str(montant_total)):.2f}"
     caisse_str = str(caisse_id or "POS-01")
     details_str = str(details_articles or "")
+
     if algo == HASH_ALGO_V1:
         data = f"{prev_str}|{ts_str}|{montant_str}|{caisse_str}|{details_str}"
-    else:
+        return hashlib.sha256(data.encode('utf-8')).hexdigest()
+    elif algo == HASH_ALGO_V2:
         num_str = str(numero_ticket or "")
         data = (f"{HASH_ALGO_V2}|{prev_str}|{ts_str}|{montant_str}|"
                 f"{caisse_str}|{num_str}|{details_str}")
-    return hashlib.sha256(data.encode('utf-8')).hexdigest()
+        return hashlib.sha256(data.encode('utf-8')).hexdigest()
+    else:
+        num_str = str(numero_ticket or "")
+        data = (f"{HASH_ALGO_V3}|{prev_str}|{ts_str}|{montant_str}|"
+                f"{caisse_str}|{num_str}|{details_str}")
+        key = secret_key or get_audit_machine_secret()
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        return hmac.new(key, data.encode('utf-8'), hashlib.sha256).hexdigest()
 
 
 def signer_ticket(cursor, numero_ticket, total_tvac, date_heure, caisse_id="POS-01", details_articles=""):

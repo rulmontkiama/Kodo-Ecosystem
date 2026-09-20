@@ -22,7 +22,7 @@ from kodo_core.domain.accounting.z_report import ZReportEngine
 import ticket_printer
 
 
-def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]) -> Optional[Tuple[int, Any]]:
+def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any]]:
     """
     Gestionnaire de requêtes pour le module POS et Ventes.
     Retourne (status_code, response_data) ou None si la route ne correspond pas.

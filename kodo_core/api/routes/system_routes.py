@@ -5,18 +5,24 @@ Routes API Système, Version, Licence et Utilisateurs/PIN - Kōdo POS Core
 
 import os
 import sys
+import time
 import datetime
 import sqlite3
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Tuple, Optional
 
 import database_manager
-from database_manager import get_connection, hash_pin
+from database_manager import get_connection, hash_pin, verify_pin_hash
 import license_manager
 import services.update_checker as update_checker
+from kodo_core.api.session_manager import create_session_token
+
+# Mécanisme de Rate Limiting anti-bruteforce en mémoire pour les vérifications de PIN
+# Structure: { client_id: {"failures": int, "locked_until": float} }
+_PIN_ATTEMPTS: Dict[str, Dict[str, Any]] = {}
 
 
-def handle_system_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]) -> Optional[Tuple[int, Any]]:
+def handle_system_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any]]:
     """
     Gestionnaire de requêtes pour la santé système, la version, la licence et les utilisateurs.
     """
@@ -129,30 +135,99 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
     # 10. Vérification du code PIN
     elif method == "POST" and path == "/api/pin/verify":
         pin = str(data.get('pin', '')).strip()
+
+        # Protection Anti-Bruteforce (Rate Limiting)
+        client_id = (headers.get('x-forwarded-for') or headers.get('remote-addr') or 'local') if headers else 'local'
+        now = time.time()
+        attempt_info = _PIN_ATTEMPTS.get(client_id, {"failures": 0, "locked_until": 0.0})
+        if now < attempt_info.get("locked_until", 0.0):
+            retry_after = int(attempt_info["locked_until"] - now) + 1
+            return 429, {
+                "valid": False,
+                "error": f"Trop de tentatives infructueuses. Veuillez patienter {retry_after} secondes.",
+                "locked": True,
+                "retry_after": retry_after
+            }
+
         conn = get_connection()
         cursor = conn.cursor()
-        p_hash = hash_pin(pin)
 
-        # Vérifier dans Vendeurs
-        cursor.execute("SELECT id, nom, role_admin FROM Vendeurs WHERE pin=?", (p_hash,))
-        user = cursor.fetchone()
+        # Vérifier dans Vendeurs (support PBKDF2 et SHA-256 hérité avec migration)
+        cursor.execute("SELECT id, nom, role_admin, pin FROM Vendeurs")
+        vendeurs = cursor.fetchall()
+        user = None
+        rehash_id = None
+        for v in vendeurs:
+            is_valid, needs_rehash = verify_pin_hash(pin, v[3])
+            if is_valid:
+                user = v
+                if needs_rehash:
+                    rehash_id = v[0]
+                break
 
         if user:
+            if rehash_id:
+                # Migration automatique transparente du hash SHA-256 hérité vers PBKDF2
+                cursor.execute("UPDATE Vendeurs SET pin=? WHERE id=?", (hash_pin(pin), rehash_id))
+                conn.commit()
             conn.close()
+            _PIN_ATTEMPTS[client_id] = {"failures": 0, "locked_until": 0.0}
             role_str = 'Gérant' if user[2] == 1 else 'Caissier'
-            return 200, {"valid": True, "user": {"id": str(user[0]), "name": user[1], "role": role_str}}
+            user_id_str = str(user[0])
+            user_name = user[1]
+            token = create_session_token(user_id=user_id_str, user_name=user_name, role=role_str)
+            return 200, {
+                "valid": True,
+                "user": {"id": user_id_str, "name": user_name, "role": role_str},
+                "token": token,
+                "session_token": token,
+                "default_pin_warning": (pin == "0000")
+            }
 
         # Aucun Gérant dans Vendeurs : le PIN maître (pin_admin) fait foi
         cursor.execute("SELECT COUNT(*) FROM Vendeurs WHERE role_admin=1")
         no_admin = cursor.fetchone()[0] == 0
         master_ok = False
+        master_rehash = False
         if no_admin:
-            cursor.execute("SELECT 1 FROM Parametres WHERE cle='pin_admin' AND valeur=?", (p_hash,))
-            master_ok = cursor.fetchone() is not None
+            cursor.execute("SELECT valeur FROM Parametres WHERE cle='pin_admin'")
+            row = cursor.fetchone()
+            if row:
+                master_ok, master_rehash = verify_pin_hash(pin, row[0])
+                if master_ok and master_rehash:
+                    cursor.execute("UPDATE Parametres SET valeur=? WHERE cle='pin_admin'", (hash_pin(pin),))
+                    conn.commit()
         conn.close()
 
         if master_ok:
-            return 200, {"valid": True, "user": {"id": "0", "name": "Administrateur", "role": "Gérant"}}
+            _PIN_ATTEMPTS[client_id] = {"failures": 0, "locked_until": 0.0}
+            token = create_session_token(user_id="0", user_name="Administrateur", role="Gérant")
+            return 200, {
+                "valid": True,
+                "user": {"id": "0", "name": "Administrateur", "role": "Gérant"},
+                "token": token,
+                "session_token": token,
+                "default_pin_warning": (pin == "0000")
+            }
+
+        # Échec de vérification : incrémenter le compteur d'échecs
+        failures = attempt_info.get("failures", 0) + 1
+        locked_until = 0.0
+        if failures >= 10:
+            locked_until = now + 300.0  # 5 minutes
+        elif failures >= 5:
+            locked_until = now + 30.0   # 30 secondes
+
+        _PIN_ATTEMPTS[client_id] = {"failures": failures, "locked_until": locked_until}
+        if locked_until > now:
+            retry_after = int(locked_until - now) + 1
+            return 429, {
+                "valid": False,
+                "error": f"Trop de tentatives infructueuses. Veuillez patienter {retry_after} secondes.",
+                "locked": True,
+                "retry_after": retry_after
+            }
+
         return 401, {"valid": False, "error": "Code PIN incorrect"}
 
     # 11. Modification du code PIN
@@ -168,18 +243,26 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
         conn = get_connection()
         cursor = conn.cursor()
-        old_hash = hash_pin(old_pin)
         new_hash = hash_pin(new_pin)
 
         # Ancien PIN : doit correspondre à un vendeur, ou au PIN maître (tant qu'aucun Gérant n'existe)
-        cursor.execute("SELECT id, role_admin FROM Vendeurs WHERE pin=?", (old_hash,))
-        matched = cursor.fetchone()
+        cursor.execute("SELECT id, role_admin, pin FROM Vendeurs")
+        all_vendeurs = cursor.fetchall()
+        matched = None
+        for v in all_vendeurs:
+            is_valid, _ = verify_pin_hash(old_pin, v[2])
+            if is_valid:
+                matched = v
+                break
+
         cursor.execute("SELECT COUNT(*) FROM Vendeurs WHERE role_admin=1")
         no_admin = cursor.fetchone()[0] == 0
         master_ok = False
         if not matched and no_admin:
-            cursor.execute("SELECT 1 FROM Parametres WHERE cle='pin_admin' AND valeur=?", (old_hash,))
-            master_ok = cursor.fetchone() is not None
+            cursor.execute("SELECT valeur FROM Parametres WHERE cle='pin_admin'")
+            row = cursor.fetchone()
+            if row:
+                master_ok, _ = verify_pin_hash(old_pin, row[0])
 
         if not matched and not master_ok:
             conn.close()
@@ -198,14 +281,21 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             if not target:
                 conn.close()
                 return 400, {"success": False, "error": "Utilisateur introuvable."}
-            cursor.execute("SELECT 1 FROM Vendeurs WHERE pin=? AND id!=?", (new_hash, target[0]))
-            taken = cursor.fetchone() is not None
+
+            # Vérifier si le nouveau PIN est déjà utilisé
+            cursor.execute("SELECT id, pin FROM Vendeurs WHERE id!=?", (target[0],))
+            other_vendeurs = cursor.fetchall()
+            taken = any(verify_pin_hash(new_pin, ov[1])[0] for ov in other_vendeurs)
             if not taken and no_admin and target[1] != 1:
-                cursor.execute("SELECT 1 FROM Parametres WHERE cle='pin_admin' AND valeur=?", (new_hash,))
-                taken = cursor.fetchone() is not None
+                cursor.execute("SELECT valeur FROM Parametres WHERE cle='pin_admin'")
+                master_row = cursor.fetchone()
+                if master_row:
+                    taken = verify_pin_hash(new_pin, master_row[0])[0]
+
             if taken:
                 conn.close()
                 return 400, {"success": False, "error": "Ce code PIN est déjà utilisé par un autre utilisateur."}
+
             cursor.execute("UPDATE Vendeurs SET pin=? WHERE id=?", (new_hash, target[0]))
             update_master = target[1] == 1
         else:

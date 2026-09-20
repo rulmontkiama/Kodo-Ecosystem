@@ -22,7 +22,7 @@ def _int_or_none(value: Optional[str]) -> Optional[int]:
 
 
 def handle_live_bridge_request(
-    method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]
+    method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None
 ) -> Optional[Tuple[int, Any]]:
     if not path.startswith("/api/live-bridge/"):
         return None

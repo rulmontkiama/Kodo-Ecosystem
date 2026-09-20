@@ -7,7 +7,7 @@ import sqlite3
 import datetime
 import json
 from decimal import Decimal
-from database_manager import get_connection, generer_numero_ticket, initialiser_db, resource_path, data_path, hash_pin
+from database_manager import get_connection, generer_numero_ticket, initialiser_db, resource_path, data_path, hash_pin, verify_pin_hash
 import views.stats_view as stats_view
 from views.modals import NumpadModal, RemiseModal, EncaissementModal, ClientModal, ChangeReturnModal, PaniersEnAttenteModal, CrashRestorationModal
 from core.crash_watcher import CrashWatcher
@@ -141,13 +141,26 @@ class LockScreen(ctk.CTkFrame):
     def _verify(self):
         try:
             conn = get_connection(); c = conn.cursor()
-            hashed_pin = hash_pin(self.pin)
-            c.execute("SELECT nom, role_admin FROM Vendeurs WHERE pin=?", (hashed_pin,))
-            res = c.fetchone()
-            if res:
+            c.execute("SELECT id, nom, role_admin, pin FROM Vendeurs")
+            vendeurs = c.fetchall()
+            matched = None
+            rehash_id = None
+            for v in vendeurs:
+                is_valid, needs_rehash = verify_pin_hash(self.pin, v[3])
+                if is_valid:
+                    matched = v
+                    if needs_rehash:
+                        rehash_id = v[0]
+                    break
+            if matched:
+                if rehash_id:
+                    c.execute("UPDATE Vendeurs SET pin=? WHERE id=?", (hash_pin(self.pin), rehash_id))
+                    conn.commit()
+                conn.close()
                 self.destroy()
-                self.on_success({"nom": res[0], "admin": bool(res[1])})
+                self.on_success({"nom": matched[1], "admin": bool(matched[2])})
             else:
+                conn.close()
                 self.pin = ""
                 self._update_circles()
                 self.error_label.configure(text="PIN incorrect")

@@ -543,7 +543,7 @@ def run_server(port=8765, busy_wait=8.0, host=None):
             _s_conn.close()
     except Exception as _se:
         pass
-    print(f"🚀 [KODO POS SERVER Multi-Thread v2.0.0] REST API kodo_core & Web App en ligne sur http://localhost:{port} (écoute {host})")
+    print(f"🚀 [KODO POS SERVER Multi-Thread v2.0.1] REST API kodo_core & Web App en ligne sur http://localhost:{port} (écoute {host})")
     httpd.serve_forever()
 
 

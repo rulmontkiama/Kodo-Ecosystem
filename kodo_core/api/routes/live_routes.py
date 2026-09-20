@@ -9,7 +9,7 @@ from kodo_core.domain.live.live_manager import LiveManager
 
 
 def handle_live_request(
-    method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]
+    method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None
 ) -> Optional[Tuple[int, Any]]:
     """
     Gestionnaire de requêtes pour le module Live Shopping.

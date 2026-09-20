@@ -8,7 +8,7 @@ from typing import Dict, Any, Tuple, Optional
 import backup_manager
 
 
-def handle_backup_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]) -> Optional[Any]:
+def handle_backup_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Any]:
     """
     Gestionnaire de requêtes pour les sauvegardes et le transfert de machine.
     """

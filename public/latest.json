@@ -1,14 +1,14 @@
 {
-  "latestVersion": "2.0.0",
-  "latest_version": "2.0.0",
-  "version": "2.0.0",
+  "latestVersion": "2.0.1",
+  "latest_version": "2.0.1",
+  "version": "2.0.1",
   "releaseDate": "2026-09-20",
   "downloadUrl": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "download_url": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "dmgUrl": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "dmg_url": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.0.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.0.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.1.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.1.zip",
   "has_update": true,
-  "changelog": "v2.0.0 :\n• Clôture Z Séquentielle Rétroactive : rattrapage automatique jour par jour des clôtures en attente sans altérer la session active.\n• Arrondi Légal Belge à 5 centimes (Loi du 01/12/2019) : neutralité fiscale TVA, calcul exact sur la part espèces en paiement mixte et impression du montant arrondi.\n• Intégrité des Données : scellement SHA-256 des tickets incluant désormais le numéro de ticket, et détection des altérations du fichier de données.\n• Sauvegarde Automatique : copie intégrale et vérifiée de la base à chaque démarrage, conservée en local sur votre Mac (10 dernières sauvegardes).\n• Gestion du Stock Concurrente : sérialisation des écritures, décrément conditionnel anti-stock négatif et traçabilité pour audit.\n• Impression : la vente est toujours enregistrée même imprimante éteinte, et la caisse vous prévient si le ticket n'est pas sorti.\n• Interface : écran de retours et remboursements optimisé, fond de caisse personnalisable persistant."
+  "changelog": "v2.0.1 :\n• Sécurisation Complète des Sauvegardes SQLite WAL : remplacement intégral de shutil par l'API native de streaming avec contrôle d'intégrité.\n• Clôture Z Séquentielle Rétroactive : rattrapage automatique jour par jour des clôtures en attente sans altérer la session active.\n• Arrondi Légal Belge à 5 centimes (Loi du 01/12/2019) : neutralité fiscale TVA, calcul exact sur la part espèces en paiement mixte et impression du montant arrondi.\n• Intégrité des Données : scellement SHA-256 des tickets incluant le numéro de ticket, et détection des altérations.\n• Factures et Tickets Conformes : suppression de toute TVA ou IBAN de démonstration, affichage explicite en cas de mention manquante.\n• Gestion du Stock Concurrente : sérialisation des écritures, décrément conditionnel anti-stock négatif et traçabilité pour audit.\n• Résilience Matérielle : impression découplée, la vente est toujours enregistrée même imprimante éteinte."
 }

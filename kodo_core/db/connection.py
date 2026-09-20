@@ -6,6 +6,8 @@ pragmas de performance, row factory et convertisseur Decimal.
 import sqlite3
 import os
 import hashlib
+import hmac
+from typing import Tuple, Optional
 from decimal import Decimal
 from contextlib import contextmanager
 from kodo_core.config import ShopConfig
@@ -26,12 +28,34 @@ sqlite3.register_adapter(Decimal, adapt_decimal)
 sqlite3.register_converter("DECIMAL", convert_decimal)
 sqlite3.register_converter("decimal", convert_decimal)
 
-def hash_pin(pin_plain: str) -> str:
-    """Génère un hachage SHA-256 avec sel pour sécuriser les PINs vendeurs/admin."""
+def hash_pin_sha256(pin_plain: str, salt: str = None) -> str:
+    """Ancien hachage SHA-256 avec sel (conservé pour rétrocompatibilité)."""
     if not pin_plain:
         return ""
-    salt = ShopConfig.get_salt()
-    return hashlib.sha256((str(pin_plain) + salt).encode('utf-8')).hexdigest()
+    s = salt or ShopConfig.get_salt()
+    return hashlib.sha256((str(pin_plain) + s).encode('utf-8')).hexdigest()
+
+
+def hash_pin(pin_plain: str, salt: str = None) -> str:
+    """Génère un hachage PBKDF2-HMAC-SHA256 à 100 000 itérations (64 caractères hex déterministes)."""
+    if not pin_plain:
+        return ""
+    s = salt or ShopConfig.get_salt()
+    return hashlib.pbkdf2_hmac('sha256', (str(pin_plain) + s).encode('utf-8'), s.encode('utf-8'), 100_000).hex()
+
+
+def verify_pin_hash(pin_plain: str, stored_hash: str, salt: str = None) -> Tuple[bool, bool]:
+    """Vérifie un code PIN contre une empreinte (PBKDF2 ou SHA-256 legacy)."""
+    if not pin_plain or not stored_hash:
+        return False, False
+    s = salt or ShopConfig.get_salt()
+    pbkdf2_h = hash_pin(pin_plain, s)
+    if hmac.compare_digest(pbkdf2_h, stored_hash):
+        return True, False
+    legacy_h = hash_pin_sha256(pin_plain, s)
+    if hmac.compare_digest(legacy_h, stored_hash):
+        return True, True
+    return False, False
 
 class SafeConnection:
     """

@@ -435,7 +435,10 @@ class MigrationManager:
         from kodo_core.db.sanctuary_shield import copier_base_sqlite
         snapshots_dir = ShopConfig.get_snapshots_dir()
         os.makedirs(snapshots_dir, exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Résolution à la microseconde : deux migrations dans la même seconde ne
+        # doivent pas produire le même nom, faute de quoi la seconde sauvegarde
+        # écrase la première — exactement le cas d'une migration relancée après échec.
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         snapshot_path = os.path.join(snapshots_dir, f"kodo_pos_pre_migration_{timestamp}.db")
         # Aucun `except` ici : une migration ne s'exécute pas sans sauvegarde vérifiée.
         # Échouer avant de toucher à la base est le comportement attendu.

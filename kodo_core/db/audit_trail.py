@@ -26,6 +26,7 @@ from database_manager import (
     calculer_hash_transaction,
     HASH_ALGO_V1,
     HASH_ALGO_V2,
+    HASH_ALGO_V3,
     HASH_ALGO_COURANT,
 )
 
@@ -151,8 +152,20 @@ def verifier_chainage(table: str, id_col="id", sig_col="signature", hash_prec_co
             if compute_hash_func:
                 computed_sig = compute_hash_func(row_dict)
                 if computed_sig != signature_enregistree:
-                    print(f"[ALERTE] Falsification de données détectée dans {table} à l'ID {row_dict[id_col]}!")
-                    erreurs += 1
+                    # Rétrocompatibilité : tester les algorithmes connus (V3 HMAC, V2, V1) si compute_hash_func diverge
+                    num = row_dict.get('numero_ticket')
+                    total = row_dict.get('total_tvac')
+                    dt = row_dict.get('date_heure')
+                    caisse = row_dict.get('caisse_id', 'POS-01')
+                    details = row_dict.get('details_articles', '')
+                    candidats = [
+                        calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, numero_ticket=num, algo=HASH_ALGO_V3),
+                        calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, numero_ticket=num, algo=HASH_ALGO_V2),
+                        calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, algo=HASH_ALGO_V1),
+                    ]
+                    if signature_enregistree not in candidats:
+                        print(f"[ALERTE] Falsification de données détectée dans {table} à l'ID {row_dict[id_col]}!")
+                        erreurs += 1
 
             last_sig = signature_enregistree
 
@@ -222,7 +235,7 @@ def verify_database_integrity(conn=None) -> bool:
             caisse_val = caisse if caisse is not None else "POS-01"
             details_val = details if details is not None else ""
 
-            # Algorithme courant (numéro de ticket scellé).
+            # Algorithme courant (V3 HMAC avec clé machine).
             computed_hash = calculer_hash_transaction(
                 actuel_prev,
                 dt,
@@ -230,21 +243,16 @@ def verify_database_integrity(conn=None) -> bool:
                 caisse_val,
                 details_val,
                 numero_ticket=num,
-                algo=HASH_ALGO_V2,
+                algo=HASH_ALGO_COURANT,
             )
 
             if actuel_curr != computed_hash:
-                # Rétrocompatibilité : les maillons antérieurs au scellement du numéro
-                # restent légitimes et ne doivent jamais être signalés comme falsifiés.
+                # Rétrocompatibilité : les maillons antérieurs (V2 SHA-256 avec ticket, V1 legacy)
+                # ou calculés avec un autre algorithme restent vérifiés.
                 candidats = [
-                    calculer_hash_transaction(
-                        actuel_prev,
-                        dt,
-                        total,
-                        caisse_val,
-                        details_val,
-                        algo=HASH_ALGO_V1,
-                    )
+                    calculer_hash_transaction(actuel_prev, dt, total, caisse_val, details_val, numero_ticket=num, algo=HASH_ALGO_V3),
+                    calculer_hash_transaction(actuel_prev, dt, total, caisse_val, details_val, numero_ticket=num, algo=HASH_ALGO_V2),
+                    calculer_hash_transaction(actuel_prev, dt, total, caisse_val, details_val, algo=HASH_ALGO_V1),
                 ]
                 dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, 'strftime') else str(dt)
                 total_str = f"{Decimal(str(total)):.2f}"

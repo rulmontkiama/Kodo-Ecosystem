@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple, Optional
 from kodo_core.domain.customers.crm import CRMManager
 
 
-def handle_clients_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]) -> Optional[Tuple[int, Any]]:
+def handle_clients_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any]]:
     """
     Gestionnaire de requêtes pour les clients et la fidélité.
     """

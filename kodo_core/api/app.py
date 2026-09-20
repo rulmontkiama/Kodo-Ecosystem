@@ -49,7 +49,10 @@ class KodoAPIApp:
         """
         normalized_path = path.rstrip('/') if (path and path != '/') else path
         for handler in self.route_handlers:
-            res = handler(method, normalized_path, query, data)
+            try:
+                res = handler(method, normalized_path, query, data, headers=headers)
+            except TypeError:
+                res = handler(method, normalized_path, query, data)
             if res is not None:
                 if len(res) == 3:
                     status_code, content, custom_headers = res

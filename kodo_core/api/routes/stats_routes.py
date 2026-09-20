@@ -12,7 +12,7 @@ import pdf_generator
 import export_manager
 
 
-def handle_stats_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]) -> Optional[Tuple[int, Any, Optional[Dict[str, str]]]]:
+def handle_stats_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any, Optional[Dict[str, str]]]]:
     """
     Gestionnaire de requêtes pour les statistiques et les exports (PDF, CSV, Excel).
     Retourne (status_code, content, headers) ou (status_code, json_data, None).

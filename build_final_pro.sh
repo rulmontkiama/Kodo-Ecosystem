@@ -1,17 +1,17 @@
 #!/bin/bash
 # =================================================================
-# Script de Build Final Pro & Création de Livrables pour Kōdo POS v2.0
+# Script de Build Final Pro & Création de Livrables pour Kōdo POS v2.0.1
 # Temps d'exécution ultra-rapide (~25 secondes sur APFS)
 # =================================================================
 
 APP_NAME="Kodo_POS"
 DMG_NAME="Installation_Kodo_POS.dmg"
-WIN_ZIP="Kodo_POS_v2.0.0_Windows_Pack.zip"
+WIN_ZIP="Kodo_POS_v2.0.1_Windows_Pack.zip"
 SRC_DIR="$(pwd)"
 APFS_BUILD="/tmp/kodo_build"
 
 echo "----------------------------------------------------"
-echo "🚀 Démarrage du Build Final Kōdo POS v2.0..."
+echo "🚀 Démarrage du Build Final Kōdo POS v2.0.1..."
 echo "----------------------------------------------------"
 
 # 0. VÉRIFICATION INTÉGRITÉ ARBRE & VERSIONS (Correctif O - Audit)
@@ -31,10 +31,16 @@ if [ "$KODO_VERSION" != "$UPDATER_VERSION" ]; then
   echo "❌ Désalignement de version : kodo_base=$KODO_VERSION updater=$UPDATER_VERSION"
   exit 1
 fi
+# Déréférencement obligatoire : sur un tag annoté, `git rev-parse v2.0.1` retourne
+# l'objet tag, pas le commit. Sans `^{commit}`, la comparaison est toujours fausse
+# et la garde bloque le build en signalant un désalignement qui n'existe pas.
 if git -C "$SRC_DIR" rev-parse -q --verify "refs/tags/v$KODO_VERSION" >/dev/null 2>&1; then
-  if [ "$(git -C "$SRC_DIR" rev-parse "v$KODO_VERSION")" != "$(git -C "$SRC_DIR" rev-parse HEAD)" ]; then
+  TAG_COMMIT=$(git -C "$SRC_DIR" rev-parse "v$KODO_VERSION^{commit}")
+  HEAD_COMMIT=$(git -C "$SRC_DIR" rev-parse "HEAD^{commit}")
+  if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
     echo "❌ Le tag v$KODO_VERSION existe déjà et désigne un AUTRE commit :"
-    git -C "$SRC_DIR" show -s --format='   %H %ad %s' "v$KODO_VERSION"
+    echo "   tag  -> $TAG_COMMIT"
+    echo "   HEAD -> $HEAD_COMMIT"
     exit 1
   fi
 fi
@@ -46,6 +52,14 @@ echo "🧪 Tests Python (pytest)..."
 echo "🔎 Vérification TypeScript du frontend (npm run lint)..."
 [ -n "$FRONT_DIR" ] || { echo "❌ Frontend kōdo-pos-3 introuvable sur le Bureau. Build annulé."; exit 1; }
 (cd "$FRONT_DIR" && npm run lint) || { echo "❌ Erreurs TypeScript dans le frontend. Build annulé."; exit 1; }
+
+# Le frontend est reconstruit ici, jamais à la main : sans cela, le script embarque le
+# contenu de dist/ tel quel et peut livrer un bundle antérieur aux dernières modifications
+# de l'interface, sans le moindre avertissement.
+echo "🏗️ Construction du frontend (npm run build)..."
+(cd "$FRONT_DIR" && npm run build) || { echo "❌ Échec de la construction du frontend. Build annulé."; exit 1; }
+rm -rf "$SRC_DIR/dist"
+cp -R "$FRONT_DIR/dist" "$SRC_DIR/dist"
 
 # 0.2 GARDE-FOU WAL : Aucune copie de base SQLite par shutil (ampute ou vide la sauvegarde en WAL)
 if git -C "$SRC_DIR" grep -n "shutil.copy2(.*DB_NAME\|shutil.copy2(.*db_path\|shutil.copy2(.*\.db" -- '*.py' \

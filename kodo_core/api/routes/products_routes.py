@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple, Optional
 from kodo_core.domain.catalog.inventory_manager import InventoryManager
 
 
-def handle_products_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any]) -> Optional[Tuple[int, Any]]:
+def handle_products_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any]]:
     """
     Gestionnaire de requêtes pour le catalogue, catégories, marques et stocks.
     """
