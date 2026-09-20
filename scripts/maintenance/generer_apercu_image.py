@@ -96,12 +96,17 @@ def generer_apercu_image_sync(output_filename="ticket_promo_preview.png", scale=
     ticket_img.save(output_filename, quality=95)
     return output_filename
 
-def generer_apercu_image_async(callback=None):
+def generer_apercu_image_async(callback=None, output_filename=None):
     """
     Exécute la génération de l'image de ticket dans un thread d'arrière-plan non bloquant.
+
+    `output_filename` est indispensable aux tests : sans lui, le worker écrit
+    `ticket_promo_preview.png` en chemin RELATIF, donc dans le répertoire courant.
+    Lancé depuis la racine du dépôt, il y écrase un fichier suivi par git et salit
+    l'arbre de travail — que `build_final_pro.sh` refuse ensuite de construire.
     """
     def _worker():
-        res = generer_apercu_image_sync()
+        res = generer_apercu_image_sync(output_filename) if output_filename else generer_apercu_image_sync()
         if callback:
             callback(res)
 

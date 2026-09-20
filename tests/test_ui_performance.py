@@ -57,15 +57,27 @@ class TestUIPerformanceAndRollback(unittest.TestCase):
         def _cb(res):
             finished.append(res)
 
+        # Sortie dans un répertoire temporaire : avec le nom par défaut, le worker
+        # écrivait `ticket_promo_preview.png` à la racine du dépôt et modifiait un
+        # fichier suivi par git à chaque exécution de la batterie.
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, True)
+        out_path = os.path.join(tmp_dir, "apercu_test.png")
+
         start_time = time.time()
-        thread = generer_apercu_image_async(callback=_cb)
-        
+        thread = generer_apercu_image_async(callback=_cb, output_filename=out_path)
+
         # Le thread principal doit immédiatement reprendre la main (< 10ms)
         non_blocking_time = time.time() - start_time
         self.assertLess(non_blocking_time, 0.05)
-        
+
         thread.join(timeout=3.0)
-        self.assertTrue(len(finished) >= 0)
+        self.assertFalse(thread.is_alive(), "le worker d'image ne s'est pas terminé")
+        # `assertTrue(len(finished) >= 0)` était toujours vrai : le test ne vérifiait
+        # rien du résultat, et laissait donc passer l'écriture hors du bac à sable.
+        self.assertEqual(len(finished), 1, "le callback du worker n'a pas été appelé")
+        self.assertEqual(finished[0], out_path)
+        self.assertTrue(os.path.exists(out_path), "l'aperçu n'a pas été écrit à l'emplacement demandé")
 
     def test_rollback_automatique_urgence(self):
         """Vérifie la restauration d'urgence post-crash < 10s via RollbackManager."""
