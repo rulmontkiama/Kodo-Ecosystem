@@ -427,33 +427,34 @@ class MigrationManager:
 
     @classmethod
     def create_pre_migration_snapshot(cls, db_path: str = None) -> str:
-        """Crée une sauvegarde physique complète avant l'application de migrations."""
+        """Sauvegarde physique complète et vérifiée avant l'application de migrations."""
         path = db_path or ShopConfig.get_db_path()
         if not os.path.exists(path):
             return ""
 
-        try:
-            snapshots_dir = ShopConfig.get_snapshots_dir()
-            os.makedirs(snapshots_dir, exist_ok=True)
-
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            snapshot_filename = f"kodo_pos_pre_migration_{timestamp}.db"
-            snapshot_path = os.path.join(snapshots_dir, snapshot_filename)
-
-            shutil.copy2(path, snapshot_path)
-            return snapshot_path
-        except Exception as e:
-            print(f"⚠️ Avertissement lors de la création du snapshot pre-migration: {e}")
-            return ""
+        from kodo_core.db.sanctuary_shield import copier_base_sqlite
+        snapshots_dir = ShopConfig.get_snapshots_dir()
+        os.makedirs(snapshots_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot_path = os.path.join(snapshots_dir, f"kodo_pos_pre_migration_{timestamp}.db")
+        # Aucun `except` ici : une migration ne s'exécute pas sans sauvegarde vérifiée.
+        # Échouer avant de toucher à la base est le comportement attendu.
+        return copier_base_sqlite(path, snapshot_path)
 
     @classmethod
     def restore_snapshot(cls, db_path: str, snapshot_path: str):
-        """Restaure physiquement la base de données depuis un snapshot."""
-        if snapshot_path and os.path.exists(snapshot_path):
-            try:
-                shutil.copy2(snapshot_path, db_path)
-            except Exception as e:
-                print(f"⚠️ Échec de la restauration du snapshot {snapshot_path}: {e}")
+        """Restaure la base depuis un snapshot vérifié, journaux périmés retirés."""
+        if not snapshot_path or not os.path.exists(snapshot_path):
+            return
+        from kodo_core.db.sanctuary_shield import restaurer_base_sqlite
+        try:
+            restaurer_base_sqlite(snapshot_path, db_path)
+            print(f"🛡️ Base restaurée depuis {os.path.basename(snapshot_path)}")
+        except Exception as e:
+            # La transaction a déjà été annulée par le rollback : la base en place est
+            # cohérente. Mieux vaut la laisser telle quelle que l'écraser à l'aveugle.
+            print(f"⚠️ Restauration impossible ({e}) — base laissée en l'état, "
+                  f"sauvegarde conservée : {snapshot_path}")
 
     @classmethod
     def run_migrations(cls, db_path: str = None, conn=None):
@@ -494,7 +495,14 @@ class MigrationManager:
 
         except Exception as e:
             safe_conn.rollback()
-            if snapshot_path:
+            # Le rollback suffit dans le cas normal. On ne restaure que si la base
+            # est effectivement compromise : une restauration inutile est un risque net.
+            try:
+                chk = safe_conn.cursor().execute("PRAGMA quick_check").fetchone()
+                base_saine = bool(chk) and chk[0].lower() == "ok"
+            except Exception:
+                base_saine = False
+            if not base_saine and snapshot_path:
                 cls.restore_snapshot(target_path, snapshot_path)
             raise MigrationError(f"Échec de migration: {e}")
         finally:

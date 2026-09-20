@@ -31,7 +31,8 @@ class RollbackManager:
             db_src = "kodo_pos.db"
 
         if os.path.exists(db_src):
-            shutil.copy2(db_src, os.path.join(snapshot_folder, "kodo_pos.db"))
+            from kodo_core.db.sanctuary_shield import copier_base_sqlite
+            copier_base_sqlite(db_src, os.path.join(snapshot_folder, "kodo_pos.db"))
 
         manifest = {
             "version": from_version,
@@ -63,7 +64,8 @@ class RollbackManager:
             target_db = os.path.join(ShopConfig.get_base_data_dir(), "kodo_pos.db")
 
             if os.path.exists(db_backup):
-                shutil.copy2(db_backup, target_db)
+                from kodo_core.db.sanctuary_shield import restaurer_base_sqlite
+                restaurer_base_sqlite(db_backup, target_db)
                 print(f"[ROLLBACK] Base de données restaurée depuis {db_backup}")
 
             # Effacer le marqueur d'update en échec

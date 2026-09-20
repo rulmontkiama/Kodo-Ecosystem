@@ -79,7 +79,8 @@ class AppUpdateEngine:
         db_path = ShopConfig.get_db_path()
         if snapshot_path and os.path.exists(snapshot_path):
             try:
-                shutil.copy2(snapshot_path, db_path)
+                from kodo_core.db.sanctuary_shield import restaurer_base_sqlite
+                restaurer_base_sqlite(snapshot_path, db_path)
             except Exception as e:
                 cls.log_failure(from_version, to_version, f"Échec critique de restauration BDD: {e}")
 

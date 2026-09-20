@@ -369,17 +369,9 @@ def restaurer_pack_migration(zip_input: Any) -> Dict[str, Any]:
         # 2. Snapshot de sécurité préventif (au cas où l'utilisateur souhaite annuler)
         if os.path.exists(DB_NAME):
             safety_backup_path = os.path.join(backup_dir, f"kodo_safety_pre_restore_{timestamp}.db")
-            try:
-                src_conn = sqlite3.connect(DB_NAME)
-                dst_conn = sqlite3.connect(safety_backup_path)
-                with src_conn:
-                    src_conn.backup(dst_conn)
-                dst_conn.close()
-                src_conn.close()
-                print(f"[BackupManager] Snapshot de sécurité préventif créé : {safety_backup_path}")
-            except Exception as snap_err:
-                print(f"[BackupManager] Avertissement snapshot: {snap_err}")
-                shutil.copy2(DB_NAME, safety_backup_path)
+            from kodo_core.db.sanctuary_shield import copier_base_sqlite
+            copier_base_sqlite(DB_NAME, safety_backup_path)
+            print(f"[BackupManager] Snapshot de sécurité préventif créé : {safety_backup_path}")
 
         # 3. Extraction de la nouvelle base de données
         manifest = preview.get("manifest", {})
@@ -400,19 +392,8 @@ def restaurer_pack_migration(zip_input: Any) -> Dict[str, Any]:
             return {"success": False, "error": "Le fichier SQLite extrait a échoué au test d'intégrité."}
 
         # 5. Remplacement atomique de la base active
-        db_dir = os.path.dirname(DB_NAME)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
-        shutil.copy2(temp_extracted_path, DB_NAME)
-
-        # Nettoyage des journaux WAL résiduels pour garantir la cohérence immédiate
-        for wal_ext in ["-wal", "-shm"]:
-            wal_file = f"{DB_NAME}{wal_ext}"
-            if os.path.exists(wal_file):
-                try:
-                    os.remove(wal_file)
-                except Exception:
-                    pass
+        from kodo_core.db.sanctuary_shield import restaurer_base_sqlite
+        restaurer_base_sqlite(temp_extracted_path, DB_NAME)
 
         # Nettoyage temporaire
         if os.path.exists(temp_extracted_path):

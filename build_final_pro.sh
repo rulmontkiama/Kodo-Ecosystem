@@ -47,6 +47,13 @@ echo "🔎 Vérification TypeScript du frontend (npm run lint)..."
 [ -n "$FRONT_DIR" ] || { echo "❌ Frontend kōdo-pos-3 introuvable sur le Bureau. Build annulé."; exit 1; }
 (cd "$FRONT_DIR" && npm run lint) || { echo "❌ Erreurs TypeScript dans le frontend. Build annulé."; exit 1; }
 
+# 0.2 GARDE-FOU WAL : Aucune copie de base SQLite par shutil (ampute ou vide la sauvegarde en WAL)
+if git -C "$SRC_DIR" grep -n "shutil.copy2(.*DB_NAME\|shutil.copy2(.*db_path\|shutil.copy2(.*\.db" -- '*.py' \
+    | grep -v '^tests/' | grep -v 'sanctuary_shield.py'; then
+  echo "❌ Copie de base SQLite par shutil détectée. Utiliser copier_base_sqlite()."
+  exit 1
+fi
+
 # 1. RÉINITIALISATION USINE DE LA BDD (Règle Vierge)
 echo "🧹 Réinitialisation usine de la base de données..."
 rm -f "$SRC_DIR/kodo_pos.db" "$SRC_DIR/kodo_pos.db-shm" "$SRC_DIR/kodo_pos.db-wal"

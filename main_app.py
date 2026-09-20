@@ -1808,7 +1808,8 @@ class MainApp(ctk.CTk):
                                                  title="Choisir l'emplacement de la sauvegarde")
         if file_path:
             try:
-                shutil.copy2(DB_NAME, file_path)
+                from kodo_core.db.sanctuary_shield import copier_base_sqlite
+                copier_base_sqlite(DB_NAME, file_path)
                 self._st("Sauvegarde créée avec succès !", GRN)
             except Exception as e:
                 self._st(f"Erreur sauvegarde : {e}", RED)

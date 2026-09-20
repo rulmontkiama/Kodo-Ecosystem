@@ -22,9 +22,9 @@ __pycache__/
 *.spec
 
 # Données générées, exports et backups volumineux
-Backups_L_ADRESSE_B/
-Exports_L_ADRESSE_B/
-Tickets_L_ADRESSE_B/
+Backups_*/
+Exports_*/
+Tickets_*/
 *.db
 *.db-journal
 *.db-wal

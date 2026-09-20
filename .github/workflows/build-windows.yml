@@ -57,7 +57,7 @@ jobs:
 
       - name: 🏭 Initialize Factory-Clean Databases
         run: |
-          python -c "import database_manager; database_manager.DB_NAME='kodo_pos.db'; database_manager.initialiser_db(); database_manager.DB_NAME='ladresse_b.db'; database_manager.initialiser_db()"
+          python -c "import database_manager; database_manager.DB_NAME='kodo_pos.db'; database_manager.initialiser_db()"
 
       - name: 🔨 Compile Standalone Windows Binary with PyInstaller
         run: |

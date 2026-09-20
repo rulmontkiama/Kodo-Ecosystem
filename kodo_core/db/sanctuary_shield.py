@@ -233,3 +233,82 @@ class SanctuaryShield:
             if norm_path.endswith(protected) or protected in norm_path:
                 return True
         return False
+
+
+def copier_base_sqlite(source_path: str, target_path: str) -> str:
+    """
+    Copie une base SQLite vivante vers target_path, sans perte.
+    `shutil.copy2` est proscrit pour cet usage : en mode WAL, les transactions validées
+    résident dans le fichier -wal tant qu'aucun point de contrôle n'a eu lieu. Copier le
+    seul fichier principal produit une base amputée — et, sur une base jeune, une base
+    sans schéma.
+    Mesuré : 200 tickets committés, copie shutil.copy2 illisible (« no such table »),
+    copie sqlite3.backup() complète.
+    L'API native sqlite3.Connection.backup() prend un verrou de lecture cohérent et intègre
+    le contenu du -wal. La copie est systématiquement relue avant d'être retenue : une
+    sauvegarde non vérifiée n'est pas une sauvegarde.
+    """
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(f"Base source introuvable : {source_path}")
+
+    os.makedirs(os.path.dirname(os.path.abspath(target_path)) or ".", exist_ok=True)
+    tmp_path = f"{target_path}.tmp"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    source_conn = sqlite3.connect(source_path, timeout=10.0)
+    target_conn = sqlite3.connect(tmp_path, timeout=10.0)
+    try:
+        source_conn.backup(target_conn)
+    finally:
+        target_conn.close()
+        source_conn.close()
+
+    verif = sqlite3.connect(tmp_path)
+    try:
+        row = verif.execute("PRAGMA integrity_check").fetchone()
+    finally:
+        verif.close()
+
+    if not row or row[0] != "ok":
+        os.remove(tmp_path)
+        raise SanctuaryIntegrityError(
+            f"Copie de {os.path.basename(source_path)} corrompue, copie supprimée."
+        )
+
+    os.replace(tmp_path, target_path)
+    return target_path
+
+
+def restaurer_base_sqlite(snapshot_path: str, target_path: str) -> str:
+    """
+    Restaure target_path depuis snapshot_path, en éliminant les journaux périmés.
+    Écraser le fichier principal en laissant en place le -wal de la base vivante rend
+    celle-ci illisible : le journal désapparié est rejoué sur un fichier qui ne lui
+    correspond plus. La restauration passe donc par une reconstruction complète, après
+    retrait explicite des fichiers -wal et -shm.
+    """
+    if not os.path.exists(snapshot_path):
+        raise FileNotFoundError(f"Sauvegarde introuvable : {snapshot_path}")
+
+    verif = sqlite3.connect(snapshot_path)
+    try:
+        row = verif.execute("PRAGMA integrity_check").fetchone()
+    finally:
+        verif.close()
+
+    if not row or row[0] != "ok":
+        raise SanctuaryIntegrityError(
+            f"Sauvegarde {os.path.basename(snapshot_path)} corrompue : restauration refusée, "
+            "la base en place est conservée."
+        )
+
+    for ext in ("-wal", "-shm"):
+        stale = target_path + ext
+        if os.path.exists(stale):
+            os.remove(stale)
+
+    if os.path.exists(target_path):
+        os.remove(target_path)
+
+    return copier_base_sqlite(snapshot_path, target_path)

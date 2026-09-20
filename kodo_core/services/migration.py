@@ -64,7 +64,8 @@ def export_migration_package(output_path: str = None, db_path: str = None, conn 
             safe_conn.execute(f"VACUUM INTO '{temp_db_path}'")
         except Exception:
             # Fallback copie physique
-            shutil.copy2(source_db, temp_db_path)
+            from kodo_core.db.sanctuary_shield import copier_base_sqlite
+            copier_base_sqlite(source_db, temp_db_path)
         finally:
             safe_conn.close()
 
@@ -194,7 +195,8 @@ def import_migration_package(package_path: str, target_db_path: str = None) -> d
             print(f"⚠️ Avertissement d'intégrité sur la base importée: {ie}")
 
         # 4. Remplacement atomique de la base locale
-        shutil.copy2(imported_db_temp, dest_db)
+        from kodo_core.db.sanctuary_shield import restaurer_base_sqlite
+        restaurer_base_sqlite(imported_db_temp, dest_db)
 
         # 5. Extraction des médias
         imported_assets = os.path.join(temp_dir, "assets")
