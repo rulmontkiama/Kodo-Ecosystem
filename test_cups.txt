@@ -1,7 +1,0 @@
-Hello from CUPS
-Line 2
-Line 3
-
-
-
-

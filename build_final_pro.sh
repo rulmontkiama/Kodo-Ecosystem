@@ -6,13 +6,46 @@
 
 APP_NAME="Kodo_POS"
 DMG_NAME="Installation_Kodo_POS.dmg"
-WIN_ZIP="Kodo_POS_v1.0.65_Windows_Pack.zip"
+WIN_ZIP="Kodo_POS_v2.0.0_Windows_Pack.zip"
 SRC_DIR="$(pwd)"
 APFS_BUILD="/tmp/kodo_build"
 
 echo "----------------------------------------------------"
 echo "🚀 Démarrage du Build Final Kōdo POS v2.0..."
 echo "----------------------------------------------------"
+
+# 0. VÉRIFICATION INTÉGRITÉ ARBRE & VERSIONS (Correctif O - Audit)
+# Un DMG se construit depuis l'arbre FINAL. Toute modification non commitée signifie que
+# le binaire livré ne correspondra à aucun commit : make-patch --base <version> calcule
+# ses empreintes contre l'arbre, et un patch backend ultérieur serait rejeté par le client.
+if [ -n "$(git -C "$SRC_DIR" status --porcelain --untracked-files=no)" ]; then
+  echo "❌ Arbre de travail non propre. Committer avant de construire le DMG :"
+  git -C "$SRC_DIR" status --short --untracked-files=no
+  exit 1
+fi
+
+# La version du socle, le tag attendu et le nom des archives doivent coïncider.
+KODO_VERSION=$(grep -E '^BASE_VERSION' "$SRC_DIR/kodo_base.py" | sed -E 's/.*"([^"]+)".*/\1/')
+UPDATER_VERSION=$(grep -E '^CURRENT_VERSION' "$SRC_DIR/kodo_core/services/updater.py" | sed -E 's/.*"([^"]+)".*/\1/')
+if [ "$KODO_VERSION" != "$UPDATER_VERSION" ]; then
+  echo "❌ Désalignement de version : kodo_base=$KODO_VERSION updater=$UPDATER_VERSION"
+  exit 1
+fi
+if git -C "$SRC_DIR" rev-parse -q --verify "refs/tags/v$KODO_VERSION" >/dev/null 2>&1; then
+  if [ "$(git -C "$SRC_DIR" rev-parse "v$KODO_VERSION")" != "$(git -C "$SRC_DIR" rev-parse HEAD)" ]; then
+    echo "❌ Le tag v$KODO_VERSION existe déjà et désigne un AUTRE commit :"
+    git -C "$SRC_DIR" show -s --format='   %H %ad %s' "v$KODO_VERSION"
+    exit 1
+  fi
+fi
+
+# 0.1 GARDE-FOUS (audit M4) : aucun livrable si les tests Python ou la vérification TypeScript échouent
+FRONT_DIR="$(ls -d /Users/kiamarulmont/Desktop/*k*do-pos-3* 2>/dev/null | head -1)"
+echo "🧪 Tests Python (pytest)..."
+(cd "$SRC_DIR" && python3.12 -m pytest -q tests) || { echo "❌ Tests Python en échec (ou pytest absent : python3.12 -m pip install pytest). Build annulé."; exit 1; }
+echo "🔎 Vérification TypeScript du frontend (npm run lint)..."
+[ -n "$FRONT_DIR" ] || { echo "❌ Frontend kōdo-pos-3 introuvable sur le Bureau. Build annulé."; exit 1; }
+(cd "$FRONT_DIR" && npm run lint) || { echo "❌ Erreurs TypeScript dans le frontend. Build annulé."; exit 1; }
 
 # 1. RÉINITIALISATION USINE DE LA BDD (Règle Vierge)
 echo "🧹 Réinitialisation usine de la base de données..."
@@ -135,7 +168,21 @@ rm -f "$SRC_DIR/$DMG_NAME" "$SRC_DIR/public/$DMG_NAME"
 hdiutil create -volname "Kodo POS" -srcfolder /tmp/dmg_build -ov -format UDZO "$SRC_DIR/$DMG_NAME"
 cp "$SRC_DIR/$DMG_NAME" "$SRC_DIR/public/$DMG_NAME" 2>/dev/null || true
 cp "$SRC_DIR/$DMG_NAME" ~/Desktop/"$DMG_NAME" 2>/dev/null || true
-(cd "$SRC_DIR/dist" && zip -r -X "$SRC_DIR/public/dist_v1.0.65.zip" .) 2>/dev/null || true
+# Le volume de développement est exFAT : les métadonnées macOS deviennent de vrais fichiers
+# ._* sur le disque. « zip -X » retire les attributs étendus mais PAS ces fichiers, qui
+# partiraient alors dans le paquet signé soumis à la vérification de chemins côté client.
+(cd "$SRC_DIR/dist" && rm -f "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" && zip -r -X "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" . \
+    -x '._*' -x '*/._*' -x '__MACOSX/*' -x '.DS_Store' -x '*/.DS_Store') 2>/dev/null || true
+
+# L'archive OTA ne doit contenir que l'IHM courante : un dist/ non purgé y empile les
+# anciens bundles, double la charge sur la connexion de la boutique et fait signer des
+# fichiers qui n'ont rien à y faire.
+NB=$(unzip -l "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" | grep -cE '\.(js|css|html)$')
+[ "$NB" -eq 3 ] || { echo "❌ Archive OTA : $NB fichiers au lieu de 3. dist/ n'était pas purgé."; exit 1; }
+python3 "$SRC_DIR/scripts/release/kodo_release.py" sign-dist "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" --version "$KODO_VERSION"
+python3 "$SRC_DIR/scripts/release/kodo_release.py" verify "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" --kind dist --version "$KODO_VERSION" \
+  || { echo "❌ Signature invalide : les clients refuseraient cette archive."; exit 1; }
+
 rm -rf /tmp/dmg_build "$DIST_DIR" "$WORK_DIR" "$BUILD_DIR" "$APFS_BUILD"
 
 # 7. GÉNÉRATION DU PACK WINDOWS (Kodo_POS_v1.0.45_Windows_Pack.zip)

@@ -204,8 +204,16 @@ def run_tests():
     print("\n--- Validation Cryptographique (Audit Trail) ---")
     
     def hash_ticket(r):
-        from database_manager import calculer_hash_transaction
-        return calculer_hash_transaction(r['hash_precedent'], r['date_heure'], r['total_tvac'], r.get('caisse_id', 'POS-01'), r.get('details_articles', ''))
+        from database_manager import calculer_hash_transaction, HASH_ALGO_V2
+        return calculer_hash_transaction(
+            r['hash_precedent'],
+            r['date_heure'],
+            r['total_tvac'],
+            r.get('caisse_id', 'POS-01'),
+            r.get('details_articles', ''),
+            numero_ticket=r.get('numero_ticket'),
+            algo=HASH_ALGO_V2,
+        )
         
     def hash_ledger(r):
         dt = r['date_heure']

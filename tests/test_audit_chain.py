@@ -123,6 +123,7 @@ class TestAuditChain(unittest.TestCase):
         # on le retire ici pour simuler un attaquant qui contourne cette protection, afin
         # de vérifier que le chaînage cryptographique rattrape quand même la rupture.
         cursor.execute("DROP TRIGGER IF EXISTS prevent_ticket_tamper_delete")
+        cursor.execute("DROP TRIGGER IF EXISTS prevent_ventes_details_tamper_delete")
         cursor.execute("DELETE FROM Tickets WHERE numero_ticket = 'TCK-DEL-2'")
         self.conn.commit()
 

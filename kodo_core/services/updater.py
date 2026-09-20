@@ -21,7 +21,7 @@ import urllib.error
 
 import patch_loader
 
-CURRENT_VERSION = "1.0.73"
+CURRENT_VERSION = "2.0.0"
 
 BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 DEFAULT_HEADERS = {

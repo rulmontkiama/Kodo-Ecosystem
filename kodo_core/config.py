@@ -25,7 +25,10 @@ class ShopConfig:
     
     # Paramètres réseau & serveur
     DEFAULT_PORT = 8765
-    DEFAULT_HOST = "0.0.0.0"
+    # 127.0.0.1 : l'API locale n'a pas d'authentification, elle ne doit pas être joignable depuis le
+    # réseau de la boutique (audit C1). KODO_HOST=0.0.0.0 rouvre l'écoute réseau, à réserver au jour
+    # où les routes exigeront un jeton de session.
+    DEFAULT_HOST = "127.0.0.1"
 
     @classmethod
     def get_env(cls, key: str, default: str = "") -> str:

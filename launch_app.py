@@ -53,6 +53,11 @@ def open_native_window():
     """Ouvre la fenêtre native macOS ou le moteur d'affichage."""
     wait_for_server(timeout=15)
     
+    # Depuis le thread principal uniquement : c'est la seule position d'où signal.signal()
+    # peut réussir, le serveur tournant dans un thread démon.
+    from server_pos import installer_arret_gracieux
+    installer_arret_gracieux()
+    
     # 1. Tenter d'ouvrir avec pywebview si installé et fonctionnel
     try:
         import webview
@@ -84,7 +89,14 @@ if __name__ == '__main__':
     print("==================================================")
     print("    🚀 DÉMARRAGE DU LOGICIEL KŌDO POS NEXT-GEN")
     print("==================================================")
-    
+
+    # Assainissement automatique de l'environnement client et protection Sanctuaire
+    try:
+        from kodo_core.services.client_sanitizer import sanitize_client_environment
+        sanitize_client_environment()
+    except Exception as se:
+        print(f"⚠️ [KODO POS SANITIZER WARNING] {se}")
+
     # Lancer le serveur backend Python dans un thread séparé
     server_thread = threading.Thread(target=start_backend, daemon=True)
     server_thread.start()

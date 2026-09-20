@@ -1,5 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_all
+import os
+import re
+
+# Version affichée par macOS et le Finder : lue dans kodo_base.BASE_VERSION (alignée sur
+# updater.CURRENT_VERSION par `kodo_release.py stamp-base`, appelé par build_final_pro.sh avant
+# PyInstaller) au lieu d'être recopiée à la main : elle était restée figée à 1.0.44 (audit M3).
+with open(os.path.join(SPECPATH, 'kodo_base.py'), encoding='utf-8') as _f:
+    _m = re.search(r'^BASE_VERSION\s*=\s*["\']([^"\']+)["\']', _f.read(), re.M)
+if not _m:
+    raise SystemExit("Kodo_POS.spec : BASE_VERSION introuvable dans kodo_base.py")
+KODO_VERSION = _m.group(1)
 
 datas = [
     ('logo.png', '.'),
@@ -140,8 +151,8 @@ app = BUNDLE(
     info_plist={
         'NSHighResolutionCapable': 'True',
         'LSBackgroundOnly': 'False',
-        'CFBundleShortVersionString': '1.0.44',
-        'CFBundleVersion': '1.0.44',
+        'CFBundleShortVersionString': KODO_VERSION,
+        'CFBundleVersion': KODO_VERSION,
         'NSAppTransportSecurity': {
             'NSAllowsArbitraryLoads': True,
             'NSAllowsLocalNetworking': True,

@@ -198,7 +198,7 @@ class ESCPOSThermalPrinter:
                     f.write(raw_bytes)
                 
                 cmd = f'copy /b "{temp_path}" "{self.printer_name or "PRN"}"'
-                res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                 if res.returncode == 0:
@@ -214,27 +214,27 @@ class ESCPOSThermalPrinter:
                 f.write(raw_bytes)
 
             printed = False
-            # Tentative via lp -o raw
+            # Tentative via lp -o raw (timeout strict 2.0s pour éviter de figer le thread)
             try:
                 cmd = ["lp", "-o", "raw"]
                 if self.printer_name:
                     cmd.extend(["-d", self.printer_name])
                 cmd.append(temp_path)
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
                 if res.returncode == 0:
                     printed = True
                     print("[SUCCESS] Ticket ESC/POS envoyé via CUPS (lp -o raw).")
             except Exception as e:
                 print(f"[INFO] Échec lp ({e}), tentative via lpr...")
 
-            # Fallback via lpr
+            # Fallback via lpr (timeout strict 2.0s)
             if not printed:
                 try:
                     cmd = ["lpr", "-o", "raw"]
                     if self.printer_name:
                         cmd.extend(["-P", self.printer_name])
                     cmd.append(temp_path)
-                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
                     if res.returncode == 0:
                         printed = True
                         print("[SUCCESS] Ticket ESC/POS envoyé via lpr.")
@@ -318,7 +318,8 @@ def generer_ticket(numero, panier, total_tvac, remise,
                    shop_address="Chemin Rue 53, 4960 Malmedy",
                    shop_vat="BE 0123.456.789",
                    vendeur_nom="Sarah",
-                   is_gift=False):
+                   is_gift=False,
+                   ecart_arrondi_cash=None):
     """
     Génère le contenu texte d'un ticket thermique de caisse standard.
     """
@@ -426,7 +427,14 @@ def generer_ticket(numero, panier, total_tvac, remise,
         lines.append(_right("SUBTOTAL (HTVA) :", f"{total_htva_accum:.2f} EUR"))
         lines.append(_right("TAX (VAT)       :", f"{total_tva_accum:.2f} EUR"))
         lines.append(_separator("="))
-        lines.append(_right("TOTAL TO PAY    :", f"{Decimal(str(total_tvac)):.2f} EUR"))
+        if ecart_arrondi_cash and Decimal(str(ecart_arrondi_cash)) != Decimal("0.00"):
+            ecart_dec = Decimal(str(ecart_arrondi_cash))
+            tot_arrondi = Decimal(str(total_tvac)) + ecart_dec
+            lines.append(_right("TOTAL BRUT      :", f"{Decimal(str(total_tvac)):.2f} EUR"))
+            lines.append(_right("ARRONDI LÉGAL 5c:", f"{ecart_dec:+.2f} EUR"))
+            lines.append(_right("TOTAL À PAYER   :", f"{tot_arrondi:.2f} EUR"))
+        else:
+            lines.append(_right("TOTAL TO PAY    :", f"{Decimal(str(total_tvac)):.2f} EUR"))
         lines.append(_separator("="))
         
         # Règlements
@@ -909,12 +917,12 @@ def pil_to_escpos_raster(image, max_width=512):
     return bytes(header + raster_data)
 
 
-def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100):
+def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, allow_gui_preview=False):
     """
     Sauvegarde le ticket et tente l'impression thermique ESC/POS.
     1. Direct Hardware python-escpos / Socket si hôte spécifié.
     2. Driver ESCPOSThermalPrinter multiplateforme (CUPS / win32print / lp).
-    3. Fallback sur ouverture d'un aperçu texte.
+    3. Fallback sur ouverture d'un aperçu texte (si allow_gui_preview=True).
     """
     from PIL import Image
     contenu_clean = strip_accents(contenu)
@@ -1005,8 +1013,8 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100):
         except Exception as e:
             print(f"[INFO ESC/POS USB] {e}")
 
-    # Fallback 2: Aperçu fichier
-    if not printed_successfully:
+    # Fallback 2: Aperçu fichier (uniquement si explicitement demandé, ex: test manuel)
+    if not printed_successfully and allow_gui_preview:
         try:
             if sys.platform == "darwin":
                 subprocess.Popen(["open", nom_fichier_txt])
@@ -1031,7 +1039,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
         c = conn.cursor()
 
         c.execute("""
-            SELECT id, date_heure, total_tvac, remise, methode_paiement, id_client, rendu_monnaie, vendeur_nom
+            SELECT id, date_heure, total_tvac, remise, methode_paiement, id_client, rendu_monnaie, vendeur_nom, ecart_arrondi_cash
             FROM Tickets WHERE numero_ticket = ?
         """, (num_ticket,))
         ticket_row = c.fetchone()
@@ -1039,7 +1047,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
             print(f"[WARN] Ticket {num_ticket} introuvable en base de données.")
             return None
 
-        t_id, d_h, total_tvac, remise, methode, id_client, rendu, vendeur = ticket_row
+        t_id, d_h, total_tvac, remise, methode, id_client, rendu, vendeur, ecart_arrondi = ticket_row
 
         # Articles
         c.execute("""
@@ -1068,6 +1076,20 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
             if cli:
                 nom_client = f"{cli[1]} {cli[0]}".strip()
 
+        # Règlements réels enregistrés dans le grand livre
+        c.execute("""
+            SELECT methode_paiement, montant FROM Ledger_Caisse
+            WHERE reference = ? AND type_mouvement = 'VENTE'
+        """, (num_ticket,))
+        ledger_pmts = c.fetchall()
+        if ledger_pmts:
+            paiements = [(m, Decimal(str(mt))) for m, mt in ledger_pmts]
+        else:
+            ecart_dec = Decimal(str(ecart_arrondi or 0))
+            is_cash = str(methode or "").strip().lower() in ("especes", "espèces", "cash")
+            mt_base = Decimal(str(total_tvac)) + (ecart_dec if is_cash else Decimal("0.00"))
+            paiements = [(methode or "Espèces", mt_base)]
+
         # Infos Boutique
         shop_name = "Mon Commerce"
         shop_sub = "Boutique de Mode"
@@ -1085,8 +1107,6 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
 
         conn.close()
 
-        paiements = [(methode or "Espèces", Decimal(str(total_tvac)))]
-
         contenu = generer_ticket(
             numero=num_ticket,
             panier=panier,
@@ -1099,7 +1119,8 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
             shop_subtitle=shop_sub,
             shop_address=shop_addr,
             shop_vat=shop_vat,
-            vendeur_nom=vendeur or "Sarah"
+            vendeur_nom=vendeur or "Sarah",
+            ecart_arrondi_cash=Decimal(str(ecart_arrondi or 0))
         )
 
         return imprimer_ticket(contenu, num_ticket, printer_name=printer_name, host=host, port=port)

@@ -30,6 +30,12 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "timestamp": datetime.datetime.now().isoformat()
         }
 
+    # 1bis. Bilan de santé complet & diagnostic d'intégrité v2.0
+    elif method == "GET" and path == "/api/system/health":
+        from kodo_core.services.client_sanitizer import get_system_health_report
+        health = get_system_health_report()
+        return 200, health
+
     # 2. Version
     elif method == "GET" and path == "/api/version":
         return 200, {
@@ -226,11 +232,10 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
         # Fond de caisse actuel de la session active (sans réécriture historique)
         try:
-            cursor.execute("SELECT fond_caisse_matin FROM Sessions_Caisse WHERE date_cloture IS NULL ORDER BY id DESC LIMIT 1")
-            row_fc = cursor.fetchone()
-            fond_caisse = float(row_fc[0]) if (row_fc and row_fc[0] is not None) else float(params.get("fond_caisse_matin", 200.0))
+            from kodo_core.services.cash_session_service import get_fond_caisse_matin
+            fond_caisse = get_fond_caisse_matin(cursor)
         except Exception:
-            fond_caisse = float(params.get("fond_caisse_matin", 200.0))
+            fond_caisse = 0.0
         conn.close()
         try:
             default_alert = int(params.get("default_seuil_alerte", 5))

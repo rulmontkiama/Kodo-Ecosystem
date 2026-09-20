@@ -26,6 +26,38 @@ def quantize_money(amount: Decimal) -> Decimal:
     return amount.quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
 
 
+def apply_belgian_cash_rounding(amount: Decimal) -> Tuple[Decimal, Decimal]:
+    """
+    Applique l'arrondi légal belge à 5 centimes pour les paiements en espèces (Loi du 01/12/2019).
+    IMMUNITÉ FISCALE / TVA :
+      Les bases et montants de TVA sont calculés sur le montant brut initial.
+      L'écart d'arrondi ne modifie en aucun cas la TVA due.
+    Règles de l'arrondi belge :
+      - Se termine par .01, .02 -> arrondi vers le bas à .00 (écart -0.01 / -0.02)
+      - Se termine par .03, .04 -> arrondi vers le haut à .05 (écart +0.02 / +0.01)
+      - Se termine par .06, .07 -> arrondi vers le bas à .05 (écart -0.01 / -0.02)
+      - Se termine par .08, .09 -> arrondi vers le haut à .10 (écart +0.02 / +0.01)
+    Retourne :
+      (montant_arrondi, ecart_arrondi)
+      où ecart_arrondi = montant_arrondi - montant_brut
+    """
+    if not isinstance(amount, Decimal):
+        amount = Decimal(str(amount))
+    amount = quantize_money(amount)
+    cents = int((amount * Decimal('100')).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+    remainder = cents % 5
+    if remainder in (1, 2):
+        rounded_cents = cents - remainder
+    elif remainder in (3, 4):
+        rounded_cents = cents + (5 - remainder)
+    else:
+        rounded_cents = cents
+
+    rounded_amount = quantize_money(Decimal(rounded_cents) / Decimal('100'))
+    ecart = quantize_money(rounded_amount - amount)
+    return rounded_amount, ecart
+
+
 class CartItem:
     """Représente une ligne d'article dans le panier d'achat."""
 
@@ -322,6 +354,15 @@ def process_sale_transaction(
 
     try:
         cursor = conn.cursor()
+        # Le serveur HTTP est MULTI-THREADÉ (ThreadingHTTPServer) : la lecture du stock, du
+        # dernier numéro de ticket et du dernier hash de la chaîne NF525, puis leur écriture,
+        # doivent tenir dans une seule transaction en écriture exclusive. En DEFERRED, deux
+        # encaissements simultanés (double-clic sur « Encaisser », ou deux caisses sur la même
+        # base) lisent le même stock, passent tous deux la garde anti-survente et produisent du
+        # stock négatif fantôme (mesuré : -3 sur un stock de 5 pour 8 ventes parallèles).
+        if not conn.in_transaction:
+            cursor.execute("BEGIN IMMEDIATE")
+
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         num_ticket = database_manager.generer_numero_ticket(cursor)
 
@@ -437,13 +478,38 @@ def process_sale_transaction(
                 raise ValueError(f"Montant de paiement invalide ({montant_p}) pour le mode {p[0]!r}.")
             paiements_dec.append((p[0], montant_p))
 
-        # Rendu de monnaie recalculé serveur (jamais celui fourni par le client) : sans ce
-        # recalcul, un `changeGiven` falsifié pouvait faire passer l'encaissement espèces
-        # enregistré en dessous (voire en négatif) du montant réellement perçu en caisse.
-        rendu_dec, reste_du_dec = CartEngine.calculate_change_due(tot_tvac_dec, paiements_dec)
+        # Arrondi légal belge à 5 centimes sur le solde espèces (Loi du 01/12/2019).
+        # IMMUNITÉ TVA : tot_tvac_dec, tot_htva_dec et tot_tva_dec restent strictement intouchés.
+        # La classification passe par la source d'autorité unique du projet : un libellé
+        # hérité ("CASH", "especes") ne doit jamais échapper à l'arrondi.
+        def _is_cash(m):
+            return database_manager.classer_moyen_paiement(m) == "especes"
+
+        cash_tendered = sum((p[1] for p in paiements_dec if _is_cash(p[0])), Decimal('0.00'))
+        non_cash_total = sum((p[1] for p in paiements_dec if not _is_cash(p[0])), Decimal('0.00'))
+        ecart_arrondi_cash = Decimal('0.00')
+        effective_total_due = tot_tvac_dec
+
+        if cash_tendered > Decimal('0.00'):
+            due_in_cash_raw = max(Decimal('0.00'), tot_tvac_dec - non_cash_total)
+            if due_in_cash_raw > Decimal('0.00'):
+                due_in_cash, ecart_arrondi_cash = apply_belgian_cash_rounding(due_in_cash_raw)
+                # Une caisse pas encore alignée sur l'arrondi (ou un solde mixte saisi au
+                # centime) transmet le montant BRUT : refuser la vente immobiliserait le
+                # comptoir client devant soi. On enregistre alors l'encaissement RÉEL —
+                # le tiroir contient ce que le client a effectivement remis — et on
+                # recalcule l'écart d'arrondi sur cette réalité, jamais sur une hypothèse.
+                manque = due_in_cash - cash_tendered
+                if (Decimal('0.00') < manque <= Decimal('0.02') and cash_tendered >= due_in_cash_raw):
+                    due_in_cash = quantize_money(cash_tendered)
+                    ecart_arrondi_cash = quantize_money(due_in_cash - due_in_cash_raw)
+                effective_total_due = quantize_money(non_cash_total + due_in_cash)
+
+        # Rendu de monnaie recalculé serveur sur la base du montant dû effectif (arrondi si espèces)
+        rendu_dec, reste_du_dec = CartEngine.calculate_change_due(effective_total_due, paiements_dec)
         if reste_du_dec > Decimal('0.00'):
             raise ValueError(
-                f"Paiement insuffisant : {reste_du_dec} restant dû sur un total de {tot_tvac_dec}."
+                f"Paiement insuffisant : {reste_du_dec} restant dû sur un total de {effective_total_due}."
             )
 
         # Redemption réelle de carte cadeau/avoir : sans ce contrôle serveur, choisir
@@ -459,13 +525,12 @@ def process_sale_transaction(
         paiements_payload = [(p[0], float(p[1])) for p in paiements_dec]
         main_payment_method = paiements_payload[0][0] if paiements_payload else "CB"
 
-        # Retry borné sur collision de numero_ticket (contrainte UNIQUE) : le serveur HTTP
-        # est mono-thread, donc ceci ne peut survenir qu'entre deux processus caisse
-        # distincts partageant le même fichier SQLite (multi-caisse) ayant lu le même
-        # MAX(numero_ticket) avant que l'un des deux ne commite. Plutôt que de faire
-        # échouer une vente réellement payée par le client sur cette rare course, on
-        # régénère un numéro et on retente (la contrainte UNIQUE garantit qu'aucun
-        # doublon ne peut jamais être inséré silencieusement).
+        # Retry borné sur collision de numero_ticket (contrainte UNIQUE). Le serveur HTTP est
+        # MULTI-THREADÉ : la collision peut survenir entre deux encaissements du même
+        # processus comme entre deux caisses partageant le fichier SQLite. Plutôt que de faire
+        # échouer une vente réellement payée par le client sur cette course, on régénère un
+        # numéro et on retente (la contrainte UNIQUE garantit qu'aucun doublon ne peut jamais
+        # être inséré silencieusement).
         ticket_id = None
         last_integrity_error = None
         for _attempt in range(5):
@@ -484,7 +549,8 @@ def process_sale_transaction(
                     vendeur_nom=cashier_name,
                     date_heure=now_str,
                     paiements=paiements_payload,
-                    caisse_id=caisse_id
+                    caisse_id=caisse_id,
+                    ecart_arrondi_cash=float(ecart_arrondi_cash)
                 )
                 break
             except sqlite3.IntegrityError as ie:
@@ -535,7 +601,9 @@ def process_sale_transaction(
             "total_tvac": float(tot_tvac_dec),
             "total_htva": float(tot_htva_dec),
             "total_tva": float(tot_tva_dec),
-            "rendu_monnaie": float(rendu_dec)
+            "rendu_monnaie": float(rendu_dec),
+            "ecart_arrondi_cash": float(ecart_arrondi_cash),
+            "total_a_payer_arrondi": float(effective_total_due)
         }
 
     except Exception as e:
@@ -565,6 +633,9 @@ def process_return_transaction(
 
     try:
         cursor = conn.cursor()
+        if not conn.in_transaction:
+            cursor.execute("BEGIN IMMEDIATE")
+
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # `refund_price` (fourni par l'appelant) n'est PAS utilisé pour le calcul financier

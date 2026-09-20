@@ -22,6 +22,12 @@ from kodo_core.hardware.printer import (
     get_ticket_logo_path,
     ouvrir_tiroir_caisse,
 )
+from kodo_core.hardware.print_worker import (
+    PrintWorker,
+    PrintJob,
+    PrinterCircuitBreaker,
+    get_print_worker,
+)
 
 __all__ = [
     "COL",
@@ -42,4 +48,8 @@ __all__ = [
     "imprimer_ticket_caisse",
     "imprimer_ticket_test",
     "ouvrir_tiroir_caisse",
+    "PrintWorker",
+    "PrintJob",
+    "PrinterCircuitBreaker",
+    "get_print_worker",
 ]

@@ -76,15 +76,28 @@ def hash_pin(pin_plain):
 
 
 class SafeConnection:
-    """Wrapper ultra-sécurisé pour garantir la fermeture des connexions."""
+    """Wrapper ultra-sécurisé pour garantir la fermeture des connexions et la résilience concurrente."""
     def __init__(self, db_name, **kwargs):
         self.db_name = db_name
         self._closed = False
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 5.0
         self._conn = sqlite3.connect(db_name, **kwargs)
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
         except Exception:
             pass
+
+    @property
+    def in_transaction(self):
+        return self._conn.in_transaction
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
     def cursor(self):
         return self._conn.cursor()
@@ -130,6 +143,7 @@ def get_connection(db_path=None):
 def db_transaction():
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         yield conn.cursor()
         conn.commit()
     except Exception as e:
@@ -287,31 +301,34 @@ def _initialiser_db_raw(conn):
     cols_produits = [row[1] for row in cursor.fetchall()]
     if 'image_path' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN image_path TEXT")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'en_solde' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN en_solde INTEGER DEFAULT 0")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'prix_solde_tvac' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN prix_solde_tvac DECIMAL DEFAULT NULL")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'type_vente' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN type_vente TEXT DEFAULT 'unite'")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'unite_mesure' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN unite_mesure TEXT DEFAULT 'pce'")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'marque' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN marque TEXT DEFAULT NULL")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'attributs_json' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN attributs_json TEXT DEFAULT NULL")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'sync_status' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN sync_status INTEGER DEFAULT 0")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'seuil_alerte' not in cols_produits:
         try: cursor.execute("ALTER TABLE Produits ADD COLUMN seuil_alerte INTEGER DEFAULT 5")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
+    if 'requires_stock_audit' not in cols_produits:
+        try: cursor.execute("ALTER TABLE Produits ADD COLUMN requires_stock_audit INTEGER DEFAULT 0")
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
 
     # Insertion automatique dans Categories & Marques
     cursor.execute("INSERT OR IGNORE INTO Categories (nom) SELECT DISTINCT categorie FROM Produits WHERE categorie IS NOT NULL AND categorie != ''")
@@ -340,9 +357,16 @@ def _initialiser_db_raw(conn):
             taille TEXT,
             quantite_actuelle INTEGER,
             seuil_alerte INTEGER,
+            requires_stock_audit INTEGER DEFAULT 0,
             FOREIGN KEY (id_produit) REFERENCES Produits(id) ON DELETE CASCADE
         )
     ''')
+
+    cursor.execute("PRAGMA table_info(Stocks)")
+    cols_stocks = [row[1] for row in cursor.fetchall()]
+    if 'requires_stock_audit' not in cols_stocks:
+        try: cursor.execute("ALTER TABLE Stocks ADD COLUMN requires_stock_audit INTEGER DEFAULT 0")
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
 
     # Table Clients
     cursor.execute('''
@@ -427,9 +451,20 @@ def _initialiser_db_raw(conn):
     # Migrations de colonnes manquantes sur Tickets
     cursor.execute("PRAGMA table_info(Tickets)")
     cols_tickets = [row[1] for row in cursor.fetchall()]
-    if 'z_id' not in cols_tickets:
-        try: cursor.execute("ALTER TABLE Tickets ADD COLUMN z_id INTEGER DEFAULT NULL")
-        except: pass
+    for col, col_type in [
+        ('caisse_id', "TEXT DEFAULT 'POS-01'"),
+        ('details_articles', "TEXT"),
+        ('previous_hash', "TEXT"),
+        ('current_hash', "TEXT"),
+        ('sync_status', "INTEGER DEFAULT 1"),
+        ('offline_uuid', "TEXT"),
+        ('created_at_utc', "TEXT"),
+        ('z_id', "INTEGER DEFAULT NULL"),
+        ('ecart_arrondi_cash', "DECIMAL DEFAULT '0.00'"),
+    ]:
+        if col not in cols_tickets:
+            try: cursor.execute(f"ALTER TABLE Tickets ADD COLUMN {col} {col_type}")
+            except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
 
     # Table Ventes_Details
     cursor.execute('''
@@ -450,7 +485,7 @@ def _initialiser_db_raw(conn):
     cols_ventes_details = [row[1] for row in cursor.fetchall()]
     if 'refund_of_vd_id' not in cols_ventes_details:
         try: cursor.execute("ALTER TABLE Ventes_Details ADD COLUMN refund_of_vd_id INTEGER DEFAULT NULL")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
 
     # Table Ledger_Caisse
     cursor.execute('''
@@ -474,10 +509,10 @@ def _initialiser_db_raw(conn):
     cols_ledger = [row[1] for row in cursor.fetchall()]
     if 'caisse_id' not in cols_ledger:
         try: cursor.execute("ALTER TABLE Ledger_Caisse ADD COLUMN caisse_id TEXT DEFAULT 'POS-01'")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
     if 'z_id' not in cols_ledger:
         try: cursor.execute("ALTER TABLE Ledger_Caisse ADD COLUMN z_id INTEGER DEFAULT NULL")
-        except: pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
 
     # Table Rapports_Z
     cursor.execute('''
@@ -604,24 +639,59 @@ def generer_numero_ticket(cursor):
     return f"TCK-{annee}-{seq + 1:04d}"
 
 
-def calculer_hash_transaction(previous_hash, timestamp, montant_total, caisse_id="POS-01", details_articles=""):
-    """Calcule le hash SHA-256 d'une transaction."""
+# Versions de l'algorithme de chaînage fiscal.
+# v1 (historique) : previous|timestamp|montant|caisse|details — le numéro de ticket n'y
+# figure pas : deux maillons distincts peuvent porter la même empreinte.
+# v2 (courant) : "v2"|previous|timestamp|montant|caisse|numero_ticket|details
+# L'algorithme n'est JAMAIS réappliqué rétroactivement : les chaînes déjà constituées chez
+# les boutiques en exploitation resteraient sinon invérifiables du jour au lendemain.
+HASH_ALGO_V1 = "v1"
+HASH_ALGO_V2 = "v2"
+HASH_ALGO_COURANT = HASH_ALGO_V2
+
+
+def calculer_hash_transaction(previous_hash, timestamp, montant_total, caisse_id="POS-01", details_articles="", numero_ticket=None, algo=HASH_ALGO_COURANT):
+    """
+    Calcule l'empreinte SHA-256 chaînée d'une transaction de vente.
+    Portée exacte de ce que cette empreinte établit, et de ce qu'elle n'établit pas : elle
+    détecte de façon fiable toute modification ou suppression accidentelle d'un maillon.
+    Elle ne comporte aucun secret et reste donc intégralement recalculable par quiconque
+    accède au fichier .db : elle ne constitue PAS une preuve d'inaltérabilité opposable,
+    et ne doit être présentée comme telle ni dans l'application, ni dans la documentation
+    commerciale, ni dans les commentaires de ce dépôt.
+    """
     import hashlib
     prev_str = str(previous_hash or "GENESIS_BLOCK_KODO_POS")
     ts_str = str(timestamp or "")
     montant_str = f"{Decimal(str(montant_total)):.2f}"
     caisse_str = str(caisse_id or "POS-01")
     details_str = str(details_articles or "")
-    data = f"{prev_str}|{ts_str}|{montant_str}|{caisse_str}|{details_str}"
+    if algo == HASH_ALGO_V1:
+        data = f"{prev_str}|{ts_str}|{montant_str}|{caisse_str}|{details_str}"
+    else:
+        num_str = str(numero_ticket or "")
+        data = (f"{HASH_ALGO_V2}|{prev_str}|{ts_str}|{montant_str}|"
+                f"{caisse_str}|{num_str}|{details_str}")
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
 def signer_ticket(cursor, numero_ticket, total_tvac, date_heure, caisse_id="POS-01", details_articles=""):
-    """Génère la signature cryptographique d'un ticket."""
-    cursor.execute("SELECT COALESCE(current_hash, signature) FROM Tickets WHERE current_hash IS NOT NULL OR signature IS NOT NULL ORDER BY id DESC LIMIT 1")
+    """Génère l'empreinte chaînée d'un ticket avec son numéro scellé (algorithme courant)."""
+    cursor.execute(
+        "SELECT COALESCE(current_hash, signature) FROM Tickets "
+        "WHERE current_hash IS NOT NULL OR signature IS NOT NULL ORDER BY id DESC LIMIT 1"
+    )
     row = cursor.fetchone()
     previous_hash = row[0] if (row and row[0]) else "GENESIS_BLOCK_KODO_POS"
-    current_hash = calculer_hash_transaction(previous_hash, date_heure, total_tvac, caisse_id, details_articles)
+    current_hash = calculer_hash_transaction(
+        previous_hash,
+        date_heure,
+        total_tvac,
+        caisse_id,
+        details_articles,
+        numero_ticket=numero_ticket,
+        algo=HASH_ALGO_COURANT,
+    )
     return current_hash, previous_hash
 
 
@@ -648,7 +718,7 @@ def signer_rapport_z(cursor, date_z, donnees_json):
     return signature, hash_precedent
 
 
-def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, remise, methode_paiement, id_client, rendu_monnaie, panier, vendeur_nom, date_heure, paiements, caisse_id="POS-01", sync_status=1, offline_uuid=None, created_at_utc=None):
+def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, remise, methode_paiement, id_client, rendu_monnaie, panier, vendeur_nom, date_heure, paiements, caisse_id="POS-01", sync_status=1, offline_uuid=None, created_at_utc=None, ecart_arrondi_cash=0.0):
     """Enregistre une vente (NF525)."""
     import uuid
     from datetime import timezone
@@ -675,6 +745,12 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
 
     ticket_id = cursor.lastrowid
 
+    if ecart_arrondi_cash != 0.0:
+        try:
+            cursor.execute("UPDATE Tickets SET ecart_arrondi_cash = ? WHERE id = ?", (float(ecart_arrondi_cash), ticket_id))
+        except Exception:
+            pass
+
     # NOTE: la disponibilité du stock n'est PAS vérifiée ici. `enregistrer_vente` est
     # aussi le primitif de rejeu utilisé par OfflineSyncEngine pour valider a posteriori
     # des ventes déjà physiquement conclues sur des caisses déconnectées (stratégie
@@ -688,12 +764,45 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
         px = it.get("prix_vente_tvac", 0)
         qty = it.get("quantite", 1)
 
+        # Si un stock_id est fourni mais n'existe pas en base (ex: données mock de test, article hors stock géré),
+        # on évite de violer la contrainte FOREIGN KEY (id_stock) REFERENCES Stocks(id)
+        if s_id is not None:
+            cursor.execute("SELECT 1 FROM Stocks WHERE id = ?", (s_id,))
+            if not cursor.fetchone():
+                s_id = None
+
         cursor.execute("""
             INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac)
             VALUES (?, ?, ?, ?)
         """, (ticket_id, s_id, qty, px))
         if s_id:
-            cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle - ? WHERE id = ?", (qty, s_id))
+            cursor.execute(
+                "UPDATE Stocks SET quantite_actuelle = quantite_actuelle - ? "
+                "WHERE id = ? AND quantite_actuelle >= ?",
+                (qty, s_id, qty),
+            )
+            if cursor.rowcount == 0:
+                # Vente hors-ligne rejouée sur un stock déjà épuisé (Last-Write-Wins) :
+                # on ne rejette pas une vente physiquement conclue, mais on interdit au
+                # compteur de passer sous zéro et on trace l'incident pour audit.
+                try:
+                    cursor.execute(
+                        "UPDATE Stocks SET quantite_actuelle = 0, requires_stock_audit = 1 WHERE id = ? AND quantite_actuelle < ?",
+                        (s_id, qty),
+                    )
+                    cursor.execute(
+                        "UPDATE Produits SET requires_stock_audit = 1 WHERE id = (SELECT id_produit FROM Stocks WHERE id = ?)",
+                        (s_id,)
+                    )
+                except Exception:
+                    cursor.execute(
+                        "UPDATE Stocks SET quantite_actuelle = 0 WHERE id = ? AND quantite_actuelle < ?",
+                        (s_id, qty),
+                    )
+                print(
+                    f"[STOCK AUDIT] Survente détectée sur stock_id={s_id} "
+                    f"(demandé={qty}) — stock plafonné à 0, ticket {numero_ticket}."
+                )
 
     if id_client:
         cursor.execute("""
@@ -1159,9 +1268,14 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
             filtre_date = " AND substr(date_heure, 1, 10) <= ?"
             params_date = (str(jusqu_au),)
 
-        c.execute("""
-            SELECT id, total_tvac, total_htva, total_tva, remise, numero_ticket
-            FROM Tickets WHERE caisse_id = ? AND z_id IS NULL""" + filtre_date, (caisse_id,) + params_date)
+        c.execute("PRAGMA table_info(Tickets)")
+        cols_tickets = [row[1] for row in c.fetchall()]
+        has_arrondi = "ecart_arrondi_cash" in cols_tickets
+
+        sql_tickets = f"""
+            SELECT id, total_tvac, total_htva, total_tva, remise, numero_ticket{", COALESCE(ecart_arrondi_cash, 0.0)" if has_arrondi else ", 0.0"}
+            FROM Tickets WHERE caisse_id = ? AND z_id IS NULL""" + filtre_date
+        c.execute(sql_tickets, (caisse_id,) + params_date)
         ticket_rows = c.fetchall()
 
         ticket_ids = [row[0] for row in ticket_rows]
@@ -1170,6 +1284,7 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
         tot_htva = sum((Decimal(str(row[2] or "0.00")) for row in ticket_rows), Decimal("0.00"))
         tot_tva = sum((Decimal(str(row[3] or "0.00")) for row in ticket_rows), Decimal("0.00"))
         tot_remises = sum((Decimal(str(row[4] or "0.00")) for row in ticket_rows), Decimal("0.00"))
+        tot_arrondi_cash = sum((Decimal(str(row[6] or "0.00")) for row in ticket_rows), Decimal("0.00"))
 
         # Seuls les mouvements de VENTE/REMBOURSEMENT alimentent le chiffre d'affaires
         # espèces/carte : sans ce filtre, tout autre type de mouvement présent dans
@@ -1205,24 +1320,30 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
 
         # Régularisation du rendu de monnaie : d'anciennes versions déduisaient le rendu deux
         # fois dans le journal de caisse (montant encaissé = total - rendu au lieu du total).
-        # Pour un ticket réglé UNIQUEMENT en espèces, l'encaissement réel est le total du ticket
-        # (le rendu est déjà exclu du total). On complète donc les espèces de la différence, sans
-        # toucher aux écritures signées du journal. Sans effet avec les versions corrigées
-        # (journal == total). Les tickets mixtes ne sont pas devinés : ils ressortent dans
-        # `ecart_reglements`.
+        # Pour un ticket réglé UNIQUEMENT en espèces, l'encaissement réel attendu est le total
+        # du ticket CORRIGÉ DE L'ARRONDI LÉGAL BELGE : sans ce terme, un arrondi vers le bas
+        # (10,02 -> 10,00) était pris pour un rendu déduit deux fois, et les espèces du Z
+        # étaient re-gonflées au montant brut — créant un écart de caisse purement fictif.
         regularisation_rendu = Decimal("0.00")
         for row in ticket_rows:
             total_tk = Decimal(str(row[1] or "0.00"))
+            ecart_tk = Decimal(str(row[6] or "0.00"))
+            encaisse_attendu = total_tk + ecart_tk
             lignes = lignes_par_ticket.get(row[5])
-            if not lignes or total_tk <= Decimal("0.00"):
+            if not lignes or encaisse_attendu <= Decimal("0.00"):
                 continue
             if all(classe == "especes" for classe, _mt in lignes):
-                manque = total_tk - sum((mt for _c, mt in lignes), Decimal("0.00"))
+                manque = encaisse_attendu - sum((mt for _c, mt in lignes), Decimal("0.00"))
                 if manque > Decimal("0.00"):
                     regularisation_rendu += manque
         tot_esp += regularisation_rendu
 
-        ecart_reglements = (tot_tvac - (tot_esp + tot_carte + tot_qr + tot_avoir)).quantize(Decimal("0.01"))
+        # Le total encaissé légalement dû = CA brut + somme des écarts d'arrondi espèces.
+        # Sans ce terme, l'arrondi légal apparaissait chaque jour comme une anomalie de
+        # règlement, rendant impossible la détection d'un vrai écart de caisse.
+        ecart_reglements = (
+            (tot_tvac + tot_arrondi_cash) - (tot_esp + tot_carte + tot_qr + tot_avoir)
+        ).quantize(Decimal("0.01"))
 
         # Apports/prélèvements de la période en cours (non encore clôturés) : suivis
         # séparément du chiffre d'affaires pour ne pas fausser total_especes/total_carte,
@@ -1253,6 +1374,7 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
             "total_carte": tot_carte,
             "total_qr": tot_qr,
             "total_avoir": tot_avoir,
+            "total_arrondi_cash": tot_arrondi_cash,
             "regularisation_rendu": regularisation_rendu,
             "ecart_reglements": ecart_reglements,
             "jusqu_au": jusqu_au,
@@ -1267,11 +1389,15 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
 
 def _assurer_colonne_periode_z(cursor):
     """Ajoute à Clotures_Caisse les colonnes récentes si absentes : periode_jusqu_au (dernier jour
-    couvert par le Z), total_qr et total_avoir (sans elles, un Z réglé en QR/avoir apparaîtrait
-    avec espèces = carte = 0). Ces colonnes ne font pas partie du hash de la chaîne NF525."""
+    couvert par le Z), total_qr, total_avoir et total_arrondi_cash. Ces colonnes ne font pas partie du hash de la chaîne NF525."""
     cursor.execute("PRAGMA table_info(Clotures_Caisse)")
     existantes = [row[1] for row in cursor.fetchall()]
-    for col, ddl in (("periode_jusqu_au", "TEXT"), ("total_qr", "DECIMAL DEFAULT '0.00'"), ("total_avoir", "DECIMAL DEFAULT '0.00'")):
+    for col, ddl in (
+        ("periode_jusqu_au", "TEXT"),
+        ("total_qr", "DECIMAL DEFAULT '0.00'"),
+        ("total_avoir", "DECIMAL DEFAULT '0.00'"),
+        ("total_arrondi_cash", "DECIMAL DEFAULT '0.00'")
+    ):
         if col not in existantes:
             cursor.execute(f"ALTER TABLE Clotures_Caisse ADD COLUMN {col} {ddl}")
 
@@ -1299,7 +1425,7 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
         hash_prec = last_row[0] if last_row and last_row[0] else "GENESIS_Z_00000000000000000000000000000000"
 
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        now_utc = datetime.datetime.utcnow().isoformat() + "Z"
+        now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         # L'écart caisse compare le comptage PHYSIQUE COMPLET du tiroir (billets + pièces,
         # fond initial inclus) au théorique attendu (fond initial + ventes espèces du jour
@@ -1319,21 +1445,33 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
             bilan["total_tvac"], bilan["total_especes"], bilan["total_carte"]
         )
 
+        tot_arrondi = Decimal(str(bilan.get("total_arrondi_cash", "0.00")))
         c.execute("""
             INSERT INTO Clotures_Caisse (
                 date_cloture, caisse_id, total_ventes_tvac, total_htva, total_tva,
                 total_especes, total_carte, total_remises, total_tickets,
                 fond_caisse_reel, ecart, vendeur, hash_precedent, current_hash, signature, created_at_utc,
-                periode_jusqu_au, total_qr, total_avoir
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                periode_jusqu_au, total_qr, total_avoir, total_arrondi_cash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             now_str, caisse_id, float(bilan["total_tvac"]), float(bilan["total_htva"]), float(bilan["total_tva"]),
             float(bilan["total_especes"]), float(bilan["total_carte"]), float(bilan["total_remises"]),
             bilan["nb_tickets"], float(fond_reel_dec), float(ecart), vendeur,
             hash_prec, curr_hash, curr_hash, now_utc, jusqu_au,
-            float(bilan["total_qr"]), float(bilan["total_avoir"])
+            float(bilan["total_qr"]), float(bilan["total_avoir"]), float(tot_arrondi)
         ))
         z_id = c.lastrowid
+
+        # Clôture formelle de la session de caisse — UNIQUEMENT lorsque ce Z couvre la journée
+        # en cours. Un Z de rattrapage sur un jour antérieur (clôture séquentielle jour par jour)
+        # ne doit PAS fermer la session vivante : sinon le fond de caisse du matin disparaît pour
+        # tous les jours suivants et le théorique espèces du Z suivant est faussé.
+        if jusqu_au is None or str(jusqu_au) >= datetime.date.today().isoformat():
+            c.execute("""
+                UPDATE Sessions_Caisse 
+                SET date_cloture = ?, montant_theorique_soir = ?, montant_compté_soir = ?, ecart_caisse = ?
+                WHERE date_cloture IS NULL
+            """, (now_str, float(theorique_especes), float(fond_reel_dec), float(ecart)))
 
         # Marquage atomique (même transaction que l'INSERT ci-dessus) des tickets et
         # mouvements de caisse inclus dans ce Z, pour empêcher qu'un Z ultérieur (sur
@@ -1357,7 +1495,8 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
             "total_tvac": float(bilan["total_tvac"]),
             "nb_tickets": bilan["nb_tickets"],
             "jusqu_au": jusqu_au,
-            "ecart": float(ecart)
+            "ecart": float(ecart),
+            "total_arrondi_cash": float(tot_arrondi)
         }
     finally:
         if should_close:

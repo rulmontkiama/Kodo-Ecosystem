@@ -3,5 +3,5 @@
 # Utilise Python 3.12 (avec Tk 9.0 fonctionnel) au lieu du Python 3.9 des CommandLineTools
 
 cd "$(dirname "$0")"
-echo "🚀 Démarrage de L'ADRESSE B POS..."
-python3.12 main_app.py
+echo "🚀 Démarrage de Kōdo POS v2.0..."
+python3.12 launch_app.py

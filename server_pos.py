@@ -13,9 +13,20 @@ import sqlite3
 import subprocess
 import time
 import datetime
+import ipaddress
+import socket
+import logging
+import threading
 from decimal import Decimal
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
+
+logger = logging.getLogger("kodo.server")
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("[SERVER] %(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
 
 # Ajout du dossier courant au path Python
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +40,7 @@ import pdf_generator
 import ticket_printer
 
 from kodo_core.api.app import kodo_app
+from kodo_core.config import ShopConfig
 
 # Initialisation de la base de données au démarrage
 initialiser_db()
@@ -119,13 +131,94 @@ def json_serial(obj):
     return str(obj)
 
 
+# ---------------------------------------------------------------------------------------------
+# Sécurité réseau de l'API locale (audit technique du 20/09/2026, point C1)
+# L'API n'a pas encore d'authentification : elle ne doit répondre qu'aux pages servies par ce poste.
+#  1. Écoute sur 127.0.0.1 (ShopConfig.get_host, surchargeable par la variable KODO_HOST).
+#  2. En-tête Host : tout nom de domaine autre que « localhost » est refusé. Sans cela, un site piégé
+#     qui fait pointer son propre nom vers 127.0.0.1 (« DNS rebinding ») devient « même origine » que
+#     l'API et peut lire ses réponses, malgré l'écoute locale et le CORS restreint.
+#  3. CORS limité aux pages locales, et refus des requêtes venues d'un autre site (Sec-Fetch-Site,
+#     Origin) : un POST « simple » part sans preflight, CORS seul n'empêche donc pas les écritures.
+# ---------------------------------------------------------------------------------------------
+HOTES_LOCAUX = frozenset({"localhost", "127.0.0.1", "::1"})
+METHODES_ECRITURE = frozenset({"POST", "PUT", "DELETE"})
+
+
+def _nom_hote(valeur) -> str:
+    """« localhost:8765 » -> « localhost » ; « [::1]:8765 » -> « ::1 »."""
+    valeur = str(valeur or "").strip().lower()
+    if valeur.startswith("["):
+        return valeur[1:valeur.find("]")] if "]" in valeur else valeur[1:]
+    if valeur.count(":") == 1:
+        valeur = valeur.split(":", 1)[0]
+    return valeur.rstrip(".")
+
+
+def hote_autorise(entete_host) -> bool:
+    """Vrai si l'en-tête Host désigne ce poste : « localhost » ou une adresse IP littérale.
+    Une IP ne peut pas servir au DNS rebinding (qui repose sur un nom de domaine) ; l'accepter garde
+    un écran distant fonctionnel si KODO_HOST ouvre un jour l'écoute au réseau local.
+    Sans en-tête Host (client non navigateur, ex. urllib sans Host), la requête est acceptée."""
+    if entete_host is None or not str(entete_host).strip():
+        return True
+    nom = _nom_hote(entete_host)
+    if nom in HOTES_LOCAUX:
+        return True
+    try:
+        ipaddress.ip_address(nom)
+        return True
+    except ValueError:
+        return False
+
+
+def origine_autorisee(origin, entete_host=None) -> bool:
+    """Vrai si la page à l'origine de la requête est servie par ce poste : localhost / 127.0.0.1
+    quel que soit le port (l'app sur 8765, le serveur Vite de développement sur 3000), ou ce serveur
+    lui-même sous l'adresse de l'en-tête Host (même origine)."""
+    if not origin or str(origin).strip().lower() == "null":
+        return False
+    try:
+        parsed = urlparse(str(origin).strip())
+        nom = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or not nom:
+        return False
+    if nom in HOTES_LOCAUX:
+        return True
+    return bool(entete_host) and parsed.netloc.lower() == str(entete_host).strip().lower()
+
+
 class POSRequestHandler(BaseHTTPRequestHandler):
     """Gestionnaire de requêtes HTTP déléguant à la couche kodo_core API REST."""
 
     def _set_cors_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        # Plus de « * » : seules les pages servies par ce poste peuvent lire les réponses (audit C1).
+        # En production l'interface est servie par ce serveur (même origine) : l'en-tête ne sert qu'au
+        # serveur Vite de développement (http://localhost:3000).
+        origin = self.headers.get('Origin')
+        if origin and origine_autorisee(origin, self.headers.get('Host')):
+            self.send_header('Access-Control-Allow-Origin', origin)
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.send_header('Vary', 'Origin')
+
+    def _requete_refusee(self, method: str) -> bool:
+        """Répond 403 et retourne True si la requête ne vient pas d'une page servie par ce poste."""
+        host = self.headers.get('Host')
+        if not hote_autorise(host):
+            self._send_error("Hôte non autorisé : l'API Kōdo POS n'est accessible que depuis ce poste.", 403)
+            return True
+        chemin = urlparse(self.path).path or ''
+        if chemin.startswith('/api/') and (self.headers.get('Sec-Fetch-Site') or '').lower() == 'cross-site':
+            self._send_error("Requête provenant d'un autre site refusée.", 403)
+            return True
+        origin = self.headers.get('Origin')
+        if method in METHODES_ECRITURE and origin is not None and not origine_autorisee(origin, host):
+            self._send_error("Origine non autorisée.", 403)
+            return True
+        return False
 
     def _send_json(self, data, code=200):
         try:
@@ -150,13 +243,18 @@ class POSRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content_bytes)
 
-    def _send_error(self, message, code=400):
-        self._send_json({"error": message}, code)
+    def _send_error(self, message, code=400, error_code="ERROR"):
+        self._send_json({"success": False, "error": message, "code": error_code}, code)
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self._set_cors_headers()
-        self.end_headers()
+        try:
+            if self._requete_refusee("OPTIONS"):
+                return
+            self.send_response(200)
+            self._set_cors_headers()
+            self.end_headers()
+        except Exception as ex:
+            logger.exception(f"Erreur OPTIONS {self.path}: {ex}")
 
     def _dispatch_to_kodo_core(self, method: str):
         parsed = urlparse(self.path)
@@ -194,24 +292,48 @@ class POSRequestHandler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        if self.path.startswith("/api/"):
-            if self._dispatch_to_kodo_core("GET"):
+        try:
+            if self._requete_refusee("GET"):
                 return
+            if self.path.startswith("/api/"):
+                if self._dispatch_to_kodo_core("GET"):
+                    return
 
-        parsed = urlparse(self.path)
-        self._serve_static(parsed.path)
+            parsed = urlparse(self.path)
+            self._serve_static(parsed.path)
+        except Exception as ex:
+            logger.exception(f"Erreur non gérée GET {self.path}: {ex}")
+            self._send_error(f"Erreur serveur interne : {ex}", 500, "INTERNAL_SERVER_ERROR")
 
     def do_POST(self):
-        if not self._dispatch_to_kodo_core("POST"):
-            self._send_error("Route API introuvable", 404)
+        try:
+            if self._requete_refusee("POST"):
+                return
+            if not self._dispatch_to_kodo_core("POST"):
+                self._send_error("Route API introuvable", 404, "NOT_FOUND")
+        except Exception as ex:
+            logger.exception(f"Erreur non gérée POST {self.path}: {ex}")
+            self._send_error(f"Erreur serveur interne : {ex}", 500, "INTERNAL_SERVER_ERROR")
 
     def do_PUT(self):
-        if not self._dispatch_to_kodo_core("PUT"):
-            self._send_error("Route API introuvable", 404)
+        try:
+            if self._requete_refusee("PUT"):
+                return
+            if not self._dispatch_to_kodo_core("PUT"):
+                self._send_error("Route API introuvable", 404, "NOT_FOUND")
+        except Exception as ex:
+            logger.exception(f"Erreur non gérée PUT {self.path}: {ex}")
+            self._send_error(f"Erreur serveur interne : {ex}", 500, "INTERNAL_SERVER_ERROR")
 
     def do_DELETE(self):
-        if not self._dispatch_to_kodo_core("DELETE"):
-            self._send_error("Route API introuvable", 404)
+        try:
+            if self._requete_refusee("DELETE"):
+                return
+            if not self._dispatch_to_kodo_core("DELETE"):
+                self._send_error("Route API introuvable", 404, "NOT_FOUND")
+        except Exception as ex:
+            logger.exception(f"Erreur non gérée DELETE {self.path}: {ex}")
+            self._send_error(f"Erreur serveur interne : {ex}", 500, "INTERNAL_SERVER_ERROR")
 
     def _serve_static(self, path):
         dist_dir = get_dist_dir()
@@ -263,8 +385,56 @@ class POSRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
-class ReusableHTTPServer(HTTPServer):
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """Serveur HTTP multi-threadé ultra-réactif avec réutilisation d'adresse et threads démons."""
     allow_reuse_address = True
+    daemon_threads = True
+
+# Alias de rétrocompatibilité ascendante
+ReusableHTTPServer = ReusableThreadingHTTPServer
+
+
+# Instance de serveur active, exposée pour permettre au thread principal d'installer les
+# gestionnaires de signaux : signal.signal() lève ValueError hors du thread principal, et
+# run_server s'exécute dans un thread démon (launch_app.py). Sans cela, le checkpoint WAL
+# de fermeture ne s'exécutait jamais dans l'application réellement livrée.
+_SERVEUR_ACTIF = None
+
+
+def _construire_shutdown_handler(server):
+    def _shutdown_handler(signum, frame):
+        sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        print(f"\n🛑 [KODO POS SERVER] Signal {sig_name} reçu. Démarrage de l'arrêt gracieux...")
+        try:
+            conn = get_connection()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.close()
+            print("💾 [KODO POS SERVER] Journal WAL vérifié et vidé (TRUNCATE).")
+        except Exception as ex:
+            print(f"⚠️ [KODO POS SERVER] Erreur checkpoint WAL : {ex}")
+
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    return _shutdown_handler
+
+
+def installer_arret_gracieux() -> bool:
+    """
+    Installe SIGINT/SIGTERM sur le serveur actif. À appeler depuis le THREAD PRINCIPAL.
+    Retourne True si les gestionnaires sont effectivement en place.
+    """
+    if _SERVEUR_ACTIF is None:
+        print("⚠️ [KODO POS SERVER] Arrêt gracieux non installé : aucun serveur actif.")
+        return False
+    try:
+        signal.signal(signal.SIGINT, _construire_shutdown_handler(_SERVEUR_ACTIF))
+        signal.signal(signal.SIGTERM, _construire_shutdown_handler(_SERVEUR_ACTIF))
+        return True
+    except (ValueError, AttributeError) as e:
+        print(f"⚠️ [KODO POS SERVER] Arrêt gracieux indisponible ({e}) : "
+              "le journal WAL ne sera pas replié à la fermeture.")
+        return False
+
 
 def _kodo_server_answers(port: int, timeout: float = 2.0) -> bool:
     """Vrai si un serveur Kōdo POS répond déjà sur ce port (autre instance en cours d'utilisation)."""
@@ -292,20 +462,48 @@ def _free_port_from_zombie(port: int) -> None:
                 pass
 
 
-def run_server(port=8765, busy_wait=8.0):
+def _port_deja_ecoute(port: int, timeout: float = 0.5) -> bool:
+    """Vrai si un processus écoute déjà ce port en local (sur 127.0.0.1 ou 0.0.0.0).
+    Depuis l'écoute sur 127.0.0.1, l'échec du bind ne suffit plus à détecter une autre instance :
+    sous macOS (sémantique BSD de SO_REUSEADDR), lier 127.0.0.1:port réussit même si une version
+    précédente écoute encore sur 0.0.0.0:port ; sous Windows, SO_REUSEADDR laisse même lier deux fois
+    la même adresse. Deux serveurs sur la même base pourraient alors forker le chaînage des tickets."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except (TimeoutError, socket.timeout):
+        # Si la connexion time out, le port est OCCUPÉ par un processus qui ne répond pas
+        return True
+    except OSError:
+        pass
+
+    # Vérification de secours via lsof (macOS / Linux)
+    try:
+        out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=2).stdout
+        for pid in out.split():
+            if pid.isdigit() and int(pid) != os.getpid():
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def run_server(port=8765, busy_wait=8.0, host=None):
     """
-    Démarre le serveur. Si le port est déjà pris, on ne tue JAMAIS d'emblée l'occupant (avant, un second
-    lancement arrêtait de force l'instance en cours d'utilisation, puis plantait : plus aucun serveur) :
-    1. on patiente `busy_wait` s (l'ancienne instance qui se ferme, ex. redémarrage après une mise à jour) ;
-    2. si un serveur Kōdo POS répond toujours, c'est une autre instance vivante : on la réutilise ;
-    3. s'il ne répond pas (processus figé), on le libère et on prend sa place.
+    Démarre le serveur multi-threadé Kōdo POS.
+    Gère la libération des ports orphelins et le graceful shutdown.
     """
+    host = host or ShopConfig.get_host()
     httpd = None
     deadline = time.monotonic() + busy_wait
     warned = False
     while True:
         try:
-            httpd = ReusableHTTPServer(('0.0.0.0', port), POSRequestHandler)
+            if _port_deja_ecoute(port):
+                raise OSError(f"port {port} déjà en écoute par un autre processus")
+            httpd = ReusableThreadingHTTPServer((host, port), POSRequestHandler)
             break
         except OSError as e:
             if not warned:
@@ -323,12 +521,29 @@ def run_server(port=8765, busy_wait=8.0):
         _free_port_from_zombie(port)
         time.sleep(0.5)
         try:
-            httpd = ReusableHTTPServer(('0.0.0.0', port), POSRequestHandler)
+            httpd = ReusableThreadingHTTPServer((host, port), POSRequestHandler)
         except OSError as ex:
             print(f"❌ [KODO POS SERVER] Échec: {ex}")
             return
 
-    print(f"🚀 [KODO POS SERVER] REST API kodo_core & Web App en ligne sur http://localhost:{port}")
+    global _SERVEUR_ACTIF
+    _SERVEUR_ACTIF = httpd
+    # L'installation des signaux est délibérément faite par le THREAD PRINCIPAL
+    # (launch_app.open_native_window, après wait_for_server). L'appeler ici, depuis le
+    # thread démon du serveur, échouerait systématiquement et afficherait au commerçant
+    # un avertissement alarmant et faux à chaque démarrage.
+    try:
+        from kodo_core.db.sanctuary_shield import SanctuaryShield
+        import database_manager
+        _s_conn = database_manager.get_connection()
+        try:
+            _fp = SanctuaryShield.compute_sanctuary_fingerprint(_s_conn)
+            print(f"🛡️ [SANCTUARY SHIELD] Stock & Magasin sanctuarisés : {_fp['products_count']} produits, {_fp['total_stock_units']} pièces en stock.")
+        finally:
+            _s_conn.close()
+    except Exception as _se:
+        pass
+    print(f"🚀 [KODO POS SERVER Multi-Thread v2.0.0] REST API kodo_core & Web App en ligne sur http://localhost:{port} (écoute {host})")
     httpd.serve_forever()
 
 

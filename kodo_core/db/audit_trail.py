@@ -1,6 +1,13 @@
 """
-kodo_core.db.audit_trail - Chaîne cryptographique SHA-256 et traçabilité inaltérable NF525/LNE.
-Garantit l'infalsifiabilité des transactions, journaux de caisse, clôtures Z et événements système.
+kodo_core.db.audit_trail — Chaîne SHA-256 de détection de corruption et piste d'audit.
+Portée exacte de ce que ce module établit, et de ce qu'il n'établit pas : il détecte
+de façon fiable toute modification, suppression ou réordonnancement d'un maillon
+(tickets, journal de caisse, clôtures Z, événements système), accidentel comme délibéré,
+dès lors que l'auteur n'a pas recalculé la chaîne. Il ne comporte aucun secret : un tiers
+disposant du fichier .db peut recalculer l'intégralité du chaînage. Ce module ne constitue
+donc PAS un dispositif d'inaltérabilité opposable au sens d'une certification NF525/LNE,
+et ne doit être présenté comme tel ni dans l'application, ni dans la documentation
+commerciale, ni dans les commentaires de ce dépôt.
 """
 
 import hashlib
@@ -12,23 +19,19 @@ def compute_sha256(data_string: str) -> str:
     """Calcule le hachage SHA-256 d'une chaîne UTF-8."""
     return hashlib.sha256(data_string.encode('utf-8')).hexdigest()
 
-def calculer_hash_transaction(previous_hash, timestamp, montant_total, caisse_id="POS-01", details_articles="") -> str:
-    """
-    Calcule le hash SHA-256 inaltérable d'une transaction de vente :
-    previous_hash | timestamp | montant_total | caisse_id | details_articles
-    """
-    prev_str = str(previous_hash or "GENESIS_BLOCK_KODO_POS")
-    ts_str = str(timestamp or "")
-    montant_str = f"{Decimal(str(montant_total)):.2f}"
-    caisse_str = str(caisse_id or "POS-01")
-    details_str = str(details_articles or "")
-
-    data_to_hash = f"{prev_str}|{ts_str}|{montant_str}|{caisse_str}|{details_str}"
-    return compute_sha256(data_to_hash)
+# Source de vérité UNIQUE de la primitive de chaînage fiscale. Une seconde implémentation
+# vivait ici : signataire et vérificateur pouvaient diverger sans qu'aucun test ne le voie,
+# et la chaîne de toutes les boutiques devenait invérifiable à la première évolution.
+from database_manager import (
+    calculer_hash_transaction,
+    HASH_ALGO_V1,
+    HASH_ALGO_V2,
+    HASH_ALGO_COURANT,
+)
 
 def signer_ticket(cursor, numero_ticket, total_tvac, date_heure, caisse_id="POS-01", details_articles=""):
     """
-    Génère une signature cryptographique inaltérable (Audit Trail) pour un ticket de vente.
+    Génère une empreinte chaînée de détection de corruption (Audit Trail) pour un ticket de vente.
     Retourne le tuple (current_hash, previous_hash).
     """
     cursor.execute("""
@@ -40,7 +43,15 @@ def signer_ticket(cursor, numero_ticket, total_tvac, date_heure, caisse_id="POS-
     row = cursor.fetchone()
     previous_hash = row[0] if (row and row[0]) else "GENESIS_BLOCK_KODO_POS"
 
-    current_hash = calculer_hash_transaction(previous_hash, date_heure, total_tvac, caisse_id, details_articles)
+    current_hash = calculer_hash_transaction(
+        previous_hash,
+        date_heure,
+        total_tvac,
+        caisse_id,
+        details_articles,
+        numero_ticket=numero_ticket,
+        algo=HASH_ALGO_COURANT,
+    )
     return current_hash, previous_hash
 
 def signer_ledger(cursor, type_mouvement, montant, methode, reference, date_heure):
@@ -55,7 +66,7 @@ def signer_ledger(cursor, type_mouvement, montant, methode, reference, date_heur
     return signature, hash_precedent
 
 def signer_rapport_z(cursor, date_z, donnees_json):
-    """Génère une signature cryptographique pour un rapport de clôture comptable Z (NF525)."""
+    """Génère une signature cryptographique pour un rapport de clôture comptable Z."""
     cursor.execute("SELECT signature FROM Rapports_Z WHERE signature IS NOT NULL ORDER BY id DESC LIMIT 1")
     row = cursor.fetchone()
     hash_precedent = row[0] if (row and row[0]) else "GENESIS_Z_KODO_POS"
@@ -65,7 +76,7 @@ def signer_rapport_z(cursor, date_z, donnees_json):
     return signature, hash_precedent
 
 def calculer_hash_cloture(hash_prec: str, date_cloture: str, caisse_id: str, total_tvac, total_especes, total_carte) -> str:
-    """Calcule le hash SHA-256 scellant une clôture de caisse Z (NF525/LNE)."""
+    """Calcule le hash SHA-256 scellant une clôture de caisse Z (détection de corruption)."""
     h_prec = hash_prec or "GENESIS_Z_00000000000000000000000000000000"
     tvac_str = f"{Decimal(str(total_tvac)):.2f}"
     esp_str = f"{Decimal(str(total_especes)):.2f}"
@@ -76,8 +87,8 @@ def calculer_hash_cloture(hash_prec: str, date_cloture: str, caisse_id: str, tot
 
 def record_audit_event(conn_or_cursor, event_type: str, entity_name: str, entity_id: str = "", user_name: str = "", action: str = "", details: str = ""):
     """
-    Enregistre un événement de sécurité inaltérable dans la table Audit_Trail.
-    Conserve la continuité du chaînage SHA-256.
+    Enregistre un événement de sécurité dans la table Audit_Trail, scellé par chaînage SHA-256
+    (détection de corruption — voir la portée décrite en tête de module).
     """
     if hasattr(conn_or_cursor, "cursor"):
         cursor = conn_or_cursor.cursor()
@@ -165,9 +176,17 @@ def verify_database_integrity(conn=None) -> bool:
 
     try:
         c = safe_conn.cursor()
-        c.execute("""
-            SELECT id, numero_ticket, date_heure, total_tvac, caisse_id, details_articles, 
-                   previous_hash, current_hash, signature, hash_precedent 
+        c.execute("PRAGMA table_info(Tickets)")
+        available_cols = {row[1] for row in c.fetchall()}
+
+        caisse_expr = "caisse_id" if "caisse_id" in available_cols else "'POS-01' AS caisse_id"
+        details_expr = "details_articles" if "details_articles" in available_cols else "'' AS details_articles"
+        prev_hash_expr = "previous_hash" if "previous_hash" in available_cols else "NULL AS previous_hash"
+        curr_hash_expr = "current_hash" if "current_hash" in available_cols else "NULL AS current_hash"
+
+        c.execute(f"""
+            SELECT id, numero_ticket, date_heure, total_tvac, {caisse_expr}, {details_expr}, 
+                   {prev_hash_expr}, {curr_hash_expr}, signature, hash_precedent 
             FROM Tickets ORDER BY id ASC
         """)
         rows = c.fetchall()
@@ -203,21 +222,41 @@ def verify_database_integrity(conn=None) -> bool:
             caisse_val = caisse if caisse is not None else "POS-01"
             details_val = details if details is not None else ""
 
-            computed_hash = calculer_hash_transaction(actuel_prev, dt, total, caisse_val, details_val)
+            # Algorithme courant (numéro de ticket scellé).
+            computed_hash = calculer_hash_transaction(
+                actuel_prev,
+                dt,
+                total,
+                caisse_val,
+                details_val,
+                numero_ticket=num,
+                algo=HASH_ALGO_V2,
+            )
 
             if actuel_curr != computed_hash:
-                # Vérification rétrocompatibilité ancienne version de hachage
+                # Rétrocompatibilité : les maillons antérieurs au scellement du numéro
+                # restent légitimes et ne doivent jamais être signalés comme falsifiés.
+                candidats = [
+                    calculer_hash_transaction(
+                        actuel_prev,
+                        dt,
+                        total,
+                        caisse_val,
+                        details_val,
+                        algo=HASH_ALGO_V1,
+                    )
+                ]
                 dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, 'strftime') else str(dt)
                 total_str = f"{Decimal(str(total)):.2f}"
-                legacy_data = f"{actuel_prev}|{num}|{total_str}|{dt_str}"
-                legacy_hash = compute_sha256(legacy_data)
+                candidats.append(compute_sha256(f"{actuel_prev}|{num}|{total_str}|{dt_str}"))
 
-                if actuel_curr != legacy_hash:
-                    msg = f"Falsification de données détectée au ticket ID {t_id} ({num})! Hash enregistré: {actuel_curr}, Hash calculé: {computed_hash}"
+                if actuel_curr in candidats:
+                    computed_hash = actuel_curr
+                else:
+                    msg = (f"Falsification de données détectée au ticket ID {t_id} ({num})! "
+                           f"Hash enregistré: {actuel_curr}, Hash calculé: {computed_hash}")
                     print(f"[ALERTE] {msg}")
                     erreurs.append(msg)
-                else:
-                    computed_hash = legacy_hash
 
             last_hash = actuel_curr
 
@@ -233,13 +272,6 @@ def verify_database_integrity(conn=None) -> bool:
 
 def audit_complet(conn=None) -> dict:
     """Effectue un audit cryptographique complet de toutes les tables scellées."""
-    def hash_ticket(r):
-        dt = r['date_heure']
-        dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, 'strftime') else str(dt)
-        total_str = f"{Decimal(str(r['total_tvac'])):.2f}"
-        data = f"{r.get('hash_precedent') or r.get('previous_hash')}|{r['numero_ticket']}|{total_str}|{dt_str}"
-        return compute_sha256(data)
-
     def hash_ledger(r):
         dt = r['date_heure']
         dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, 'strftime') else str(dt)
@@ -251,7 +283,7 @@ def audit_complet(conn=None) -> dict:
         data = f"{r['hash_precedent']}|{r['date']}|{r['donnees_json']}"
         return compute_sha256(data)
 
-    print("\nLancement de l'Audit Trail NF525 / LNE...\n")
+    print("\nLancement de l'Audit de Traçabilité & Chaînage SHA-256...\n")
     report = {
         "tickets_ok": False,
         "ledger_ok": False,
@@ -273,9 +305,11 @@ def audit_complet(conn=None) -> dict:
     report["conforme"] = (report["tickets_ok"] and report["ledger_ok"] and report["z_ok"] and report["audit_ok"])
 
     if report["conforme"]:
-        print("\n=> RÉSULTAT AUDIT: CONFORME NF525/LNE. Aucune altération détectée.")
+        print("\n=> RÉSULTAT AUDIT : chaînage intact. Aucune altération détectée sur les "
+              "tables scellées (tickets, journal de caisse, clôtures Z, piste d'audit).")
     else:
-        print("\n=> RÉSULTAT AUDIT: NON CONFORME. Altération ou corruption détectée.")
+        print("\n=> RÉSULTAT AUDIT : ALTÉRATION OU CORRUPTION DÉTECTÉE. "
+              "Ne pas poursuivre l'exploitation avant analyse du rapport ci-dessus.")
 
     return report
 

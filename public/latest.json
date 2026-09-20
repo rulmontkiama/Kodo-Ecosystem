@@ -1,18 +1,14 @@
 {
-  "latestVersion": "1.0.73",
-  "latest_version": "1.0.73",
-  "version": "1.0.73",
+  "latestVersion": "2.0.0",
+  "latest_version": "2.0.0",
+  "version": "2.0.0",
   "releaseDate": "2026-09-20",
   "downloadUrl": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "download_url": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "dmgUrl": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "dmg_url": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.73.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v1.0.73.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.0.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.0.zip",
   "has_update": true,
-  "changelog": "v1.0.73 :\n• Ventes : correction du refus « Article introuvable en base » et des ventes enregistrées sur un autre article. La taille choisie est respectée et le bon stock est décompté.\n• Import Shopify : réimporter le catalogue conserve les articles, leur TVA, leur marque et leur seuil d'alerte, et importe aussi les catalogues de plus de 250 produits.\n• Réglages : modifier le fond de caisse ou le seuil d'alerte n'efface plus l'adresse, le n° BCE, le n° de TVA ni l'adresse de l'imprimante ; un fond de caisse à 0 € est enregistré.\n• Démarrage : ouvrir l'application une seconde fois n'arrête plus le serveur en cours, et l'interface affichée est toujours la plus récente.",
-  "backendPatch": {
-    "version": "1.0.73",
-    "url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/backend_v1.0.73.zip"
-  }
+  "changelog": "v2.0.0 :\n• Clôture Z Séquentielle Rétroactive : rattrapage automatique jour par jour des clôtures en attente sans altérer la session active.\n• Arrondi Légal Belge à 5 centimes (Loi du 01/12/2019) : neutralité fiscale TVA, calcul exact sur la part espèces en paiement mixte et impression du montant arrondi.\n• Intégrité des Données : scellement SHA-256 des tickets incluant désormais le numéro de ticket, et détection des altérations du fichier de données.\n• Sauvegarde Automatique : copie intégrale et vérifiée de la base à chaque démarrage, conservée en local sur votre Mac (10 dernières sauvegardes).\n• Gestion du Stock Concurrente : sérialisation des écritures, décrément conditionnel anti-stock négatif et traçabilité pour audit.\n• Impression : la vente est toujours enregistrée même imprimante éteinte, et la caisse vous prévient si le ticket n'est pas sorti.\n• Interface : écran de retours et remboursements optimisé, fond de caisse personnalisable persistant."
 }

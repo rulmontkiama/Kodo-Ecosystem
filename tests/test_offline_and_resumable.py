@@ -135,10 +135,10 @@ class TestOfflineAndResumable(unittest.TestCase):
         cursor.execute("SELECT COUNT(*) FROM Tickets WHERE sync_status=1")
         self.assertEqual(cursor.fetchone()[0], 2)
 
-        # - Le stock est tombé sous 0 (-1)
+        # - Le stock est plafonné à 0 (Correctif Claude : anti-stock négatif)
         cursor.execute("SELECT quantite_actuelle, requires_stock_audit FROM Stocks WHERE id=?", (stock_id,))
         s_qte, s_audit = cursor.fetchone()
-        self.assertEqual(s_qte, -1)
+        self.assertEqual(s_qte, 0)
         self.assertEqual(s_audit, 1)  # Marqué pour audit manuel
 
         # - Le produit est également marqué pour audit

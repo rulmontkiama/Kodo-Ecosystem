@@ -135,13 +135,26 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             # au frontend (connexion coupée au lieu d'un message d'erreur clair).
             return 400, {"error": str(ve)}
 
+        print_status = "SKIPPED"
+        job_id = None
         if data.get('printReceipt', False):
             try:
-                ticket_printer.imprimer_ticket_caisse(res["numero_ticket"])
+                from kodo_core.hardware.print_worker import get_print_worker
+                worker = get_print_worker()
+                job = worker.enqueue_ticket_print(res["numero_ticket"])
+                print_status = "ENQUEUED"
+                job_id = job.job_id
             except Exception as pe:
-                print(f"[IMPRESSION WARNING] {pe}")
+                print(f"[IMPRESSION ENQUEUE WARNING] {pe}")
+                print_status = "ERROR"
 
-        return 200, {"success": True, "receiptNumber": res["numero_ticket"], "ticket": res}
+        return 200, {
+            "success": True,
+            "receiptNumber": res["numero_ticket"],
+            "ticket": res,
+            "print_status": print_status,
+            "print_job_id": job_id
+        }
 
     # 3. Recherche d'un ticket par numéro, avec quantité restant remboursable par ligne
     elif method == "GET" and path == "/api/sales/lookup":
@@ -180,7 +193,7 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             return 400, {"error": str(ve)}
         return 200, res
 
-    # 3bis. Réimpression d'un ticket existant
+    # 3ter. Réimpression d'un ticket existant (asynchrone via PrintWorker)
     elif method == "POST" and path == "/api/sales/reprint":
         numero_ticket = data.get("receiptNumber")
         if not numero_ticket:
@@ -197,12 +210,39 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             numero_ticket = row[0]
 
         try:
-            ticket_printer.imprimer_ticket_caisse(numero_ticket)
+            from kodo_core.hardware.print_worker import get_print_worker
+            worker = get_print_worker()
+            job = worker.enqueue_ticket_print(numero_ticket)
+            return 200, {"success": True, "receiptNumber": numero_ticket, "print_job_id": job.job_id, "status": "ENQUEUED"}
         except Exception as pe:
-            print(f"[IMPRESSION WARNING] {pe}")
+            print(f"[IMPRESSION REPRINT WARNING] {pe}")
             return 500, {"success": False, "error": str(pe)}
 
-        return 200, {"success": True, "receiptNumber": numero_ticket}
+    # 3quater. État du spouleur et circuit breaker imprimante
+    elif method == "GET" and path == "/api/printer/status":
+        from kodo_core.hardware.print_worker import get_print_worker
+        worker = get_print_worker()
+        return 200, worker.get_circuit_status()
+
+    # 3quinquies. Liste des tâches d'impression récentes
+    elif method == "GET" and path == "/api/printer/jobs":
+        from kodo_core.hardware.print_worker import get_print_worker
+        worker = get_print_worker()
+        return 200, {"jobs": worker.get_recent_jobs()}
+
+    # 3sexies. État de sanctuarisation du stock et des données magasin
+    elif method == "GET" and path == "/api/sanctuary/status":
+        from kodo_core.db.sanctuary_shield import SanctuaryShield
+        conn = database_manager.get_connection()
+        try:
+            fp = SanctuaryShield.compute_sanctuary_fingerprint(conn)
+            return 200, {
+                "success": True,
+                "sanctuary": fp,
+                "status": "PROTECTED"
+            }
+        finally:
+            conn.close()
 
     # 4. Liste des paniers en attente
     elif method == "GET" and path == "/api/held-tickets":
@@ -292,6 +332,19 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             jusqu_au=jusqu_au
         )
         return 200, {"success": True, "cloture": result}
+
+    # 8bis. Clôture Z séquentielle automatique des journées antérieures en retard
+    elif method == "POST" and path == "/api/cloture-z/batch-pending":
+        vendeur = data.get('vendeur', 'Admin')
+        results = ZReportEngine.close_all_pending_days_sequentially(
+            caisse_id="POS-01",
+            vendeur=vendeur
+        )
+        return 200, {
+            "success": True,
+            "closed_days_count": len(results),
+            "reports": results
+        }
 
     # 9. Résumé du Z non clôturé (optionnellement limité à un jour : ?jusqu_au=AAAA-MM-JJ)
     elif method == "GET" and path == "/api/cloture-z/summary":

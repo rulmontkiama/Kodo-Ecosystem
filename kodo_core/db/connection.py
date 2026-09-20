@@ -60,12 +60,13 @@ class SafeConnection:
         self._apply_pragmas()
 
     def _apply_pragmas(self):
-        """Applique les pragmas SQLite de performance."""
+        """Applique les pragmas SQLite de performance et de cohérence relationnelle."""
         try:
             cur = self._conn.cursor()
             cur.execute("PRAGMA journal_mode=WAL")
             cur.execute("PRAGMA busy_timeout=5000")
             cur.execute("PRAGMA synchronous=NORMAL")
+            cur.execute("PRAGMA foreign_keys=ON")
             cur.execute("PRAGMA temp_store=MEMORY")
         except Exception:
             pass
@@ -107,6 +108,13 @@ class SafeConnection:
             self.commit()
         self.close()
 
+    @property
+    def in_transaction(self) -> bool:
+        return getattr(self._conn, "in_transaction", False)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
     def __del__(self):
         self.close()
 
@@ -117,11 +125,16 @@ def get_connection(db_path: str = None, conn: sqlite3.Connection = None) -> Safe
 @contextmanager
 def db_transaction(db_path: str = None, conn: sqlite3.Connection = None):
     """
-    Gestionnaire de contexte de transaction atomique.
+    Gestionnaire de contexte de transaction atomique avec réservation immédiate du verrou d'écriture (BEGIN IMMEDIATE).
     Valide (commit) automatiquement si aucune exception n'est levée, sinon annule (rollback).
     """
     connection = get_connection(db_path=db_path, conn=conn)
     try:
+        # Réservation immédiate du verrou d'écriture, sauf si l'appelant a déjà ouvert une
+        # transaction sur cette connexion : un BEGIN imbriqué lève OperationalError, et le
+        # rollback de ce gestionnaire annulerait alors les écritures en attente de l'appelant.
+        if not connection._conn.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
         cursor = connection.cursor()
         yield cursor
         connection.commit()

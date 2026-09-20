@@ -87,8 +87,16 @@ class TestKodoCore(unittest.TestCase):
         self.assertEqual(info["fingerprint"], hwid)
         self.assertIn("enabled_features", info)
 
-        success, msg = activate_license_key("KODO-TEST-KEY-123456")
-        self.assertTrue(success)
+        # Activation vérifiée hors ligne, de façon déterministe : l'ancien appel réseau visait
+        # /api/license/validate, route absente du site kodo-solutions-web ; il ne pouvait qu'échouer,
+        # ou déclencher une activation en production à chaque exécution de la CI. Hors ligne, seule
+        # la clé maître dérivée du HWID (ou la clé de démonstration) est acceptée.
+        from kodo_core.services import license as licence
+        with patch.object(licence, "validate_license_online", return_value=None):
+            cle_inconnue_acceptee, _ = activate_license_key("KODO-TEST-KEY-123456")
+            self.assertFalse(cle_inconnue_acceptee)
+            success, msg = activate_license_key(licence._expected_master_key(hwid))
+        self.assertTrue(success, msg)
 
     def test_shopify_sync_engine(self):
         """Vérifie les fonctions de synchronisation REST/GraphQL Shopify."""

@@ -111,13 +111,60 @@ class ZReportEngine:
 
             # Conversion des Decimals en floats pour la sérialisation
             for key in ["total_tvac", "total_htva", "total_tva", "total_remises", "total_especes",
-                        "total_carte", "total_qr", "total_avoir", "total_apports", "total_prelevements",
+                        "total_carte", "total_qr", "total_avoir", "total_arrondi_cash", "total_apports", "total_prelevements",
                         "regularisation_rendu", "ecart_reglements"]:
                 if key in bilan and isinstance(bilan[key], Decimal):
                     bilan[key] = float(bilan[key])
+                elif key not in bilan:
+                    bilan[key] = 0.0
+
+            # Indique si des journées passées (strictement antérieures à aujourd'hui) attendent une clôture
+            today_str = datetime.date.today().isoformat()
+            past_unclosed = [j for j in bilan.get("jours_en_attente", []) if j.get("jour", "") < today_str]
+            bilan["has_past_unclosed_days"] = len(past_unclosed) > 0
+            bilan["past_unclosed_count"] = len(past_unclosed)
+            bilan["past_unclosed_days"] = past_unclosed
 
             return bilan
 
+        finally:
+            if should_close and conn:
+                conn.close()
+
+    @classmethod
+    def close_all_pending_days_sequentially(
+        cls,
+        caisse_id: str = "POS-01",
+        vendeur: str = "Admin",
+        conn=None
+    ) -> List[Dict[str, Any]]:
+        """
+        Clôture séquentiellement (jour par jour, du plus ancien au plus récent) toutes les
+        journées passées (strictement antérieures à aujourd'hui) en attente de clôture.
+        Pour chaque journée passée, un Z certifié NF525 distinct est scellé avec sa date propre,
+        fond_caisse_reel=None (pas d'écart artificiel), préservant ainsi l'exactitude de l'historique.
+        """
+        should_close = False
+        if conn is None:
+            conn = get_connection()
+            should_close = True
+
+        try:
+            jours = lister_jours_non_clotures(caisse_id=caisse_id, conn=conn)
+            today_str = datetime.date.today().isoformat()
+            past_days = [j for j in jours if j["jour"] < today_str]
+            closed_reports = []
+            for p_day in past_days:
+                res = cls.close_z_report(
+                    caisse_id=caisse_id,
+                    fond_caisse_reel=None,
+                    fond_caisse_matin=0.0,
+                    vendeur=vendeur,
+                    conn=conn,
+                    jusqu_au=p_day["jour"]
+                )
+                closed_reports.append(res)
+            return closed_reports
         finally:
             if should_close and conn:
                 conn.close()
@@ -200,10 +247,14 @@ class ZReportEngine:
 
         try:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute("PRAGMA table_info(Clotures_Caisse)")
+            cols = [r[1] for r in cursor.fetchall()]
+            has_arrondi = "total_arrondi_cash" in cols
+
+            cursor.execute(f"""
                 SELECT id, date_cloture, caisse_id, total_ventes_tvac, total_htva, total_tva,
                        total_especes, total_carte, total_remises, total_tickets, fond_caisse_reel,
-                       ecart, vendeur, current_hash, signature, created_at_utc
+                       ecart, vendeur, current_hash, signature, created_at_utc{", COALESCE(total_arrondi_cash, 0.0)" if has_arrondi else ", 0.0"}
                 FROM Clotures_Caisse
                 ORDER BY id DESC
                 LIMIT ?
@@ -227,7 +278,8 @@ class ZReportEngine:
                     "ecart": float(r[11]),
                     "vendeur": r[12] or "Admin",
                     "hash": r[13] or r[14] or "",
-                    "created_at_utc": r[15] or ""
+                    "created_at_utc": r[15] or "",
+                    "total_arrondi_cash": float(r[16]) if len(r) > 16 else 0.0
                 })
 
             return reports
@@ -253,7 +305,7 @@ class ZReportEngine:
         fieldnames = [
             "id", "date_cloture", "caisse_id", "total_ventes_tvac", "total_htva",
             "total_tva", "total_especes", "total_carte", "total_remises", "total_tickets",
-            "fond_caisse_reel", "ecart", "vendeur", "hash"
+            "total_arrondi_cash", "fond_caisse_reel", "ecart", "vendeur", "hash"
         ]
 
         with open(output_path, "w", newline="", encoding="utf-8-sig") as csvfile:

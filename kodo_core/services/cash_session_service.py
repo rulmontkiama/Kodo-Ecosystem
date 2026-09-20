@@ -30,3 +30,31 @@ def set_fond_caisse_matin(cursor: sqlite3.Cursor, montant: str) -> None:
             "INSERT INTO Sessions_Caisse (fond_caisse_matin) VALUES (?)",
             (montant,),
         )
+
+
+def get_fond_caisse_matin(cursor: sqlite3.Cursor) -> float:
+    """Récupère le fond de caisse matinal actif ou configuré.
+    Priorité :
+    1. Session active (date_cloture IS NULL)
+    2. Parametres ('fond_caisse_matin')
+    3. 0.00 (aucun fond forcé arbitraire)
+    """
+    cursor.execute(
+        "SELECT fond_caisse_matin FROM Sessions_Caisse WHERE date_cloture IS NULL ORDER BY id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    if row and row[0] is not None:
+        try:
+            return float(row[0])
+        except (ValueError, TypeError):
+            pass
+
+    cursor.execute("SELECT valeur FROM Parametres WHERE cle='fond_caisse_matin'")
+    row_param = cursor.fetchone()
+    if row_param and row_param[0] is not None:
+        try:
+            return float(row_param[0])
+        except (ValueError, TypeError):
+            pass
+
+    return 0.0

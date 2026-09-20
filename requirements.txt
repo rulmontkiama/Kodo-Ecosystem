@@ -11,3 +11,4 @@ customtkinter
 packaging
 psutil
 urllib3
+pytest
