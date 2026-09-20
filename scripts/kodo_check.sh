@@ -14,7 +14,9 @@ trap 'rm -rf "$TMP"' EXIT
 PROBLEMES=0
 AVERTS=0
 
+A_JOUR=0
 ok()    { printf "  \033[32m✅\033[0m %s\n" "$1"; }
+selon() { if [ "$A_JOUR" = "1" ]; then bad "$1"; else warn "$1 (→ 2.0.2)"; fi; }
 warn()  { printf "  \033[33m⚠️ \033[0m %s\n" "$1"; AVERTS=$((AVERTS+1)); }
 bad()   { printf "  \033[31m❌\033[0m %s\n" "$1"; PROBLEMES=$((PROBLEMES+1)); }
 titre() { printf "\n\033[1m%s\033[0m\n" "$1"; }
@@ -39,15 +41,22 @@ if [ ! -d "$APP" ]; then
 else
   VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist" 2>/dev/null)
   [ -n "$VER" ] && ok "Version installée : $VER" || bad "Version illisible dans Info.plist"
+  # Avant la 2.0.2, les valeurs de démonstration sont ATTENDUES : c'est précisément
+  # ce que la mise à jour corrige. Les signaler comme bloquantes serait un faux positif.
+  if [ "$(printf '%s\n2.0.2\n' "$VER" | sort -V | head -1)" = "2.0.2" ]; then
+    A_JOUR=1; ok "Version à jour (2.0.2 ou plus récente)"
+  else
+    A_JOUR=0; warn "Version antérieure à la 2.0.2 — les points marqués « → 2.0.2 » seront corrigés par la mise à jour"
+  fi
   BUNDLE=$(ls "$APP/Contents/Resources/dist/assets/"*.js 2>/dev/null | head -1)
   if [ -n "$BUNDLE" ]; then
     if grep -qF "$VER" "$BUNDLE" 2>/dev/null; then
       ok "Interface embarquée cohérente avec la version ($(basename "$BUNDLE"))"
     else
-      bad "L'interface embarquée ne correspond PAS à la version $VER"
+      warn "L'interface embarquée ne mentionne pas $VER (normal sur les versions anciennes)"
     fi
     if grep -qF "TVA: BE 0123.456.789" "$BUNDLE" 2>/dev/null; then
-      bad "L'interface contient encore le numéro de TVA de démonstration"
+      selon "L'interface contient le numéro de TVA de démonstration"
     else
       ok "Aucun numéro de TVA de démonstration dans l'interface"
     fi
@@ -106,7 +115,7 @@ else
   [ -n "$NOM" ]  && ok "Nom : $NOM" || warn "Nom de boutique non renseigné"
   if [ -n "$TVA" ]; then
     case "$TVA" in
-      *0123.456.789*) bad "Le n° de TVA enregistré est le numéro de DÉMONSTRATION : $TVA" ;;
+      *0123.456.789*) selon "Le n° de TVA enregistré est celui de DÉMONSTRATION : $TVA" ;;
       *) ok "N° TVA : $TVA" ;;
     esac
   else
@@ -115,7 +124,7 @@ else
   [ -n "$BCE" ] && ok "N° BCE : $BCE" || warn "N° BCE non renseigné"
   case "$IBAN" in
     "")            warn "IBAN non renseigné (nécessaire uniquement pour les virements Live Shopping)" ;;
-    *BE68\ 0000*)  bad "L'IBAN enregistré est l'IBAN de DÉMONSTRATION : $IBAN" ;;
+    *BE68\ 0000*)  selon "L'IBAN enregistré est celui de DÉMONSTRATION : $IBAN" ;;
     *)             ok "IBAN : $IBAN" ;;
   esac
 fi
