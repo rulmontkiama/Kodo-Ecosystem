@@ -23,12 +23,15 @@ class TestDeleteAndUpdateTriggers(unittest.TestCase):
     def setUp(self):
         self.db_name = "test_triggers_qa.db"
         database_manager.DB_NAME = self.db_name
+        # Sans cette variable, park_cart/get_parked_carts ouvraient la base par défaut du poste, pas celle du test.
+        os.environ["KODO_DB_PATH"] = os.path.abspath(self.db_name)
         if os.path.exists(self.db_name):
             try: os.remove(self.db_name)
             except Exception: pass
         database_manager.initialiser_db()
 
     def tearDown(self):
+        os.environ.pop("KODO_DB_PATH", None)
         if os.path.exists(self.db_name):
             try: os.remove(self.db_name)
             except Exception: pass

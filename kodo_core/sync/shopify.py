@@ -343,9 +343,51 @@ class ShopifySync:
                 conn.close()
         return imported_orders
 
+    PAGE_SIZE = 250
+    MAX_PAGES = 200  # garde-fou : 50 000 produits
+
+    @staticmethod
+    def _est_taille_unique(taille) -> bool:
+        """Libellés désignant l'absence de déclinaison (« Taille Unique » côté POS, « Unique » côté import)."""
+        return str(taille or "").strip().casefold() in ("", "unique", "taille unique", "default title")
+
+    def _fetch_all_products(self, progress_callback=None):
+        """
+        Tous les produits Shopify. L'API n'en renvoie que 250 par requête : on pagine avec `since_id`
+        (avant, tout ce qui dépassait les 250 premiers produits était ignoré sans avertissement).
+        Retourne None si la toute première page échoue ; lève une erreur si une page suivante échoue
+        (un catalogue tronqué ne doit jamais être présenté comme un import réussi).
+        """
+        produits, since_id = [], 0
+        for page_no in range(1, self.MAX_PAGES + 1):
+            endpoint = f"products.json?limit={self.PAGE_SIZE}"
+            if since_id:
+                endpoint += f"&since_id={since_id}"
+            data = self.make_request(endpoint)
+            if not data or "products" not in data:
+                if page_no == 1:
+                    return None
+                raise RuntimeError(
+                    f"Récupération Shopify interrompue à la page {page_no} : import annulé, aucune donnée modifiée."
+                )
+            page = data["products"]
+            produits.extend(page)
+            if progress_callback:
+                progress_callback(f"Récupération des produits Shopify ({len(produits)})...", 10)
+            last_id = page[-1].get("id") if page else None
+            if len(page) < self.PAGE_SIZE or not last_id or last_id == since_id:
+                break
+            since_id = last_id
+        return produits
+
     def import_catalog(self, progress_callback=None) -> int:
         """
         Importe le catalogue complet de Shopify vers la base de données locale Kōdo POS.
+
+        Un produit déjà connu (même code-barres/SKU) est MIS À JOUR sur place : son id, sa TVA, sa marque,
+        son seuil d'alerte, son image et son prix d'achat sont conservés, et ses lignes de stock existantes
+        sont réutilisées. Avant, `INSERT OR REPLACE` supprimait puis recréait le produit sous un nouvel id
+        à chaque import (stocks orphelins, réglages remis à zéro, écran de caisse pointant sur des ids morts).
         """
         self.load_config()
         if not self.store_url or not self.access_token:
@@ -355,90 +397,102 @@ class ShopifySync:
         if progress_callback:
             progress_callback("Récupération des produits Shopify...", 10)
 
-        products_data = self.make_request("products.json?limit=250")
-        if not products_data or "products" not in products_data:
+        shopify_products = self._fetch_all_products(progress_callback)
+        if shopify_products is None:
             logger.warning("Aucun produit trouvé sur Shopify ou erreur de connexion.")
             return 0
 
-        shopify_products = products_data["products"]
         total_p = len(shopify_products)
         logger.info(f"{total_p} produits récupérés de Shopify.")
 
         conn = get_connection()
-        c = conn.cursor()
-
         imported_count = 0
-        for idx, p in enumerate(shopify_products):
-            if progress_callback:
-                pct = 10 + int((idx / total_p) * 80)
-                progress_callback(f"Importation : {p.get('title')} ({idx+1}/{total_p})...", pct)
+        try:
+            c = conn.cursor()
+            for idx, p in enumerate(shopify_products):
+                if progress_callback:
+                    pct = 10 + int((idx / total_p) * 80)
+                    progress_callback(f"Importation : {p.get('title')} ({idx+1}/{total_p})...", pct)
 
-            nom = p.get("title", "Sans nom")
-            cat = p.get("product_type", "Général") or "Général"
+                nom = p.get("title", "Sans nom")
+                cat = p.get("product_type", "Général") or "Général"
 
-            c.execute("INSERT OR IGNORE INTO Categories (nom) VALUES (?)", (cat,))
+                c.execute("INSERT OR IGNORE INTO Categories (nom) VALUES (?)", (cat,))
 
-            for v in p.get("variants", []):
-                sku = v.get("sku") or v.get("barcode") or f"SHPF-{v.get('id')}"
-                if not sku:
-                    continue
+                for v in p.get("variants", []):
+                    sku = v.get("sku") or v.get("barcode") or f"SHPF-{v.get('id')}"
+                    if not sku:
+                        continue
 
-                price_str = v.get("price", "0.00")
-                compare_str = v.get("compare_at_price")
+                    price_str = v.get("price", "0.00")
+                    compare_str = v.get("compare_at_price")
 
-                try:
-                    price_val = Decimal(price_str)
-                except Exception:
-                    price_val = Decimal("0.00")
-
-                en_solde = 0
-                prix_solde_tvac = None
-                prix_vente_tvac = price_val
-
-                if compare_str:
                     try:
-                        compare_val = Decimal(compare_str)
-                        if compare_val > price_val:
-                            en_solde = 1
-                            prix_vente_tvac = compare_val
-                            prix_solde_tvac = price_val
+                        price_val = Decimal(price_str)
                     except Exception:
-                        pass
+                        price_val = Decimal("0.00")
 
-                prix_achat_htva = (prix_vente_tvac / Decimal("2.5")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    en_solde = 0
+                    prix_solde_tvac = None
+                    prix_vente_tvac = price_val
 
-                c.execute("""
-                    INSERT OR REPLACE INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, en_solde, prix_solde_tvac)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (sku, nom, cat, float(prix_achat_htva), float(prix_vente_tvac), en_solde, float(prix_solde_tvac) if prix_solde_tvac else None))
+                    if compare_str:
+                        try:
+                            compare_val = Decimal(compare_str)
+                            if compare_val > price_val:
+                                en_solde = 1
+                                prix_vente_tvac = compare_val
+                                prix_solde_tvac = price_val
+                        except Exception:
+                            pass
 
-                pid = c.lastrowid
-                if not pid:
+                    prix_solde_float = float(prix_solde_tvac) if prix_solde_tvac else None
+
                     c.execute("SELECT id FROM Produits WHERE code_barre=?", (sku,))
                     p_row = c.fetchone()
                     if p_row:
                         pid = p_row[0]
-
-                if pid:
-                    opt1 = v.get("option1", "Unique")
-                    opt2 = v.get("option2")
-                    taille = opt1 if opt1 and opt1 != "Default Title" else "Unique"
-                    if opt2 and opt2 != "Default Title":
-                        taille = f"{taille} / {opt2}"
-
-                    qty = int(v.get("inventory_quantity", 0))
-
-                    c.execute("SELECT id FROM Stocks WHERE id_produit=? AND taille=?", (pid, taille))
-                    s_row = c.fetchone()
-                    if s_row:
-                        c.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, s_row[0]))
+                        c.execute("""
+                            UPDATE Produits
+                            SET nom=?, categorie=?, prix_vente_tvac=?, en_solde=?, prix_solde_tvac=?
+                            WHERE id=?
+                        """, (nom, cat, float(prix_vente_tvac), en_solde, prix_solde_float, pid))
                     else:
-                        c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, NULL)", (pid, taille, qty))
+                        prix_achat_htva = (prix_vente_tvac / Decimal("2.5")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        c.execute("""
+                            INSERT INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, en_solde, prix_solde_tvac)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, (sku, nom, cat, float(prix_achat_htva), float(prix_vente_tvac), en_solde, prix_solde_float))
+                        pid = c.lastrowid
 
-                imported_count += 1
+                    if pid:
+                        opt1 = v.get("option1", "Unique")
+                        opt2 = v.get("option2")
+                        taille = opt1 if opt1 and opt1 != "Default Title" else "Unique"
+                        if opt2 and opt2 != "Default Title":
+                            taille = f"{taille} / {opt2}"
 
-        conn.commit()
-        conn.close()
+                        qty = int(v.get("inventory_quantity") or 0)
+
+                        c.execute("SELECT id, taille FROM Stocks WHERE id_produit=? ORDER BY id", (pid,))
+                        stock_rows = c.fetchall()
+                        wanted = str(taille).strip().casefold()
+                        cible = next((r[0] for r in stock_rows if str(r[1] or "").strip().casefold() == wanted), None)
+                        if cible is None and self._est_taille_unique(taille):
+                            cible = next((r[0] for r in stock_rows if self._est_taille_unique(r[1])), None)
+                        if cible is not None:
+                            c.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, cible))
+                        else:
+                            c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, NULL)", (pid, taille, qty))
+
+                    imported_count += 1
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
         if progress_callback:
             progress_callback("Importation terminée !", 100)

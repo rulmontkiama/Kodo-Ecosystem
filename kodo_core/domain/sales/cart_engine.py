@@ -221,6 +221,85 @@ class CartEngine:
             return Decimal('0.00'), quantize_money(total_due - total_paid)
 
 
+# Libellés qui désignent l'absence de déclinaison : l'écran Stocks écrit « Taille Unique », l'import
+# Shopify « Unique », d'anciennes versions une taille vide.
+_LIBELLES_TAILLE_UNIQUE = {"", "unique", "taille unique", "taille_unique", "default title", "__no_size__"}
+
+
+def _norm_taille(taille) -> str:
+    return str(taille or "").strip().casefold()
+
+
+def _as_int(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return value
+
+
+def _resolve_stock_id(cursor, it: Dict[str, Any]):
+    """
+    Détermine la ligne `Stocks.id` à vendre pour un article du panier.
+
+    L'écran ne connaît que l'id PRODUIT (`Produits.id`) et la taille choisie. L'id de stock est un autre
+    numéro (une ligne par taille) qui n'a aucune raison de coïncider avec l'id produit : les confondre
+    faisait vendre, débiter et facturer un AUTRE article (ou refuser la vente, « Article introuvable »).
+    On retrouve donc ici la ligne de stock à partir de (produit, taille).
+
+    Un `stock_id` explicite reste accepté (import Live, rejeu hors-ligne) ; quand le produit est aussi
+    connu, il doit lui appartenir.
+    """
+    stock_id = it.get("stock_id") or it.get("id_stock")
+    product_id = it.get("product_id") or it.get("id_produit")
+
+    if stock_id:
+        stock_id = _as_int(stock_id)
+        if product_id:
+            cursor.execute("SELECT id_produit FROM Stocks WHERE id = ?", (stock_id,))
+            row = cursor.fetchone()
+            if row and _as_int(row[0]) != _as_int(product_id):
+                raise ValueError(
+                    f"Incohérence : le stock {stock_id} n'appartient pas à l'article {product_id} : vente refusée."
+                )
+        return stock_id
+
+    if not product_id:
+        legacy = it.get("id")  # appelants historiques : `id` désignait déjà l'id de stock
+        if legacy:
+            return _as_int(legacy)
+        raise ValueError("Article sans stock_id : vente refusée (prix non vérifiable).")
+
+    pid = _as_int(product_id)
+    if not isinstance(pid, int):
+        raise ValueError(f"Article introuvable en base (produit={product_id}) : vente refusée.")
+
+    cursor.execute("SELECT id, taille FROM Stocks WHERE id_produit = ? ORDER BY id", (pid,))
+    rows = cursor.fetchall()
+    if not rows:
+        raise ValueError(f"Article introuvable en base (produit={pid}) : vente refusée.")
+
+    taille = it.get("taille") or it.get("size") or it.get("selectedSize")
+    wanted = _norm_taille(taille)
+    if wanted:
+        exact = [r for r in rows if _norm_taille(r[1]) == wanted]
+        if exact:
+            return exact[0][0]
+    if wanted in _LIBELLES_TAILLE_UNIQUE:
+        if len(rows) == 1:
+            return rows[0][0]
+        uniques = [r for r in rows if _norm_taille(r[1]) in _LIBELLES_TAILLE_UNIQUE]
+        if len(uniques) == 1:
+            return uniques[0][0]
+
+    cursor.execute("SELECT nom FROM Produits WHERE id = ?", (pid,))
+    nom_row = cursor.fetchone()
+    nom = nom_row[0] if nom_row else f"produit {pid}"
+    tailles = ", ".join(dict.fromkeys(str(r[1] or "Taille Unique") for r in rows))
+    if wanted and wanted not in _LIBELLES_TAILLE_UNIQUE:
+        raise ValueError(f"Taille « {taille} » introuvable pour « {nom} » (tailles : {tailles}) : vente refusée.")
+    raise ValueError(f"Précisez la taille de « {nom} » ({tailles}) : vente refusée.")
+
+
 # Functions top-level pour la gestion des ventes et tickets
 
 def process_sale_transaction(
@@ -264,9 +343,7 @@ def process_sale_transaction(
         stock_cache: Dict[Any, Any] = {}
         qty_demandee_par_stock: Dict[Any, int] = {}
         for it in cart_items:
-            stock_id = it.get("stock_id") or it.get("id_stock") or it.get("id")
-            if not stock_id:
-                raise ValueError("Article sans stock_id : vente refusée (prix non vérifiable).")
+            stock_id = _resolve_stock_id(cursor, it)
 
             if stock_id not in stock_cache:
                 cursor.execute("""

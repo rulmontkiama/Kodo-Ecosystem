@@ -8,7 +8,10 @@ Passerelle REST API et serveur statique déléguant la logique métier à kodo_c
 import os
 import sys
 import json
+import signal
 import sqlite3
+import subprocess
+import time
 import datetime
 from decimal import Decimal
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -55,14 +58,34 @@ def is_dist_valid(dist_path: str) -> bool:
         return True
 
 
+def _version_tuple(v) -> tuple:
+    return tuple(int(d) for d in re.findall(r"\d+", str(v or "")))
+
+
+def is_cache_dist_current(version_file: str) -> bool:
+    """Vrai si l'interface en cache a été installée par une mise à jour au moins aussi récente que
+    l'application. Sans cette vérification, une interface téléchargée avant une réinstallation du
+    DMG masquait pour toujours celle du DMG (l'app se croit à jour et ne la retélécharge jamais)."""
+    try:
+        import kodo_base
+        with open(version_file, "r", encoding="utf-8") as f:
+            cached = json.load(f).get("version")
+        return _version_tuple(cached) >= _version_tuple(kodo_base.BASE_VERSION)
+    except Exception:
+        return False
+
+
 def get_dist_dir():
-    # 1. Priorité aux mises à jour dynamiques installées dans le cache utilisateur
+    # 1. Priorité aux mises à jour dynamiques installées dans le cache utilisateur,
+    #    à condition qu'elles ne soient pas plus anciennes que l'application installée
     cache_dist = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
-    if is_dist_valid(cache_dist):
+    if is_dist_valid(cache_dist) and is_cache_dist_current(
+            os.path.expanduser("~/Library/Caches/KodoPOS/version.json")):
         return cache_dist
 
     win_cache = os.path.expanduser("~/.kodo_pos/dist")
-    if is_dist_valid(win_cache):
+    if is_dist_valid(win_cache) and is_cache_dist_current(
+            os.path.expanduser("~/.kodo_pos/version.json")):
         return win_cache
 
     # 2. En mode exécutable / production (PyInstaller gelé) -> bundle propre embarqué
@@ -243,22 +266,70 @@ class POSRequestHandler(BaseHTTPRequestHandler):
 class ReusableHTTPServer(HTTPServer):
     allow_reuse_address = True
 
-def run_server(port=8765):
+def _kodo_server_answers(port: int, timeout: float = 2.0) -> bool:
+    """Vrai si un serveur Kōdo POS répond déjà sur ce port (autre instance en cours d'utilisation)."""
     try:
-        server_address = ('0.0.0.0', port)
-        httpd = ReusableHTTPServer(server_address, POSRequestHandler)
-        print(f"🚀 [KODO POS SERVER] REST API kodo_core & Web App en ligne sur http://localhost:{port}")
-        httpd.serve_forever()
-    except OSError as e:
-        print(f"⚠️ [KODO POS SERVER] Conflit de port {port} ({e}). Tentative de libération...")
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=timeout) as resp:
+            info = json.loads(resp.read(4096).decode("utf-8", "ignore"))
+        return resp.status == 200 and str(info.get("app", "")).startswith("Kōdo POS")
+    except Exception:
+        return False
+
+
+def _free_port_from_zombie(port: int) -> None:
+    """Arrête le processus (autre que nous) qui occupe le port SANS répondre : serveur figé d'un lancement précédent."""
+    try:
+        out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return
+    for pid in out.split():
+        if pid.isdigit() and int(pid) != os.getpid():
+            try:
+                os.kill(int(pid), getattr(signal, "SIGKILL", signal.SIGTERM))
+            except Exception:
+                pass
+
+
+def run_server(port=8765, busy_wait=8.0):
+    """
+    Démarre le serveur. Si le port est déjà pris, on ne tue JAMAIS d'emblée l'occupant (avant, un second
+    lancement arrêtait de force l'instance en cours d'utilisation, puis plantait : plus aucun serveur) :
+    1. on patiente `busy_wait` s (l'ancienne instance qui se ferme, ex. redémarrage après une mise à jour) ;
+    2. si un serveur Kōdo POS répond toujours, c'est une autre instance vivante : on la réutilise ;
+    3. s'il ne répond pas (processus figé), on le libère et on prend sa place.
+    """
+    httpd = None
+    deadline = time.monotonic() + busy_wait
+    warned = False
+    while True:
         try:
-            import subprocess
-            subprocess.run(f"lsof -ti:{port} | xargs kill -9", shell=True, check=False)
-            time.sleep(0.5)
             httpd = ReusableHTTPServer(('0.0.0.0', port), POSRequestHandler)
-            httpd.serve_forever()
-        except Exception as ex:
+            break
+        except OSError as e:
+            if not warned:
+                print(f"⚠️ [KODO POS SERVER] Port {port} occupé ({e}). Attente de sa libération...")
+                warned = True
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+
+    if httpd is None:
+        if _kodo_server_answers(port):
+            print(f"ℹ️ [KODO POS SERVER] Une autre instance de Kōdo POS répond déjà sur le port {port} : elle est réutilisée.")
+            return
+        print(f"⚠️ [KODO POS SERVER] Le port {port} est occupé par un processus qui ne répond pas : libération...")
+        _free_port_from_zombie(port)
+        time.sleep(0.5)
+        try:
+            httpd = ReusableHTTPServer(('0.0.0.0', port), POSRequestHandler)
+        except OSError as ex:
             print(f"❌ [KODO POS SERVER] Échec: {ex}")
+            return
+
+    print(f"🚀 [KODO POS SERVER] REST API kodo_core & Web App en ligne sur http://localhost:{port}")
+    httpd.serve_forever()
 
 
 if __name__ == '__main__':

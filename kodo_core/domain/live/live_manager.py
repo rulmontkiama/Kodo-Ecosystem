@@ -735,8 +735,10 @@ class LiveManager:
             # Construire les items du cart pour le moteur de vente POS
             from kodo_core.domain.sales.cart_engine import process_sale_transaction
             cart_items = [{
-                "id": str(product_id),
-                "stock_id": str(stock_id) if stock_id else str(product_id),
+                # Sans stock_id connu, la ligne de stock est retrouvée par (produit, taille) : l'id produit
+                # n'est PAS un id de stock (cart_engine._resolve_stock_id).
+                "product_id": product_id,
+                "stock_id": stock_id or None,
                 "code_barre": "",
                 "nom": f"{article_nom} ({taille})" if taille and taille != "Taille Unique" else article_nom,
                 "quantite": quantite,

@@ -88,8 +88,10 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         for item in items:
             prod = item.get('product', {})
             cart_items.append({
-                "id": prod.get('id'),
-                "stock_id": item.get('stock_id') or prod.get('id'),
+                # L'écran n'envoie que l'id PRODUIT et la taille : la ligne de stock est retrouvée côté
+                # serveur (cart_engine._resolve_stock_id). Ne JAMAIS recopier l'id produit dans stock_id.
+                "product_id": prod.get('product_id') or prod.get('id'),
+                "stock_id": item.get('stock_id'),
                 "code_barre": prod.get('barcode', ''),
                 "nom": prod.get('name', 'Article'),
                 "quantite": item.get('quantity', 1),

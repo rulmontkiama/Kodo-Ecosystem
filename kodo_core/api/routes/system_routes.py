@@ -256,15 +256,25 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
     # 13. Enregistrer les paramètres de l'établissement et de synchronisation
     elif method == "POST" and path == "/api/settings":
-        store_name = data.get("storeName") or data.get("shop_name")
-        address = data.get("address") or data.get("shop_address", "")
-        bce = data.get("bceNumber") or data.get("shop_bce", "")
-        tva = data.get("tvaNumber") or data.get("shop_tva", "")
-        iban = data.get("iban") or data.get("shop_iban")
-        fond_caisse_val = data.get("fondCaisse") or data.get("fond_caisse")
-        printer_ip = data.get("printerIP") or data.get("printer_ip", "192.168.1.150")
-        shopify_domain = data.get("shopifyDomain") or data.get("shopify_store_url")
-        shopify_token = data.get("shopifyToken") or data.get("shopify_access_token")
+        # Mise à jour PARTIELLE : seules les clés réellement présentes dans la requête sont écrites.
+        # Avant, une requête ne contenant que le fond de caisse (ou le seuil d'alerte) effaçait l'adresse,
+        # le n° BCE, le n° TVA (mentions légales des tickets) et remettait l'IP de l'imprimante par défaut ;
+        # et un fond de caisse à 0 (valeur « fausse » en Python) était ignoré sans erreur.
+        def _pick(*keys):
+            for k in keys:
+                if k in data and data[k] is not None:
+                    return data[k]
+            return None
+
+        store_name = _pick("storeName", "shop_name")
+        address = _pick("address", "shop_address")
+        bce = _pick("bceNumber", "shop_bce")
+        tva = _pick("tvaNumber", "shop_tva")
+        iban = _pick("iban", "shop_iban")
+        fond_caisse_val = _pick("fondCaisse", "fond_caisse")
+        printer_ip = _pick("printerIP", "printer_ip")
+        shopify_domain = _pick("shopifyDomain", "shopify_store_url")
+        shopify_token = _pick("shopifyToken", "shopify_access_token")
         auto_sync = data.get("autoSyncStock")
         sync_orders = data.get("syncOrders")
 
@@ -289,12 +299,16 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
         if store_name:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_name', ?)", (store_name,))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_address', ?)", (address,))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_bce', ?)", (bce,))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_tva', ?)", (tva,))
+        if address is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_address', ?)", (address,))
+        if bce is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_bce', ?)", (bce,))
+        if tva is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_tva', ?)", (tva,))
         if iban is not None:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shop_iban', ?)", (str(iban).strip(),))
-        cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('printer_ip', ?)", (printer_ip,))
+        if printer_ip is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('printer_ip', ?)", (printer_ip,))
 
         if shopify_domain is not None:
             clean_domain = str(shopify_domain).replace("https://", "").replace("http://", "").strip("/")

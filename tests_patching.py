@@ -355,6 +355,7 @@ def test_updater():
     # h. annonce du patch backend lue chez les serveurs de mise à jour
     import urllib.request as ur
     real_urlopen = ur.urlopen
+    real_exists = os.path.exists
     def fake_urlopen(req, *a, **k):
         url = req.full_url if hasattr(req, "full_url") else str(req)
         if "raw.githubusercontent.com" in url and url.endswith("latest.json"):
@@ -364,6 +365,9 @@ def test_updater():
         raise OSError("hors ligne")
     try:
         ur.urlopen = fake_urlopen
+        # check_for_updates_sync lit aussi public/latest.json du dépôt (confort de développement) : on l'ignore ici,
+        # sinon le résultat dépendrait de la version publiée dans le dépôt au moment du test.
+        os.path.exists = lambda p: False if str(p).replace(os.sep, "/").endswith("public/latest.json") else real_exists(p)
         check("annonce backendPatch retrouvée pour la bonne version", up._backend_patch_info("1.0.72") == INFO)
         try:
             up._backend_patch_info("1.0.73")
@@ -380,6 +384,7 @@ def test_updater():
         check("serveurs injoignables : refus (pas d'installation partielle)", ok)
     finally:
         ur.urlopen = real_urlopen
+        os.path.exists = real_exists
 
 
 if __name__ == "__main__":
