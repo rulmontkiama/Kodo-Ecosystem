@@ -84,11 +84,20 @@ python3 -c "import shutil, glob; src = glob.glob('/Users/kiamarulmont/Desktop/*k
 echo "🔏 Alignement de la version de base des correctifs backend..."
 (cd "$SRC_DIR" && python3 scripts/release/kodo_release.py stamp-base) || { echo "❌ Impossible d'aligner kodo_base.BASE_VERSION."; exit 1; }
 
+# 1.7 NETTOYAGE DES FICHIERS APPLEDOUBLE (Correctif R4)
+# Le projet vit sur un volume exFAT : macOS y matérialise les métadonnées en vrais
+# fichiers ._*. PyInstaller copie depuis le disque, pas depuis l'index git : sans cette
+# purge, ces fichiers entrent dans le bundle livré.
+echo "🧹 Nettoyage des fichiers AppleDouble (._*)..."
+find "$SRC_DIR" -name '._*' -not -path '*/node_modules/*' -not -path '*/.git/*' -delete 2>/dev/null || true
+dot_clean "$SRC_DIR" 2>/dev/null || true
+
 # 2. PRÉPARATION DU DOSSIER DE BUILD APFS
 echo "📦 Copie miroir vers APFS pour la compilation PyInstaller..."
 rm -rf "$APFS_BUILD"
 mkdir -p "$APFS_BUILD"
 rsync -a --exclude='.git' --exclude='Installation_Pack' --exclude='public' --exclude='releases' --exclude='*.dmg' --exclude='*.zip' --exclude='Backups_*' --exclude='Exports_*' --exclude='.npm-cache' --exclude='__pycache__' "$SRC_DIR/" "$APFS_BUILD/"
+find "$APFS_BUILD" -name '._*' -delete 2>/dev/null || true
 
 # 3. COMPILATION PYINSTALLER SUR APFS
 echo "📦 Compilation PyInstaller..."

@@ -792,8 +792,11 @@ def generer_facture_pdf(numero_facture, date_facture, client_info, items, totaux
     shop_name = shop.get("name", "Mon Commerce")
     shop_sub = shop.get("subtitle", "Boutique de Mode")
     shop_addr = shop.get("address", "")
-    shop_vat = shop.get("vat", "BE 0123.456.789")
-    shop_iban = shop.get("iban", "BE68 0000 0000 0000")
+    # Une facture porte le numéro de TVA et l'IBAN réels du commerçant, ou ne les porte
+    # pas. Aucun repli : un IBAN par défaut sur une facture est une instruction de
+    # paiement vers un compte qui n'est pas celui du commerçant.
+    shop_vat = shop.get("vat", "")
+    shop_iban = shop.get("iban", "")
 
     styles = getSampleStyleSheet()
 
@@ -812,9 +815,16 @@ def generer_facture_pdf(numero_facture, date_facture, client_info, items, totaux
     cli_addr = client_info.get("adresse", "")
     cli_vat = client_info.get("tva", "")
 
+    _identite = [f"<b>{shop_name}</b>", shop_sub]
+    if shop_addr:
+        _identite.append(shop_addr)
+    _identite.append(f"TVA: {shop_vat}" if shop_vat else "<b>** N° TVA NON RENSEIGNÉ — Paramètres &gt; Boutique **</b>")
+    if shop_iban:
+        _identite.append(f"IBAN: {shop_iban}")
+
     header_table_data = [
         [
-            Paragraph(f"<b>{shop_name}</b><br/>{shop_sub}<br/>{shop_addr}<br/>TVA: {shop_vat}<br/>IBAN: {shop_iban}", style_meta),
+            Paragraph("<br/>".join(_identite), style_meta),
             Paragraph(f"<b>FACTURER À :</b><br/><b>{cli_nom}</b><br/>{cli_addr}<br/>{f'TVA: {cli_vat}' if cli_vat else ''}", style_meta)
         ]
     ]

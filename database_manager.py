@@ -64,19 +64,20 @@ except Exception:
 # La reprise d'une base héritée est une opération métier explicite, elle vit dans
 # migrer_base_heritee() et n'est jamais déclenchée par un import.
 
-# Noms de bases héritées reconnus. Liste EXPLICITE : jamais de glob sauvage, jamais de sélection
-# par date de modification — un fichier .db présent dans le répertoire n'est pas une
-# présomption de base du commerce.
+# Noms de bases héritées reconnus. Liste EXPLICITE : jamais de glob sauvage, jamais de
+# sélection par date de modification — un fichier .db présent dans le répertoire n'est
+# pas une présomption de base du commerce.
 BASES_HERITEES_CONNUES = (
     "legacy_pos.db",
     "pilot_store.db",
     "v1_kodo.db",
 )
-# Empreinte SHA-256 du fichier d'origine historique (permet la migration de la base
-# initiale sans exposer de nom de boutique cliente en clair dans le code source).
-_LEGACY_NAME_HASHES = {
-    "596ca1d5a5b77848f4cc7b504b999a59e2cde8b0a2134fd9fc93061761fc0675",
-}
+# Une base portant un autre nom se reprend en le déclarant dans l'environnement de la
+# machine concernée (KODO_LEGACY_DB_NAME), jamais en inscrivant quoi que ce soit ici.
+# Aucune empreinte de nom n'est stockée : le condensé SHA-256 d'un nom de fichier ne
+# l'anonymise pas. Un nom de fichier n'est pas un secret — l'espace des candidats
+# plausibles est minuscule et le nom se retrouve au premier essai. Le code livré aux
+# clients ne doit porter aucune trace, même dérivée, du nom d'une boutique cliente.
 
 def migrer_base_heritee(db_path: str = None, dry_run: bool = True) -> dict:
     """
@@ -108,8 +109,6 @@ def migrer_base_heritee(db_path: str = None, dry_run: bool = True) -> dict:
             if fname == os.path.basename(cible):
                 continue
             if fname in allowed_names:
-                sources.append(os.path.join(base_dir, fname))
-            elif hashlib.sha256(fname.encode('utf-8')).hexdigest() in _LEGACY_NAME_HASHES:
                 sources.append(os.path.join(base_dir, fname))
 
     if not sources:

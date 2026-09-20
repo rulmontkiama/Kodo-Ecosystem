@@ -234,8 +234,11 @@ class MigrationManager:
                 "ALTER TABLE Produits ADD COLUMN unite_mesure TEXT DEFAULT 'pce'",
                 "ALTER TABLE Produits ADD COLUMN marque TEXT DEFAULT NULL",
                 "ALTER TABLE Produits ADD COLUMN attributs_json TEXT DEFAULT NULL",
+                # Amorce neutre : le commerçant saisit son identité dans Paramètres > Boutique.
+                # Ni nom de boutique pilote, ni numéro de TVA fictif — une TVA inventée écrite
+                # en base ressort ensuite sur des documents fiscaux.
                 """INSERT INTO ShopInfo (nom_magasin, adresse, siret_tva, type_commerce, devise)
-                   SELECT "Mon Commerce", "Boutique Pilote", "BE 0123.456.789", "pret_a_porter", "€"
+                   SELECT "Mon Commerce", "", "", "pret_a_porter", "€"
                    WHERE NOT EXISTS (SELECT 1 FROM ShopInfo)"""
             ]
         },
@@ -392,6 +395,18 @@ class MigrationManager:
                 "ALTER TABLE Cartes_Cadeaux ADD COLUMN client_nom TEXT DEFAULT NULL",
                 "ALTER TABLE Cartes_Cadeaux ADD COLUMN status TEXT DEFAULT 'active'",
                 "ALTER TABLE Cartes_Cadeaux ADD COLUMN emis_par TEXT DEFAULT NULL"
+            ]
+        },
+        {
+            "version": "2.0.1",
+            "description": "Purge des valeurs d'amorce fictives (TVA de démonstration, adresse pilote)",
+            "sql": [
+                # Réparation des bases ayant exécuté l'amorce 1.1.0 avant sa correction.
+                # Ne touche que les valeurs strictement égales aux constantes de démonstration :
+                # une identité réellement saisie par le commerçant n'est jamais modifiée.
+                """UPDATE ShopInfo SET siret_tva = '' WHERE siret_tva IN ('BE 0123.456.789', 'BE0123.456.789', '0123.456.789')""",
+                """UPDATE ShopInfo SET adresse = '' WHERE adresse = 'Boutique Pilote'""",
+                """UPDATE Parametres SET valeur = '' WHERE cle IN ('shop_vat', 'shop_tva', 'shop_bce') AND valeur IN ('BE 0123.456.789', 'BE0123.456.789', '0123.456.789')""",
             ]
         }
     ]
