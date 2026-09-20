@@ -346,13 +346,18 @@ def generer_ticket(numero, panier, total_tvac, remise,
         vat_str = shop_vat if str(shop_vat).startswith("TVA") else f"TVA: {shop_vat}"
         lines.append(_center(vat_str))
     else:
-        lines.append(_center("** N° TVA NON RENSEIGNÉ **"))
-        lines.append(_center("Paramètres > Boutique"))
+        # Rien d'imprime ici. Un ticket sans ligne de TVA ne surprend personne ;
+        # « Parametres > Boutique » est un chemin de menu destine au commercant,
+        # pas a sa cliente. L'alerte reste bien visible sur l'ecran de caisse
+        # (ReceiptModal), que le commercant voit a chaque vente.
+        pass
     lines.append(_separator("="))
     
     # Traçabilité
     date_str = now.strftime("%d/%m/%Y %H:%M")
-    v_name = vendeur_nom if vendeur_nom else "Sarah"
+    # Aucun nom invente : le ticket sert la tracabilite, attribuer une vente a
+    # une personne codee en dur est une fausse mention sur un document fiscal.
+    v_name = vendeur_nom if vendeur_nom else "Non renseigné"
     lines.append(f"Date   : {date_str} Ticket : {numero}")
     lines.append(f"Caisse : Caisse 01      Vendeur: {v_name}")
     if nom_client:
@@ -1129,7 +1134,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
             shop_subtitle=shop_sub,
             shop_address=shop_addr,
             shop_vat=shop_vat,
-            vendeur_nom=vendeur or "Sarah",
+            vendeur_nom=vendeur or "Non renseigné",
             ecart_arrondi_cash=Decimal(str(ecart_arrondi or 0))
         )
 
