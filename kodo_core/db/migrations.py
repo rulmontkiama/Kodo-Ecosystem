@@ -408,6 +408,18 @@ class MigrationManager:
                 """UPDATE ShopInfo SET adresse = '' WHERE adresse = 'Boutique Pilote'""",
                 """UPDATE Parametres SET valeur = '' WHERE cle IN ('shop_vat', 'shop_tva', 'shop_bce') AND valeur IN ('BE 0123.456.789', 'BE0123.456.789', '0123.456.789')""",
             ]
+        },
+        {
+            "version": "2.0.2",
+            "description": "Purge de l'IBAN de démonstration enregistré en base",
+            "sql": [
+                # Le repli « BE68 0000 0000 0000 » a ete retire du code, mais les bases
+                # creees avant l'ont ENREGISTRE comme une vraie valeur : le message de
+                # virement envoye aux clientes designait alors un compte inexistant.
+                # Seule l'egalite stricte avec la constante de demonstration est purgee ;
+                # un IBAN reellement saisi par le commercant n'est jamais touche.
+                """UPDATE Parametres SET valeur = '' WHERE cle = 'shop_iban' AND REPLACE(valeur, ' ', '') = 'BE68000000000000'""",
+            ]
         }
     ]
 
