@@ -6,7 +6,9 @@
 
 APP_NAME="Kodo_POS"
 DMG_NAME="Installation_Kodo_POS.dmg"
-WIN_ZIP="Kodo_POS_v2.0.1_Windows_Pack.zip"
+# WIN_ZIP porte le numero de version : il est derive de kodo_base.BASE_VERSION plus bas,
+# jamais ecrit en dur (il restait fige a une version precedente a chaque livraison).
+WIN_ZIP=""
 SRC_DIR="$(pwd)"
 APFS_BUILD="/tmp/kodo_build"
 
@@ -31,6 +33,9 @@ if [ "$KODO_VERSION" != "$UPDATER_VERSION" ]; then
   echo "❌ Désalignement de version : kodo_base=$KODO_VERSION updater=$UPDATER_VERSION"
   exit 1
 fi
+
+# Le nom du pack Windows suit la version reelle du socle.
+WIN_ZIP="Kodo_POS_v${KODO_VERSION}_Windows_Pack.zip"
 # Déréférencement obligatoire : sur un tag annoté, `git rev-parse v2.0.1` retourne
 # l'objet tag, pas le commit. Sans `^{commit}`, la comparaison est toujours fausse
 # et la garde bloque le build en signalant un désalignement qui n'existe pas.
@@ -228,7 +233,7 @@ python3 "$SRC_DIR/scripts/release/kodo_release.py" verify "$SRC_DIR/public/dist_
 
 rm -rf /tmp/dmg_build "$DIST_DIR" "$WORK_DIR" "$BUILD_DIR" "$APFS_BUILD"
 
-# 7. GÉNÉRATION DU PACK WINDOWS (Kodo_POS_v1.0.45_Windows_Pack.zip)
+# 7. GÉNÉRATION DU PACK WINDOWS (nom derive de la version du socle)
 echo "🪟 Préparation du pack de build Windows ($WIN_ZIP)..."
 rm -f "$SRC_DIR/$WIN_ZIP" ~/Desktop/"$WIN_ZIP"
 cd "$SRC_DIR" && zip -r -1 "$SRC_DIR/$WIN_ZIP" launch_app.py Lancer_Kodo.bat server_pos.py database_manager.py export_manager.py audit_trail.py backup_manager.py ticket_printer.py pdf_generator.py license_manager.py shopify_sync.py firebase_sync.py Kodo_POS_Windows.spec build_windows.bat logo.png logo_ticket.png instagram_block.png dist kodo_pos.db plan_permissions.json kodo_core core services views 2>/dev/null || true
