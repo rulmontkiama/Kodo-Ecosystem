@@ -204,10 +204,10 @@ class LicenseScreen(ctk.CTkFrame):
 class MainApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.shop_name    = self._get_param("shop_name", "L'ADRESSE B")
-        self.shop_subtitle = self._get_param("shop_subtitle", "Boutique de Mode")
-        self.shop_address = self._get_param("shop_address", "Chemin Rue 53, 4960 Malmedy")
-        self.shop_vat     = self._get_param("shop_vat", "BE 1035.331.577")
+        self.shop_name    = self._get_param("shop_name", "KŌDO POS")
+        self.shop_subtitle = self._get_param("shop_subtitle", "Boutique")
+        self.shop_address = self._get_param("shop_address", "")
+        self.shop_vat     = self._get_param("shop_vat", "")
         self.title("Kōdo POS")
         
         # Initialisation de la licence et des features
@@ -352,7 +352,7 @@ class MainApp(ctk.CTk):
         logo_frame = ctk.CTkFrame(self.nav_bar, fg_color="transparent")
         logo_frame.pack(fill="x", padx=16, pady=(20, 16))
         ctk.CTkLabel(logo_frame, text="KŌDO POS", font=ctk.CTkFont(FNT_TITLE, 22, "bold"), text_color="#212529").pack(anchor="w")
-        ctk.CTkLabel(logo_frame, text="L'ADRESSE B • CAISSE", font=ctk.CTkFont(FNT_BODY, 10, "bold"), text_color="#868E96").pack(anchor="w")
+        ctk.CTkLabel(logo_frame, text=f"{self.shop_name} • CAISSE", font=ctk.CTkFont(FNT_BODY, 10, "bold"), text_color="#868E96").pack(anchor="w")
 
         inner_nav = ctk.CTkFrame(self.nav_bar, fg_color="transparent")
         inner_nav.pack(expand=True, fill="both", padx=10, pady=5)

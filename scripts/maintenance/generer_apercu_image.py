@@ -20,7 +20,7 @@ CONTENU_TICKET = """
         jusqu'à -30% durant tout
           le mois de juillet.
           
-        L'Adresse B n'attend plus
+        Votre boutique n'attend plus
                  que vous.
 """
 

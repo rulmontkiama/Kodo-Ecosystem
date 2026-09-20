@@ -55,6 +55,26 @@ except Exception:
         os.makedirs(lib_dir, exist_ok=True)
         DB_NAME = os.path.join(lib_dir, "kodo_pos.db")
 
+# Migration transparente de base SQLite préexistante si kodo_pos.db n'existe pas encore
+try:
+    if not os.path.exists(DB_NAME):
+        import glob
+        import shutil
+        base_dir = os.path.dirname(DB_NAME)
+        candidates = [
+            f for f in glob.glob(os.path.join(base_dir, "*.db"))
+            if not os.path.basename(f).startswith("test_") and os.path.basename(f) != "kodo_pos.db"
+        ]
+        if candidates:
+            legacy_db = max(candidates, key=os.path.getmtime)
+            shutil.copy2(legacy_db, DB_NAME)
+            for ext in ["-shm", "-wal"]:
+                if os.path.exists(legacy_db + ext):
+                    try: shutil.copy2(legacy_db + ext, DB_NAME + ext)
+                    except Exception: pass
+except Exception:
+    pass
+
 # Adaptateur et convertisseur pour utiliser Decimal avec SQLite
 def adapt_decimal(d):
     return str(d)

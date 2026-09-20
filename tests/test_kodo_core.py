@@ -64,7 +64,7 @@ class TestKodoCore(unittest.TestCase):
         cursor.execute("SELECT nom_magasin, type_commerce FROM ShopInfo")
         row = cursor.fetchone()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0], "L'Adresse B")
+        self.assertEqual(row[0], "Mon Commerce")
 
         conn.close()
 

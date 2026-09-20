@@ -7,7 +7,7 @@ import json
 
 # Override DB_NAME to run tests on a separate test database
 import database_manager
-database_manager.DB_NAME = "test_ladresse_b.db"
+database_manager.DB_NAME = "test_kodo_pos.db"
 
 # Now import the modules
 from database_manager import (
@@ -85,7 +85,7 @@ def run_tests():
     contenu = ticket_printer.generer_ticket(
         numero=num_ticket, panier=panier, total_tvac=net, remise=remise,
         paiements=[("Bancontact", Decimal("24.20"))], rendu_monnaie=Decimal("0.00"),
-        shop_name="L'ADRESSE B", vendeur_nom="Vendeur 1"
+        shop_name="Kōdo Store", vendeur_nom="Vendeur 1"
     )
     assert "T-Shirt Test" in contenu
     assert "carte" in contenu.lower() or "bancontact" in contenu.lower()
@@ -310,7 +310,7 @@ def run_tests():
     
     # Nettoyage du fichier db de test
     for ext in ["", "-shm", "-wal"]:
-        f = "test_ladresse_b.db" + ext
+        f = "test_kodo_pos.db" + ext
         if os.path.exists(f):
             try:
                 os.remove(f)

@@ -791,7 +791,7 @@ def generer_facture_pdf(numero_facture, date_facture, client_info, items, totaux
     shop = shop_info or {}
     shop_name = shop.get("name", "Mon Commerce")
     shop_sub = shop.get("subtitle", "Boutique de Mode")
-    shop_addr = shop.get("address", "Chemin Rue 53, 4960 Malmedy")
+    shop_addr = shop.get("address", "")
     shop_vat = shop.get("vat", "BE 0123.456.789")
     shop_iban = shop.get("iban", "BE68 0000 0000 0000")
 

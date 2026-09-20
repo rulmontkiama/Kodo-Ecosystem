@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Script de lancement du POS L'ADRESSE B
+# Script de lancement de Kōdo POS
 # Utilise Python 3.12 (avec Tk 9.0 fonctionnel) au lieu du Python 3.9 des CommandLineTools
 
 cd "$(dirname "$0")"

@@ -314,10 +314,10 @@ class ESCPOSThermalPrinter:
 def generer_ticket(numero, panier, total_tvac, remise,
                    paiements, rendu_monnaie,
                    nom_client=None, shop_name="Mon Commerce",
-                   shop_subtitle="Boutique de Mode",
-                   shop_address="Chemin Rue 53, 4960 Malmedy",
+                   shop_subtitle="Boutique",
+                   shop_address="",
                    shop_vat="BE 0123.456.789",
-                   vendeur_nom="Sarah",
+                   vendeur_nom="Caissier",
                    is_gift=False,
                    ecart_arrondi_cash=None):
     """
@@ -1092,8 +1092,8 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
 
         # Infos Boutique
         shop_name = "Mon Commerce"
-        shop_sub = "Boutique de Mode"
-        shop_addr = "Chemin Rue 53, 4960 Malmedy"
+        shop_sub = "Boutique"
+        shop_addr = ""
         shop_vat = "BE 0123.456.789"
         try:
             c.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'shop_%'")

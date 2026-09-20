@@ -19,7 +19,7 @@ Tu as un accès et une responsabilité **pleine et entière sur l'ensemble des c
   - `src/types.ts` : Définitions TypeScript partagées (`Product`, `CartItem`, `SaleTransaction`, etc.).
 
 ### 2. Backend Python & Serveur Local (`/Volumes/Extreme SSD/KIAMA/Kōdo POS`)
-- **Moteur** : Python 3.12, SQLite local (`ladresse_b.db` / `kodo_pos.db`), PyInstaller, CUPS macOS.
+- **Moteur** : Python 3.12, SQLite local (`kodo_pos.db`), PyInstaller, CUPS macOS.
 - **Dossiers & Fichiers clés** :
   - `kodo_core/api/routes/pos_routes.py` : Routes API locales pour les ventes, produits, clients, tickets, clôtures Z.
   - `kodo_core/services/updater.py` : Moteur de mise à jour automatique OTA via GitHub Releases / `latest.json`.

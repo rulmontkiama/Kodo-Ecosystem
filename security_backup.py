@@ -4,7 +4,7 @@ import datetime
 import sqlite3
 
 from database_manager import DB_NAME
-BACKUP_DIR = "Backups_L_ADRESSE_B"
+BACKUP_DIR = "Backups_Kodo_POS"
 LOG_FILE = "logs.txt"
 
 def log_error(message):
@@ -78,7 +78,7 @@ def creer_sauvegarde():
         source_conn.close()
         
         # 5. Compression ZIP de la base de données clonée
-        zip_filename = os.path.join(BACKUP_DIR, f"backup_ladresse_b_{timestamp}.zip")
+        zip_filename = os.path.join(BACKUP_DIR, f"backup_kodo_pos_{timestamp}.zip")
         with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(temp_backup_db, arcname=DB_NAME)
             

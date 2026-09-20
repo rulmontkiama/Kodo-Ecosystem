@@ -5,7 +5,7 @@ from ticket_printer import imprimer_ticket
 
 # Contenu du ticket sélectionné par l'utilisateur
 CONTENU_TICKET = """==========================================
-               L'ADRESSE B
+               KŌDO POS
             Boutique de Mode
 ==========================================
 
@@ -22,7 +22,7 @@ CONTENU_TICKET = """==========================================
         jusqu'à -30% durant tout
           le mois de juillet.
           
-        L'Adresse B n'attend plus
+        Votre boutique n'attend plus
                  que vous.
 ==========================================
 """

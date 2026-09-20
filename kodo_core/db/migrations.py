@@ -235,7 +235,7 @@ class MigrationManager:
                 "ALTER TABLE Produits ADD COLUMN marque TEXT DEFAULT NULL",
                 "ALTER TABLE Produits ADD COLUMN attributs_json TEXT DEFAULT NULL",
                 """INSERT INTO ShopInfo (nom_magasin, adresse, siret_tva, type_commerce, devise)
-                   SELECT "L'Adresse B", "Boutique Pilote", "BE 0123.456.789", "pret_a_porter", "€"
+                   SELECT "Mon Commerce", "Boutique Pilote", "BE 0123.456.789", "pret_a_porter", "€"
                    WHERE NOT EXISTS (SELECT 1 FROM ShopInfo)"""
             ]
         },
@@ -902,9 +902,9 @@ def initialiser_db(db_path: str = None, conn=None):
 
         cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('pin_admin', ?)", (hash_pin('0000'),))
         cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_name', ?)", (ShopConfig.NOM_MAGASIN_DEFAULT,))
-        cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_subtitle', 'Boutique de Mode')")
-        cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_address', 'Chemin Rue 53, 4960 Malmedy')")
-        cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_vat', 'BE 1035.331.577')")
+        cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_subtitle', 'Boutique')")
+        cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_address', '')")
+        cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_vat', '')")
         cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('default_tva', '0.21')")
         cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shopify_store_url', '')")
         cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shopify_access_token', '')")

@@ -41,7 +41,7 @@ def verifier_environnement():
         erreurs += 1
 
     # 4. Vérification de la base de données
-    db_path = os.path.join(dossier_app, "ladresse_b.db")
+    db_path = os.path.join(dossier_app, "kodo_pos.db")
     print(f"\n[BASE DE DONNÉES] Vérification de SQLite...")
     try:
         conn = sqlite3.connect(db_path)

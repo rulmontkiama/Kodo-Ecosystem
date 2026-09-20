@@ -49,7 +49,7 @@ echo "🔎 Vérification TypeScript du frontend (npm run lint)..."
 
 # 1. RÉINITIALISATION USINE DE LA BDD (Règle Vierge)
 echo "🧹 Réinitialisation usine de la base de données..."
-rm -f "$SRC_DIR/kodo_pos.db" "$SRC_DIR/kodo_pos.db-shm" "$SRC_DIR/kodo_pos.db-wal" "$SRC_DIR/ladresse_b.db" "$SRC_DIR/ladresse_b.db-shm" "$SRC_DIR/ladresse_b.db-wal"
+rm -f "$SRC_DIR/kodo_pos.db" "$SRC_DIR/kodo_pos.db-shm" "$SRC_DIR/kodo_pos.db-wal"
 
 PYTHONPATH="$SRC_DIR" python3.12 -c "
 import sys, os, sqlite3
@@ -57,21 +57,18 @@ sys.path.insert(0, '$SRC_DIR')
 import database_manager
 database_manager.DB_NAME='kodo_pos.db'
 database_manager.initialiser_db()
-database_manager.DB_NAME='ladresse_b.db'
-database_manager.initialiser_db()
 
-for db_file in ['kodo_pos.db', 'ladresse_b.db']:
-    conn = sqlite3.connect(os.path.join('$SRC_DIR', db_file))
-    c = conn.cursor()
-    user_tables = ['produits', 'clients', 'ventes', 'ligne_ventes', 'stocks', 'sessions_caisse', 'depenses_caisse', 'ledger_caisse', 'rapports_z', 'clotures_z', 'tickets_en_attente']
-    existing = [row[0] for row in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall()]
-    total_user_rows = sum(c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in user_tables if t in existing)
-    conn.close()
-    if total_user_rows > 0:
-        print(f'❌ ERREUR: La BDD usine {db_file} contient {total_user_rows} donnees utilisateur !')
-        sys.exit(1)
-    else:
-        print(f'✅ BDD usine {db_file} verifiee : 0 donnee utilisateur.')
+conn = sqlite3.connect(os.path.join('$SRC_DIR', 'kodo_pos.db'))
+c = conn.cursor()
+user_tables = ['produits', 'clients', 'ventes', 'ligne_ventes', 'stocks', 'sessions_caisse', 'depenses_caisse', 'ledger_caisse', 'rapports_z', 'clotures_z', 'tickets_en_attente']
+existing = [row[0] for row in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall()]
+total_user_rows = sum(c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in user_tables if t in existing)
+conn.close()
+if total_user_rows > 0:
+    print(f'❌ ERREUR: La BDD usine kodo_pos.db contient {total_user_rows} donnees utilisateur !')
+    sys.exit(1)
+else:
+    print(f'✅ BDD usine kodo_pos.db verifiee : 0 donnee utilisateur.')
 "
 
 if [ $? -ne 0 ]; then
@@ -188,7 +185,7 @@ rm -rf /tmp/dmg_build "$DIST_DIR" "$WORK_DIR" "$BUILD_DIR" "$APFS_BUILD"
 # 7. GÉNÉRATION DU PACK WINDOWS (Kodo_POS_v1.0.45_Windows_Pack.zip)
 echo "🪟 Préparation du pack de build Windows ($WIN_ZIP)..."
 rm -f "$SRC_DIR/$WIN_ZIP" ~/Desktop/"$WIN_ZIP"
-cd "$SRC_DIR" && zip -r -1 "$SRC_DIR/$WIN_ZIP" launch_app.py Lancer_Kodo.bat server_pos.py database_manager.py export_manager.py audit_trail.py backup_manager.py ticket_printer.py pdf_generator.py license_manager.py shopify_sync.py firebase_sync.py Kodo_POS_Windows.spec build_windows.bat logo.png logo_ticket.png instagram_block.png dist kodo_pos.db ladresse_b.db plan_permissions.json kodo_core core services views 2>/dev/null || true
+cd "$SRC_DIR" && zip -r -1 "$SRC_DIR/$WIN_ZIP" launch_app.py Lancer_Kodo.bat server_pos.py database_manager.py export_manager.py audit_trail.py backup_manager.py ticket_printer.py pdf_generator.py license_manager.py shopify_sync.py firebase_sync.py Kodo_POS_Windows.spec build_windows.bat logo.png logo_ticket.png instagram_block.png dist kodo_pos.db plan_permissions.json kodo_core core services views 2>/dev/null || true
 cp "$SRC_DIR/$WIN_ZIP" ~/Desktop/"$WIN_ZIP" 2>/dev/null || true
 
 echo "----------------------------------------------------"

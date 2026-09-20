@@ -17,7 +17,6 @@ datas = [
     ('logo_ticket.png', '.'),
     ('instagram_block.png', '.'),
     ('kodo_pos.db', '.'),
-    ('ladresse_b.db', '.'),
     ('plan_permissions.json', '.'),
     ('dist', 'dist')
 ]

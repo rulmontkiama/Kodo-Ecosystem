@@ -35,12 +35,12 @@ def reset_database():
             
         # 3. Réinsérer les paramètres d'usine par défaut
         c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('pin_admin', ?)", (hash_pin('0000'),))
-        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_name', 'L''ADRESSE B')")
-        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_subtitle', 'Boutique de Mode')")
-        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_address', 'Chemin Rue 53, 4960 Malmedy')")
-        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_vat', 'BE 1035.331.577')")
+        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_name', 'KŌDO POS')")
+        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_subtitle', 'Boutique')")
+        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_address', '')")
+        c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('shop_vat', '')")
         c.execute("INSERT INTO Parametres (cle, valeur) VALUES ('default_tva', '0.21')")
-        print("   - Paramètres par défaut insérés ('pin_admin': '0000' haché, 'shop_name': 'L''ADRESSE B').")
+        print("   - Paramètres par défaut insérés ('pin_admin': '0000' haché, 'shop_name': 'KŌDO POS').")
         
         # 4. Réinsérer le Vendeur Administrateur d'usine
         c.execute("INSERT INTO Vendeurs (nom, pin, role_admin) VALUES ('Administrateur', ?, 1)", (hash_pin('0000'),))

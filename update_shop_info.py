@@ -10,11 +10,14 @@ import os
 import sys
 
 def get_db_path():
-    user_db = os.path.expanduser("~/Documents/Kodo_POS/ladresse_b.db")
-    if os.path.exists(user_db):
-        return user_db
-    local_db = os.path.abspath("ladresse_b.db")
-    return local_db
+    try:
+        from core.config import ShopConfig
+        return ShopConfig.get_db_path("kodo_pos.db")
+    except Exception:
+        user_db = os.path.expanduser("~/Documents/Kodo_POS/kodo_pos.db")
+        if os.path.exists(user_db):
+            return user_db
+        return os.path.abspath("kodo_pos.db")
 
 def update_shop_info(shop_name=None, shop_subtitle=None, shop_address=None, shop_vat=None):
     db_path = get_db_path()

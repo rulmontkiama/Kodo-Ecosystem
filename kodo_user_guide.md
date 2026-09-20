@@ -1,5 +1,5 @@
 # 📖 Guide de Démarrage Rapide — Kōdo POS
-### Boutique Pilote : L'ADRESSE B (Bruxelles)
+### Guide Pratique & Manuel d'Utilisation
 
 Bienvenue dans le guide d'utilisation quotidien de votre logiciel de caisse **Kōdo POS**. Ce document simple et illustré a été conçu pour vous aider, vous et votre équipe, à maîtriser les opérations indispensables de la journée.
 
@@ -10,7 +10,7 @@ Kōdo POS se compose d'une barre de navigation latérale gauche pour passer d'un
 
 ```text
 ┌────────────────────────┐
-│      L'ADRESSE B       │
+│       KŌDO POS         │
 ├────────────────────────┤
 │  [ Caisse ]            │ <-- Écran de vente quotidien
 │  [ Stocks ]            │ <-- Gestion des produits, tailles et quantités
@@ -175,8 +175,8 @@ Si le montant en espèces compté ne correspond pas au montant théorique attend
 ### 💾 Résultats de la Clôture :
 Dès que vous validez définitivement :
 1.  **Impression** : Le ticket **Rapport Z officiel** est imprimé sur votre imprimante thermique (CA TTC, CA HT, détail TVA 6% et 21%, répartition des paiements, écarts).
-2.  **Export Excel** : Un fichier Excel complet de la journée est automatiquement enregistré dans le dossier **`Exports_L_ADRESSE_B`** situé sur votre Mac (contenant la synthèse, le Top 5 des ventes et le détail de chaque ticket).
-3.  **Sauvegarde automatique** : Une copie de sauvegarde chiffrée et sécurisée de vos données de caisse est générée et stockée dans votre dossier Documents (`Backups_L_ADRESSE_B`).
+2.  **Export Excel** : Un fichier Excel complet de la journée est automatiquement enregistré dans le dossier **`Exports_Kodo_POS`** situé sur votre Mac (contenant la synthèse, le Top 5 des ventes et le détail de chaque ticket).
+3.  **Sauvegarde automatique** : Une copie de sauvegarde sécurisée de vos données de caisse est générée et stockée dans votre dossier Documents (`Backups_Kodo_POS`).
 
 ---
 
@@ -185,4 +185,4 @@ Dès que vous validez définitivement :
 *   **L'imprimante ne répond pas ?** Vérifiez qu'elle est bien allumée, que le voyant bleu est fixe, et qu'elle est connectée en USB à votre Mac. Si nécessaire, débranchez puis rebranchez le câble USB et relancez Kōdo POS.
 *   **Erreur de saisie ?** Si vous ajoutez un mauvais article au panier, cliquez sur le panier, sélectionnez l'article et ajustez sa quantité ou retirez-le avant de procéder au paiement.
 *   **Vente à l'aveugle (Pas de douchette) ?** Vous pouvez toujours faire vos ventes sans douchette en saisissant les codes EAN manuellement dans la barre de recherche ou en créant une **+ Prestation** rapide pour les articles de dernière minute.
-*   **Sauvegarde physique ?** Pensez à copier régulièrement le contenu du dossier `Backups_L_ADRESSE_B` sur une clé USB externe pour ne jamais perdre l'historique de votre boutique en cas de panne de votre ordinateur.
+*   **Sauvegarde physique ?** Pensez à copier régulièrement le contenu du dossier `Backups_Kodo_POS` sur une clé USB externe pour ne jamais perdre l'historique de votre boutique en cas de panne de votre ordinateur.

@@ -84,7 +84,7 @@ Le hash de clôture (`calculer_hash_cloture`) ne couvre que `date | caisse | tot
 
 **Correctif** : remplacer le hash nu par un HMAC‑SHA256 avec une clé générée à l'installation et stockée dans le Trousseau macOS / DPAPI Windows, ou mieux, signer chaque ticket avec une clé Ed25519 par installation (la brique `kodo_ed25519` est déjà là). Inclure `numero_ticket` dans le payload. Traiter une signature `NULL` comme une erreur, pas comme une exemption. Vérifier réellement la première ligne contre le bloc genesis.
 
-**Point de vigilance, hors code** : la conformité NF525 est une certification délivrée par un organisme accrédité (LNE ou Infocert), ou couverte par une attestation individuelle de l'éditeur engageant sa responsabilité. Les commentaires du code affirment « Conforme NF525/LNE » ; tant que la certification n'est pas obtenue, cette formulation expose juridiquement — et le client qui l'utiliserait en cas de contrôle fiscal serait exposé aussi. Je ne suis pas juriste et ce point mérite une vérification auprès d'un conseil, mais il vaut la peine d'être posé maintenant plutôt qu'après un contrôle. À noter par ailleurs que la Belgique, où opère `L'ADRESSE B`, relève du système SCE / boîte noire pour les secteurs concernés, pas de NF525 qui est un référentiel français.
+**Point de vigilance, hors code** : la conformité NF525 est une certification délivrée par un organisme accrédité (LNE ou Infocert), ou couverte par une attestation individuelle de l'éditeur engageant sa responsabilité. Les commentaires du code affirment « Conforme NF525/LNE » ; tant que la certification n'est pas obtenue, cette formulation expose juridiquement — et le client qui l'utiliserait en cas de contrôle fiscal serait exposé aussi. Je ne suis pas juriste et ce point mérite une vérification auprès d'un conseil, mais il vaut la peine d'être posé maintenant plutôt qu'après un contrôle. À noter par ailleurs que la Belgique, où opère la boutique cliente, relève du système SCE / boîte noire pour les secteurs concernés, pas de NF525 qui est un référentiel français.
 
 ---
 
@@ -202,7 +202,7 @@ La même logique se retrouve à la sérialisation : `json_serial` convertit tout
 
 **Moyen terme — un à deux mois.** Reprendre le scellement fiscal : HMAC ou Ed25519 avec clé par installation, `numero_ticket` inclus dans le payload, `NULL` traité comme une erreur, première ligne réellement vérifiée. Passer en `ThreadingHTTPServer` avec transactions `IMMEDIATE` sur le chaînage. Supprimer `main_app.py` et `views/`, réduire `database_manager.py` à un alias. Purger `.npm-cache` du suivi git. Mettre en place la signature Developer ID et la notarisation.
 
-**À trancher hors code.** La position sur NF525 : soit engager la certification, soit ajuster la formulation dans le code, la documentation et le discours commercial. Et vérifier le référentiel applicable en Belgique pour `L'ADRESSE B`, qui n'est pas le même qu'en France.
+**À trancher hors code.** La position sur NF525 : soit engager la certification, soit ajuster la formulation dans le code, la documentation et le discours commercial. Et vérifier le référentiel applicable en Belgique pour la boutique cliente, qui n'est pas le même qu'en France.
 
 ---
 
