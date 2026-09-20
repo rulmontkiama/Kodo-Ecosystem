@@ -18,7 +18,10 @@ datas = [
     ('instagram_block.png', '.'),
     ('kodo_pos.db', '.'),
     ('plan_permissions.json', '.'),
-    ('dist', 'dist')
+    ('dist', 'dist'),
+    # Diagnostic d'installation, embarque pour pouvoir etre lance sur la machine
+    # d'un commercant sans reseau ni telechargement.
+    ('scripts/kodo_check.sh', 'scripts')
 ]
 
 binaries = []
