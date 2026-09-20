@@ -898,7 +898,7 @@ def initialiser_db(db_path: str = None, conn=None):
             cursor.execute('''
                 INSERT INTO ShopInfo (nom_magasin, adresse, siret_tva, type_commerce, devise)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (ShopConfig.NOM_MAGASIN_DEFAULT, "Boutique Pilote", "BE 0123.456.789", ShopConfig.PROFIL_METIER, ShopConfig.DEVISE_DEFAULT))
+            ''', (ShopConfig.NOM_MAGASIN_DEFAULT, "", "", ShopConfig.PROFIL_METIER, ShopConfig.DEVISE_DEFAULT))
 
         cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('pin_admin', ?)", (hash_pin('0000'),))
         cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_name', ?)", (ShopConfig.NOM_MAGASIN_DEFAULT,))

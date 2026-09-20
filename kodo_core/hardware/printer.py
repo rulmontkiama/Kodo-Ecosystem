@@ -311,12 +311,19 @@ class ESCPOSThermalPrinter:
 # GÉNÉRATEURS DE TICKETS DE CAISSE (VENTE, A EMPORTER, PROMO)
 # ---------------------------------------------------------------------------
 
+# Un ticket de caisse belge porte obligatoirement le numéro de TVA du commerçant.
+# Aucun numéro par défaut n'est acceptable : un numéro inventé sur un document fiscal
+# est plus grave qu'une mention manquante. Tant que le commerçant ne l'a pas saisi dans
+# Paramètres, le ticket le signale explicitement au lieu de sortir silencieusement
+# non conforme ou au nom d'un tiers.
+TVA_NON_RENSEIGNEE = ""
+
 def generer_ticket(numero, panier, total_tvac, remise,
                    paiements, rendu_monnaie,
                    nom_client=None, shop_name="Mon Commerce",
                    shop_subtitle="Boutique",
                    shop_address="",
-                   shop_vat="BE 0123.456.789",
+                   shop_vat=TVA_NON_RENSEIGNEE,
                    vendeur_nom="Caissier",
                    is_gift=False,
                    ecart_arrondi_cash=None):
@@ -336,8 +343,11 @@ def generer_ticket(numero, panier, total_tvac, remise,
     if shop_address:
         lines.append(_center(shop_address))
     if shop_vat:
-        vat_str = shop_vat if shop_vat.startswith("TVA:") else f"TVA: {shop_vat}"
+        vat_str = shop_vat if str(shop_vat).startswith("TVA") else f"TVA: {shop_vat}"
         lines.append(_center(vat_str))
+    else:
+        lines.append(_center("** N° TVA NON RENSEIGNÉ **"))
+        lines.append(_center("Paramètres > Boutique"))
     lines.append(_separator("="))
     
     # Traçabilité
@@ -1094,7 +1104,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
         shop_name = "Mon Commerce"
         shop_sub = "Boutique"
         shop_addr = ""
-        shop_vat = "BE 0123.456.789"
+        shop_vat = TVA_NON_RENSEIGNEE
         try:
             c.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'shop_%'")
             params = dict(c.fetchall())
@@ -1159,7 +1169,7 @@ def ouvrir_tiroir_caisse(printer_name=None, host=None, port=9100):
 
 def generer_ticket_test(shop_name="KŌDO POS",
                         shop_address="Avenue Louise 100, 1050 Bruxelles",
-                        shop_vat="BE 0123.456.789",
+                        shop_vat=TVA_NON_RENSEIGNEE,
                         shop_iban="BE68 0000 0000 0000",
                         printer_ip="192.168.1.150"):
     """
@@ -1226,7 +1236,7 @@ def imprimer_ticket_test(printer_name=None, host=None, port=9100):
 
     shop_name = params.get("shop_name", "KŌDO POS")
     shop_addr = params.get("shop_address", "Bruxelles, Belgique")
-    shop_vat = params.get("shop_tva", params.get("shop_bce", "BE 0123.456.789"))
+    shop_vat = params.get("shop_tva", params.get("shop_bce", TVA_NON_RENSEIGNEE))
     shop_iban = params.get("shop_iban", "BE68 0000 0000 0000")
     printer_ip = host or params.get("printer_ip", "192.168.1.150")
 

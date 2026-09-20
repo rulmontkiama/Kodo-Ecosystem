@@ -6,6 +6,7 @@ from decimal import Decimal
 import json
 
 # Override DB_NAME to run tests on a separate test database
+os.environ["KODO_DB_PATH"] = os.path.abspath("test_kodo_pos.db")
 import database_manager
 database_manager.DB_NAME = "test_kodo_pos.db"
 
@@ -167,9 +168,12 @@ def run_tests():
                     ]
                 }
             ]}
+        elif "locations.json" in endpoint:
+            return {"locations": [{"id": 123456}]}
         return None
         
     sync_thread._make_request = mock_make_request
+    sync_thread.engine.make_request = mock_make_request
     
     # A. Test Push : Vente locale vers Shopify
     c.execute("UPDATE Tickets SET synced_shopify = 0")
@@ -228,9 +232,9 @@ def run_tests():
         import hashlib
         return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
-    t = audit_trail.verifier_chainage("Tickets", compute_hash_func=hash_ticket)
-    l = audit_trail.verifier_chainage("Ledger_Caisse", compute_hash_func=hash_ledger)
-    z = audit_trail.verifier_chainage("Rapports_Z", compute_hash_func=hash_z)
+    t = audit_trail.verifier_chainage("Tickets", compute_hash_func=hash_ticket, conn=conn)
+    l = audit_trail.verifier_chainage("Ledger_Caisse", compute_hash_func=hash_ledger, conn=conn)
+    z = audit_trail.verifier_chainage("Rapports_Z", compute_hash_func=hash_z, conn=conn)
     
     assert t and l and z, "La validation cryptographique de l'audit trail a échoué"
     print("✅ Audit Trail cryptographique validé avec succès.")
@@ -275,11 +279,14 @@ def run_tests():
     # On modifie le fichier de cache manuellement sans recalculer la signature
     from database_manager import data_path
     cache_path = data_path("license_cache.json")
+    backup_path = os.path.expanduser("~/Library/Application Support/Kodo_POS/license.lic")
     with open(cache_path, "r") as f:
         tampered_data = json.load(f)
     tampered_data["status"] = "active_free" # Modification frauduleuse
     with open(cache_path, "w") as f:
         json.dump(tampered_data, f)
+    if os.path.exists(backup_path):
+        os.remove(backup_path)
         
     tampered_cache = license_manager.load_local_license()
     assert tampered_cache is None, "La détection de falsification du cache local a échoué (devrait renvoyer None)"
@@ -304,6 +311,8 @@ def run_tests():
     # Nettoyage du fichier cache de test
     if os.path.exists(cache_path):
         os.remove(cache_path)
+    if os.path.exists(backup_path):
+        os.remove(backup_path)
     print("✅ Système de licence testé avec succès.")
     
     conn.close()

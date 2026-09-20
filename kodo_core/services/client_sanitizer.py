@@ -48,6 +48,16 @@ def sanitize_client_environment() -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Avertissement sauvegarde préalable : {e}")
 
+    # 1.5 Reprise d'une base héritée : explicite, vérifiée, et seulement si kodo_pos.db est absent.
+    try:
+        rapport = database_manager.migrer_base_heritee(dry_run=False)
+        if rapport.get("migre"):
+            actions_taken.append(f"Base héritée reprise avec succès ({rapport.get('produits', 0)} produits)")
+        elif rapport.get("source"):
+            logger.warning(f"Reprise de base héritée non effectuée : {rapport.get('raison')}")
+    except Exception as me:
+        logger.warning(f"Reprise de base héritée impossible : {me}")
+
     # 2. AUCUNE purge du cache IHM. ~/Library/Caches/KodoPOS/dist et ~/.kodo_pos/dist sont les
     # dossiers d'INSTALLATION des mises à jour OTA (updater.get_target_dist_dir), lus en
     # priorité par server_pos.get_dist_dir. Les effacer — et supprimer le version.json frère —

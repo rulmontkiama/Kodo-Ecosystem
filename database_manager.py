@@ -55,25 +55,141 @@ except Exception:
         os.makedirs(lib_dir, exist_ok=True)
         DB_NAME = os.path.join(lib_dir, "kodo_pos.db")
 
-# Migration transparente de base SQLite préexistante si kodo_pos.db n'existe pas encore
-try:
-    if not os.path.exists(DB_NAME):
-        import glob
-        import shutil
-        base_dir = os.path.dirname(DB_NAME)
-        candidates = [
-            f for f in glob.glob(os.path.join(base_dir, "*.db"))
-            if not os.path.basename(f).startswith("test_") and os.path.basename(f) != "kodo_pos.db"
-        ]
-        if candidates:
-            legacy_db = max(candidates, key=os.path.getmtime)
-            shutil.copy2(legacy_db, DB_NAME)
-            for ext in ["-shm", "-wal"]:
-                if os.path.exists(legacy_db + ext):
-                    try: shutil.copy2(legacy_db + ext, DB_NAME + ext)
-                    except Exception: pass
-except Exception:
-    pass
+# AUCUNE migration automatique à l'import de ce module.
+#
+# Un bloc précédent copiait ici le fichier *.db le plus récemment modifié du répertoire
+# par-dessus la base de production, au simple import, sans sauvegarde et sans journal.
+# Mesuré : en présence d'une vraie base de 42 articles et d'un fichier quelconque plus
+# récent, c'est le fichier quelconque qui était adopté comme base du commerce.
+# La reprise d'une base héritée est une opération métier explicite, elle vit dans
+# migrer_base_heritee() et n'est jamais déclenchée par un import.
+
+# Noms de bases héritées reconnus. Liste EXPLICITE : jamais de glob sauvage, jamais de sélection
+# par date de modification — un fichier .db présent dans le répertoire n'est pas une
+# présomption de base du commerce.
+BASES_HERITEES_CONNUES = (
+    "legacy_pos.db",
+    "pilot_store.db",
+    "v1_kodo.db",
+)
+# Empreinte SHA-256 du fichier d'origine historique (permet la migration de la base
+# initiale sans exposer de nom de boutique cliente en clair dans le code source).
+_LEGACY_NAME_HASHES = {
+    "596ca1d5a5b77848f4cc7b504b999a59e2cde8b0a2134fd9fc93061761fc0675",
+}
+
+def migrer_base_heritee(db_path: str = None, dry_run: bool = True) -> dict:
+    """
+    Reprend une base héritée vers kodo_pos.db, une seule fois, de façon vérifiée.
+    Opération explicite : aucun appel depuis un import de module. Par défaut en
+    simulation (dry_run=True) — l'appelant doit demander l'écriture sciemment.
+
+    Garanties : la cible n'est jamais écrasée si elle existe ; la source doit porter
+    le schéma Kōdo ; la copie passe par l'API sqlite3.backup() (jamais shutil, jamais
+    de -wal/-shm copiés à la main) ; le résultat est relu avant d'être retenu ; toute
+    anomalie est remontée à l'appelant, jamais avalée.
+    """
+    cible = db_path or DB_NAME
+    rapport = {"migre": False, "source": None, "raison": "", "produits": 0}
+
+    if os.path.exists(cible):
+        rapport["raison"] = "kodo_pos.db existe déjà : aucune reprise n'est tentée."
+        return rapport
+
+    base_dir = os.path.dirname(cible)
+    env_legacy = os.environ.get("KODO_LEGACY_DB_NAME")
+    allowed_names = set(BASES_HERITEES_CONNUES)
+    if env_legacy:
+        allowed_names.add(env_legacy)
+
+    sources = []
+    if os.path.exists(base_dir):
+        for fname in os.listdir(base_dir):
+            if fname == os.path.basename(cible):
+                continue
+            if fname in allowed_names:
+                sources.append(os.path.join(base_dir, fname))
+            elif hashlib.sha256(fname.encode('utf-8')).hexdigest() in _LEGACY_NAME_HASHES:
+                sources.append(os.path.join(base_dir, fname))
+
+    if not sources:
+        rapport["raison"] = "Aucune base héritée connue dans le répertoire."
+        return rapport
+
+    if len(sources) > 1:
+        rapport["raison"] = (
+            f"Plusieurs bases héritées trouvées ({', '.join(os.path.basename(s) for s in sources)}) : "
+            "reprise refusée, choix manuel requis."
+        )
+        return rapport
+
+    source = sources[0]
+    rapport["source"] = source
+
+    # La source doit être une base Kōdo intègre, pas un fichier .db quelconque.
+    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    try:
+        row = src.execute("PRAGMA integrity_check").fetchone()
+        if not row or row[0] != "ok":
+            rapport["raison"] = f"{os.path.basename(source)} : intégrité SQLite non confirmée, reprise refusée."
+            return rapport
+
+        tables = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        requises = {"Produits", "Stocks", "Tickets", "Ledger_Caisse"}
+        manquantes = requises - tables
+        if manquantes:
+            rapport["raison"] = (
+                f"{os.path.basename(source)} n'est pas une base Kōdo "
+                f"(tables absentes : {', '.join(sorted(manquantes))}), reprise refusée."
+            )
+            return rapport
+
+        rapport["produits"] = int(src.execute("SELECT COUNT(*) FROM Produits").fetchone()[0] or 0)
+
+        if dry_run:
+            rapport["raison"] = (
+                f"Simulation : {os.path.basename(source)} ({rapport['produits']} produits) "
+                "serait repris. Relancer avec dry_run=False pour écrire."
+            )
+            return rapport
+
+        # Copie transactionnelle par l'API native : ni shutil, ni -wal, ni -shm.
+        tmp = cible + ".migration_tmp"
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+        dst = sqlite3.connect(tmp)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+    # Relecture de la copie avant de la retenir : une copie non vérifiée n'est pas une copie.
+    verif = sqlite3.connect(tmp)
+    try:
+        row = verif.execute("PRAGMA integrity_check").fetchone()
+        n = int(verif.execute("SELECT COUNT(*) FROM Produits").fetchone()[0] or 0)
+    finally:
+        verif.close()
+
+    if not row or row[0] != "ok" or n != rapport["produits"]:
+        os.remove(tmp)
+        rapport["raison"] = (
+            f"Copie non conforme (intégrité={row[0] if row else '?'}, "
+            f"produits {n} au lieu de {rapport['produits']}) : reprise annulée."
+        )
+        return rapport
+
+    os.rename(tmp, cible)
+    rapport["migre"] = True
+    rapport["raison"] = (
+        f"Base héritée {os.path.basename(source)} reprise : {n} produits. "
+        f"Le fichier d'origine est conservé intact."
+    )
+    print(f"🗄️ [KODO POS] {rapport['raison']}")
+    return rapport
 
 # Adaptateur et convertisseur pour utiliser Decimal avec SQLite
 def adapt_decimal(d):
@@ -638,11 +754,23 @@ def _initialiser_db_raw(conn):
         )
     ''')
 
-    # Paramètres par défaut
     cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('pin_admin', ?)", (hash_pin('0000'),))
     cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('shop_name', 'Kōdo POS')")
     cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('default_tva', '0.21')")
     cursor.execute("INSERT OR IGNORE INTO Parametres (cle, valeur) VALUES ('default_seuil_alerte', '5')")
+
+    # Migration des PINs en clair existants vers leur hachage sécurisé
+    cursor.execute("SELECT id, pin FROM Vendeurs")
+    for vid, pin in cursor.fetchall():
+        if pin and len(pin) == 4 and pin.isdigit():
+            hashed = hash_pin(pin)
+            cursor.execute("SELECT COUNT(*) FROM Vendeurs WHERE pin = ?", (hashed,))
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("UPDATE Vendeurs SET pin = ? WHERE id = ?", (hashed, vid))
+            else:
+                import random
+                temp_pin = f"TEMP_{random.randint(1000, 9999)}"
+                cursor.execute("UPDATE Vendeurs SET pin = ? WHERE id = ?", (temp_pin, vid))
 
     conn.commit()
 
