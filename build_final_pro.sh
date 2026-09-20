@@ -97,9 +97,25 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 1.5 COMPILATION & COPIE DU FRONTEND REACT (VITE)
-echo "⚡ Copie du frontend React Vite..."
-python3 -c "import shutil, glob; src = glob.glob('/Users/kiamarulmont/Desktop/*k*do-pos-3*/dist')[0]; shutil.rmtree('$SRC_DIR/dist', ignore_errors=True); shutil.copytree(src, '$SRC_DIR/dist')" 2>/dev/null || true
+# 1.5 CONTRÔLE DU FRONTEND EMBARQUÉ
+# La construction et la copie ont lieu en 0.1, AVANT la réinitialisation usine, et
+# échouent bruyamment. Une seconde copie existait ici, en `2>/dev/null || true` :
+# muette par construction, elle aurait laissé passer un dist absent ou périmé en
+# annonçant un build réussi. Elle est remplacée par une vérification bloquante.
+echo "⚡ Vérification du frontend embarqué..."
+BUNDLE_JS=$(ls "$SRC_DIR/dist/assets/"*.js 2>/dev/null | head -1)
+if [ ! -f "$SRC_DIR/dist/index.html" ] || [ -z "$BUNDLE_JS" ]; then
+  echo "❌ dist/ incomplet : index.html ou bundle JS manquant. Build annulé."
+  exit 1
+fi
+# -F obligatoire : sans lui, les points de "2.0.1" sont des jokers regex et
+# la garde est satisfaite par n'importe quel "2001" du bundle minifié.
+if ! grep -qF "$KODO_VERSION" "$BUNDLE_JS"; then
+  echo "❌ Le bundle embarqué ne contient pas la version $KODO_VERSION."
+  echo "   Le frontend livré serait antérieur aux dernières modifications. Build annulé."
+  exit 1
+fi
+echo "✅ Frontend embarqué vérifié (version $KODO_VERSION présente dans $(basename "$BUNDLE_JS"))."
 
 # 1.6 VERSION DE BASE DU DMG (référence des patchs backend signés : kodo_base.BASE_VERSION)
 echo "🔏 Alignement de la version de base des correctifs backend..."
