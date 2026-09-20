@@ -337,9 +337,12 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "address": params.get("shop_address", ""),
             "bceNumber": params.get("shop_bce", params.get("shop_siret", "")),
             "tvaNumber": params.get("shop_tva", ""),
-            "iban": params.get("shop_iban", "BE68 0000 0000 0000"),
+            # Valeur vide, jamais fictive : l'écran distingue « non renseigné » d'un IBAN réel.
+            "iban": params.get("shop_iban", ""),
             "fondCaisse": fond_caisse,
-            "printerIP": params.get("printer_ip", "192.168.1.150"),
+            # Valeur vide plutôt qu'une IP inventée : « 192.168.1.150 » désigne un appareil
+            # quelconque du réseau du commerçant, pas forcément son imprimante.
+            "printerIP": params.get("printer_ip", ""),
             "shopifyDomain": params.get("shopify_store_url", ""),
             "shopifyToken": params.get("shopify_access_token", ""),
             "shopifyConnected": bool(params.get("shopify_store_url") and params.get("shopify_access_token")),

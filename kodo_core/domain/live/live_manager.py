@@ -968,9 +968,20 @@ class LiveManager:
             if has_virement:
                 cursor.execute("SELECT valeur FROM Parametres WHERE cle='shop_iban'")
                 iban_row = cursor.fetchone()
-                shop_iban = iban_row[0] if iban_row and iban_row[0] else "BE68 0000 0000 0000"
+                shop_iban = iban_row[0] if iban_row and iban_row[0] else ""
                 virement_ref = f"LIVE-{prenom_display.upper()}-{buyer_id}"
-                virement_info = f"\n\n🏦 Coordonnées pour le virement bancaire :\n• IBAN : {shop_iban}\n• Communication : {virement_ref}\n• Montant : {total:.2f}€"
+                if shop_iban:
+                    virement_info = f"\n\n🏦 Coordonnées pour le virement bancaire :\n• IBAN : {shop_iban}\n• Communication : {virement_ref}\n• Montant : {total:.2f}€"
+                else:
+                    # Sans IBAN configuré, ce message demandait un virement vers
+                    # « BE68 0000 0000 0000 » : une cliente aurait envoyé de l'argent réel
+                    # vers un compte inexistant. On n'invente jamais une coordonnée bancaire.
+                    virement_info = (
+                        f"\n\n🏦 Virement bancaire :\n"
+                        f"• Communication : {virement_ref}\n"
+                        f"• Montant : {total:.2f}€\n"
+                        f"• L'IBAN vous sera communiqué par la boutique."
+                    )
 
             message = (
                 f"Bonjour {prenom_display} {'(' + pseudo + ') ' if pseudo else ''}👋\n\n"

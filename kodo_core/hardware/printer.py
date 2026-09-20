@@ -1168,10 +1168,10 @@ def ouvrir_tiroir_caisse(printer_name=None, host=None, port=9100):
 
 
 def generer_ticket_test(shop_name="KŌDO POS",
-                        shop_address="Avenue Louise 100, 1050 Bruxelles",
+                        shop_address="",
                         shop_vat=TVA_NON_RENSEIGNEE,
-                        shop_iban="BE68 0000 0000 0000",
-                        printer_ip="192.168.1.150"):
+                        shop_iban="",
+                        printer_ip=""):
     """
     Génère le texte d'un ticket de test thermique ESC/POS 80mm.
     """
@@ -1235,9 +1235,9 @@ def imprimer_ticket_test(printer_name=None, host=None, port=9100):
         params = {}
 
     shop_name = params.get("shop_name", "KŌDO POS")
-    shop_addr = params.get("shop_address", "Bruxelles, Belgique")
+    shop_addr = params.get("shop_address", "")
     shop_vat = params.get("shop_tva", params.get("shop_bce", TVA_NON_RENSEIGNEE))
-    shop_iban = params.get("shop_iban", "BE68 0000 0000 0000")
+    shop_iban = params.get("shop_iban", "")
     printer_ip = host or params.get("printer_ip", "192.168.1.150")
 
     txt = generer_ticket_test(
