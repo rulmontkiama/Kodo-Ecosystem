@@ -119,7 +119,7 @@ else
       *) ok "N° TVA : $TVA" ;;
     esac
   else
-    warn "N° TVA NON RENSEIGNÉ — les tickets afficheront l'avertissement. À compléter dans Paramètres > Boutique"
+    warn "N° TVA non renseigné — absent des tickets, et signalé à la caissière à chaque vente. À compléter dans Paramètres > Boutique"
   fi
   [ -n "$BCE" ] && ok "N° BCE : $BCE" || warn "N° BCE non renseigné"
   case "$IBAN" in
