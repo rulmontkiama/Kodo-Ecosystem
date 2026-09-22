@@ -101,20 +101,37 @@ class ZReportEngine:
                         "tvac": tvac_d,
                     }
 
-                # Réconciliation du centime d'arrondi sur la base HT. Le bilan somme les
-                # `Tickets.total_htva` DÉJÀ scellés (arrondis ligne par ligne au moment de la
-                # vente) ; la ventilation, elle, ré-arrondit une seule fois par taux agrégé.
+                # Réconciliation du centime d'arrondi. Le bilan somme les `Tickets` DÉJÀ
+                # scellés ; la ventilation, elle, arrondit une fois par couple (ticket, taux).
                 # Les deux ne tombent pas sur le même centime : mesuré -0,02 € de base HT sur
                 # 40 ventes, soit un Z dont la ventilation TVA ne justifie pas ses propres
                 # totaux — exactement ce qu'un contrôle NF525 regarde.
                 # Le ticket scellé fait foi : on aligne la ventilation sur lui, jamais l'inverse.
-                # Garde-fou : on ne recale QUE si le TVAC ventilé correspond déjà exactement au
-                # TVAC du bilan. Sinon l'écart n'est pas un arrondi mais un vrai problème de
-                # données (ticket sans produit rattaché, taux manquant), et le masquer dans le
-                # plus gros taux le rendrait indétectable.
+                #
+                # Le résidu ne porte pas toujours sur la base HT. Deux taux dans un même panier
+                # et une remise suffisent à décaler le TVAC : 10,01 € à 21 % + 10,01 € à 6 %
+                # remisés de 50 % donnent 5,01 + 5,01 = 10,02 ventilés contre 10,01 scellés.
+                # Recaler le TVAC vient donc AVANT, sans quoi le garde-fou du HT ne se
+                # déclenche jamais dans ce cas et le Z publie une ventilation qui annonce plus
+                # que son propre total.
+                #
+                # Garde-fou : on ne recale que dans la limite de ce qu'un arrondi peut produire,
+                # soit au plus un centime par arrondi effectué (un par couple ticket/taux,
+                # c'est-à-dire par ligne de `rows`). Au-delà, l'écart n'est pas un arrondi mais
+                # un vrai problème de données (ticket sans produit rattaché, taux manquant), et
+                # le masquer dans le plus gros taux le rendrait indétectable.
                 bilan_tvac = quantize_money(bilan.get("total_tvac"))
                 bilan_htva = quantize_money(bilan.get("total_htva"))
                 somme_tvac = sum((v["tvac"] for v in ventile.values()), Decimal('0.00'))
+                tolerance = Decimal('0.01') * len(rows)
+
+                residu_tvac = bilan_tvac - somme_tvac
+                if ventile and residu_tvac != Decimal('0.00') and abs(residu_tvac) <= tolerance:
+                    cible = max(sorted(ventile.items()), key=lambda couple: couple[1]["tvac"])[1]
+                    cible["tvac"] += residu_tvac
+                    cible["tva"] = cible["tvac"] - cible["htva"]
+                    somme_tvac = bilan_tvac
+
                 somme_htva = sum((v["htva"] for v in ventile.values()), Decimal('0.00'))
                 if ventile and somme_tvac == bilan_tvac and somme_htva != bilan_htva:
                     cible = max(sorted(ventile.items()), key=lambda couple: couple[1]["tvac"])[1]

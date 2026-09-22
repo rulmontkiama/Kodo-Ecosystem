@@ -19,6 +19,7 @@ Trois familles de régressions comptables sont verrouillées ici :
 
 Base temporaire pour les tests de clôture : aucune donnée réelle touchée.
 """
+import datetime
 import os
 import random
 import sys
@@ -352,6 +353,100 @@ class TestVentilationTvaDuZ(unittest.TestCase):
             sum((Decimal(str(v["htva"])) for v in ventilation), Decimal("0.00")), total_htva)
         self.assertEqual(
             sum((Decimal(str(v["tva"])) for v in ventilation), Decimal("0.00")), total_tva)
+
+    def test_ventilation_tva_du_z_se_referme_aussi_quand_le_centime_porte_sur_le_tvac(self):
+        """
+        Le résidu d'arrondi ne tombe pas toujours sur la base HT.
+
+        La ventilation arrondit une fois par couple (ticket, taux) ; `Tickets.total_tvac` a
+        été scellé en une seule fois. Avec deux taux dans le même panier et une remise, la
+        somme des TVAC ventilés peut dépasser d'un centime le total scellé. La réconciliation
+        ne corrigeait QUE la base HT, et ne se déclenchait que si le TVAC tombait déjà juste :
+        dans ce cas-là, elle ne faisait rien et le Z publiait une ventilation annonçant plus
+        de TVAC que son propre total.
+
+        Cas reproduit par le vrai chemin de vente : 10,01 € à 21 % + 10,01 € à 6 %, remise 50 %.
+        """
+        from kodo_core.domain.sales.cart_engine import process_sale_transaction
+
+        cursor = self.conn.cursor()
+        references = []
+        for taux in (0.21, 0.06):
+            cursor.execute(
+                "INSERT INTO Produits (nom, prix_vente_tvac, taux_tva, en_solde) VALUES (?, 10.01, ?, 0)",
+                (f"Article {taux}", taux))
+            produit_id = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO Stocks (id_produit, taille, quantite_actuelle) VALUES (?, 'Unique', 100)",
+                (produit_id,))
+            references.append((produit_id, cursor.lastrowid))
+        self.conn.commit()
+
+        process_sale_transaction(
+            cart_items=[{"stock_id": stock_id, "product_id": produit_id,
+                         "quantite": 1, "taille": "Unique"}
+                        for produit_id, stock_id in references],
+            total_tvac=0.0, payments=[("CB", 100.0)], discount_percent=50.0,
+            conn=self.conn, cashier_name="Test")
+        self.conn.commit()
+
+        bilan = ZReportEngine.get_daily_z_summary(conn=self.conn)
+        ventilation = bilan["vat_breakdown"].values()
+
+        self.assertEqual(
+            sum((Decimal(str(v["tvac"])) for v in ventilation), Decimal("0.00")),
+            Decimal(str(bilan["total_tvac"])),
+            "La ventilation annonce un TVAC différent du total du Z : un centime encaissé "
+            "nulle part, ou encaissé deux fois, selon le sens.")
+        self.assertEqual(
+            sum((Decimal(str(v["htva"])) for v in ventilation), Decimal("0.00")),
+            Decimal(str(bilan["total_htva"])))
+        self.assertEqual(
+            sum((Decimal(str(v["tva"])) for v in ventilation), Decimal("0.00")),
+            Decimal(str(bilan["total_tva"])))
+
+    def test_un_vrai_trou_de_donnees_reste_visible_et_nest_pas_recale(self):
+        """
+        La tolérance ne doit rattraper QUE de l'arrondi.
+
+        Un ticket sans aucune ligne de vente rattachée compte dans le total du Z mais
+        n'apparaît dans aucun taux : l'écart vaut son montant entier. Le masquer dans le plus
+        gros taux rendrait le trou indétectable — c'est exactement ce que le garde-fou existe
+        pour empêcher, et desserrer l'égalité stricte ne doit pas l'avoir supprimé.
+        """
+        from kodo_core.domain.sales.cart_engine import process_sale_transaction
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO Produits (nom, prix_vente_tvac, taux_tva, en_solde) VALUES ('Robe', 19.99, 0.21, 0)")
+        produit_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO Stocks (id_produit, taille, quantite_actuelle) VALUES (?, 'Unique', 100)",
+            (produit_id,))
+        stock_id = cursor.lastrowid
+        self.conn.commit()
+
+        process_sale_transaction(
+            cart_items=[{"stock_id": stock_id, "product_id": produit_id,
+                         "quantite": 1, "taille": "Unique"}],
+            total_tvac=0.0, payments=[("CB", 100.0)], discount_percent=0.0,
+            conn=self.conn, cashier_name="Test")
+
+        # Le trou : un ticket encaissé dont aucune ligne ne dit ce qui a été vendu.
+        cursor.execute(
+            "INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, total_tva, "
+            "methode_paiement) VALUES ('TCK-ORPHELIN', ?, 50.00, 41.32, 8.68, 'CB')",
+            (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
+        self.conn.commit()
+
+        bilan = ZReportEngine.get_daily_z_summary(conn=self.conn)
+        ventilation = bilan["vat_breakdown"].values()
+        somme_tvac = sum((Decimal(str(v["tvac"])) for v in ventilation), Decimal("0.00"))
+
+        self.assertNotEqual(
+            somme_tvac, Decimal(str(bilan["total_tvac"])),
+            "Un ticket sans ligne de vente a été absorbé dans la ventilation : le Z semble "
+            "cohérent alors qu'il manque la justification de 50 € encaissés.")
 
     def test_libelle_de_taux_du_z_ne_contient_quun_seul_pourcent(self):
         from kodo_core.domain.sales.cart_engine import process_sale_transaction
