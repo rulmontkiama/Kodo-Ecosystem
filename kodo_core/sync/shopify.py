@@ -368,13 +368,22 @@ class ShopifySync:
         """Vrai si le domaine de boutique EST exploitable ET le jeton d'accès renseigné."""
         return bool(self.access_token and domaine_boutique_valide(self.domaine()))
 
-    def make_request(self, endpoint: str, method: str = "GET", data: dict = None, max_retries: int = 3):
+    def make_request(self, endpoint: str, method: str = "GET", data: dict = None,
+                     max_retries: int = 3, rejouable: bool = True):
         """
         Exécute une requête HTTP REST ou GraphQL vers Shopify avec retry exponentiel (429 Rate Limit).
 
         Mémorise la nature de l'échec dans `self.dernier_echec` : un 4xx/5xx signifie que Shopify a
         répondu et n'a rien appliqué (on peut retenter sans risque), une coupure réseau signifie
         qu'on ignore si l'appel a porté (retenter pourrait décrémenter deux fois le stock).
+
+        `rejouable` dit si CET appel peut être rejoué après une coupure. Il vaut faux pour le
+        seul appel non idempotent du module, l'ajustement RELATIF d'inventaire : Shopify peut
+        l'avoir appliqué et la réponse s'être perdue (coupure Wi-Fi de boutique, délai de 12 s),
+        auquel cas le rejouer décrémente une seconde fois. Tout le mécanisme de réservation
+        `EN_VOL` → `INDETERMINE` repose sur cette promesse ; sans elle, il ne protège que du
+        crash du poste, pas du rejeu interne. Le 429 garde son attente : Shopify garantit alors
+        n'avoir rien appliqué.
         """
         if not self.est_configure():
             logger.warning("Configuration Shopify manquante ou invalide (domaine ou jeton).")
@@ -421,7 +430,7 @@ class ShopifySync:
                     return None
             except Exception as e:
                 logger.error(f"Erreur réseau/API sur {method} {endpoint} (essai {attempt}/{max_retries}): {e}")
-                if attempt < max_retries:
+                if rejouable and attempt < max_retries:
                     time.sleep(1.5 * attempt)
                 else:
                     self.dernier_echec = "reseau"
@@ -571,7 +580,9 @@ class ShopifySync:
             "available_adjustment": qty_change
         }
         self.dernier_echec = None
-        res = self.make_request("inventory_levels/adjust.json", method="POST", data=data)
+        # Mouvement RELATIF : jamais rejoué après une coupure (voir `make_request`).
+        res = self.make_request("inventory_levels/adjust.json", method="POST", data=data,
+                                rejouable=False)
         return res is not None
 
     def set_shopify_stock(self, inventory_item_id: int, location_id: str, quantite: int) -> bool:
@@ -850,9 +861,16 @@ class ShopifySync:
                 c.execute("UPDATE Stocks SET requires_stock_audit = 1 WHERE id = ?", (stock_id,))
             if produit_id:
                 c.execute("UPDATE Produits SET requires_stock_audit = 1 WHERE id = ?", (produit_id,))
-        except Exception:
-            # Colonne absente sur une base ancienne : l'incident reste tracé dans le journal.
-            pass
+        except Exception as e:
+            # On ne fait pas échouer toute la passe de synchronisation pour un drapeau : sur une
+            # base ancienne, la colonne `requires_stock_audit` peut simplement ne pas exister.
+            # Mais se taire était pire que le défaut : le drapeau est le SEUL signalement d'un
+            # écart de stock, et l'avaler en silence le rendait indétectable, y compris quand la
+            # cause n'était pas la colonne absente (un déclencheur refusant l'UPDATE, par ex.).
+            logger.error(
+                f"[SYNC AUDIT] Drapeau d'audit de stock NON posé (stock={stock_id}, "
+                f"produit={produit_id}) : {e}. L'écart de stock ne remontera pas à l'écran."
+            )
 
     def _prix_unitaire_tvac(self, order: dict, item: dict, repli):
         """
@@ -1305,6 +1323,15 @@ class ShopifySync:
                         recrediter_stock=recrediter,
                     )
                     tickets_crees.append(num_ref)
+                    # Le remboursement a eu lieu EN LIGNE : Shopify a déjà appliqué son propre
+                    # recrédit (`restock_type`), ou délibérément pas (`no_restock`). Ce ticket
+                    # porte une ligne `Ventes_Details` négative ; laissé à `synced_shopify = 0`,
+                    # il serait ramassé par la passe montante, qui pousserait `-(-1) = +1` vers
+                    # Shopify. L'ajustement d'inventaire est RELATIF : l'écart ne se rattrape
+                    # jamais, et en `no_restock` il crée une unité vendable qui n'existe pas.
+                    # Même principe que les commandes importées, insérées à `synced_shopify = 1`.
+                    c.execute("UPDATE Tickets SET synced_shopify = 1 WHERE numero_ticket = ?",
+                              (num_ref,))
                     montant_total += Decimal(str(total))
                     reste -= part
 

@@ -386,3 +386,92 @@ class TestRattachementParVariante(BaseTemporaire):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# =============================================================================================
+# 5. Un remboursement venu de Shopify ne repart jamais vers Shopify
+# =============================================================================================
+
+class TestLeRemboursementEnLigneNeRepartPas(BaseRemboursements):
+    """
+    Shopify a DÉJÀ recrédité son propre stock au moment du remboursement (`restock_type`).
+
+    Le ticket `REF-…` créé localement porte une ligne `Ventes_Details` négative et naissait
+    avec `synced_shopify = 0` : la passe montante `sync_tickets_to_shopify` le ramassait et
+    poussait `-(-1) = +1` vers Shopify. L'ajustement d'inventaire étant RELATIF, l'écart ne
+    se rattrape jamais. En `no_restock`, c'est pire : ni la caisse ni Shopify n'ont recrédité,
+    et la poussée créait une unité fantôme, vendable en ligne sans exister en rayon.
+
+    Les commandes importées appliquent déjà ce principe (`synced_shopify = 1` à l'insertion) ;
+    les remboursements ne le faisaient pas.
+    """
+
+    def moteur_montant(self):
+        """Un moteur capable de POUSSER : locations, résolution de variante, ajustement."""
+        from test_shopify_sync import REPONSE_LOCATIONS, reponse_graphql
+        return MoteurBouchonne(
+            {"locations.json": REPONSE_LOCATIONS,
+             "graphql.json": reponse_graphql(777),
+             "inventory_levels/adjust.json": {"inventory_level": {"available": 0}}},
+            store_url="boutique.myshopify.com", access_token="jeton")
+
+    def ajustements_pousses(self, moteur):
+        return [data for endpoint, data in moteur.appels
+                if endpoint.startswith("inventory_levels/adjust.json")]
+
+    def test_un_remboursement_en_ligne_n_est_pas_re_pousse_vers_shopify(self):
+        """Le scénario complet : Shopify recrédite, la caisse ne doit pas recréditer par-dessus."""
+        self.importer_puis_rembourser(self.commande(), [self.remboursement()])
+
+        montant = self.moteur_montant()
+        montant.sync_tickets_to_shopify()
+
+        self.assertEqual(
+            self.ajustements_pousses(montant), [],
+            "Le ticket de remboursement a été poussé vers Shopify : le stock en ligne est "
+            "recrédité une seconde fois, et un ajustement relatif ne se rattrape pas.")
+
+    def test_le_ticket_de_remboursement_nait_deja_synchronise(self):
+        """Le verrou, vu depuis la base : c'est lui qui écarte le ticket de la passe montante."""
+        self.importer_puis_rembourser(self.commande(), [self.remboursement()])
+
+        etats = self.rows("SELECT numero_ticket, synced_shopify FROM Tickets "
+                          "WHERE total_tvac < 0")
+        self.assertTrue(etats, "aucun ticket de remboursement créé")
+        for numero, synced in etats:
+            self.assertEqual(synced, 1, f"{numero} repartira vers Shopify à la prochaine passe.")
+
+    def test_no_restock_ne_cree_pas_d_unite_fantome_sur_shopify(self):
+        """Sans recrédit local ni recrédit Shopify, pousser inventerait une pièce."""
+        self.importer_puis_rembourser(
+            self.commande(), [self.remboursement(restock_type="no_restock")])
+
+        montant = self.moteur_montant()
+        montant.sync_tickets_to_shopify()
+
+        self.assertEqual(
+            self.ajustements_pousses(montant), [],
+            "Une unité inexistante a été ajoutée au stock Shopify : elle sera vendue en ligne.")
+
+    def test_une_vente_locale_normale_part_toujours_vers_shopify(self):
+        """Le verrou ne doit pas assécher la passe montante : seuls les REMBOURSEMENTS Shopify."""
+        self.ecrire("UPDATE Stocks SET quantite_actuelle = 3 WHERE id = ?", (self.stocks["M"],))
+        conn = database_manager.get_connection()
+        try:
+            c = conn.cursor()
+            c.execute("INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, "
+                      "total_tva, methode_paiement) VALUES ('V-LOCALE', '2026-02-03 10:00:00', "
+                      "30.00, 24.79, 5.21, 'Especes')")
+            c.execute("INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac) "
+                      "VALUES (?, ?, 1, 30.00)", (c.lastrowid, self.stocks["M"]))
+            conn.commit()
+        finally:
+            conn.close()
+
+        montant = self.moteur_montant()
+        montant.sync_tickets_to_shopify()
+
+        self.assertEqual(
+            [d.get("inventory_level_adjustment", d) for d in self.ajustements_pousses(montant)],
+            [{"inventory_item_id": 777, "location_id": 111, "available_adjustment": -1}],
+            "Une vente locale ordinaire doit continuer à décrémenter le stock en ligne.")

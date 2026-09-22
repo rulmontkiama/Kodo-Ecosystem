@@ -21,8 +21,10 @@ import ssl
 import sys
 import tempfile
 import threading
+import time
 import tokenize
 import unittest
+import urllib.error
 import urllib.request
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -144,7 +146,7 @@ class MoteurBouchonne(ShopifySync):
         self.reponses = reponses          # endpoint (ou préfixe) -> réponse ou callable
         self.appels = []                  # historique (endpoint, corps)
 
-    def make_request(self, endpoint, method="GET", data=None, max_retries=3):
+    def make_request(self, endpoint, method="GET", data=None, max_retries=3, rejouable=True):
         self.appels.append((endpoint, data))
         self.dernier_echec = None
         for cle, valeur in self.reponses.items():
@@ -283,6 +285,66 @@ class TestTransport(BaseTemporaire):
             for motif in ("CERT_NONE", "check_hostname=False"):
                 self.assertNotIn(motif.replace(" ", ""), code.replace(" ", ""),
                                  f"{relatif} neutralise à nouveau TLS ({motif})")
+
+    def _compter_essais(self, appel):
+        """Exécute `appel` en coupant le réseau à chaque essai, et compte les envois réels."""
+        essais = []
+
+        def urlopen_coupe(req, *a, **k):
+            essais.append(req.full_url)
+            raise urllib.error.URLError("connexion interrompue")
+
+        original, dormir = urllib.request.urlopen, time.sleep
+        urllib.request.urlopen = urlopen_coupe
+        time.sleep = lambda _s: None          # l'attente entre essais n'a rien à prouver ici
+        try:
+            resultat = appel()
+        finally:
+            urllib.request.urlopen = original
+            time.sleep = dormir
+        return len(essais), resultat
+
+    def test_un_ajustement_relatif_n_est_jamais_rejoue_apres_une_coupure(self):
+        """
+        Shopify peut avoir appliqué l'ajustement et la réponse s'être perdue.
+
+        Le rejeu renverrait la MÊME charge `{"available_adjustment": -1}` : Shopify
+        décrémenterait une seconde fois, sans qu'aucun statut ne le signale. Toute la
+        réservation `EN_VOL` → `INDETERMINE` repose sur le fait que cet appel-là n'est pas
+        rejoué — sous-décompter se corrige, sur-décompter non.
+        """
+        self.regler_shopify("boutique.myshopify.com", "jeton")
+        moteur = ShopifySync()
+
+        essais, applique = self._compter_essais(
+            lambda: moteur.adjust_shopify_stock(777, 111, -1))
+
+        self.assertEqual(essais, 1,
+                         f"L'ajustement relatif est parti {essais} fois : le stock en ligne peut "
+                         f"avoir été décrémenté autant de fois.")
+        self.assertFalse(applique)
+        self.assertEqual(moteur.dernier_echec, "reseau",
+                         "Sans `dernier_echec = 'reseau'`, la ligne n'est pas marquée INDETERMINE.")
+
+    def test_une_lecture_garde_ses_essais(self):
+        """Le verrou ne doit pas rendre la synchro fragile : relire est sans conséquence."""
+        self.regler_shopify("boutique.myshopify.com", "jeton")
+        moteur = ShopifySync()
+
+        essais, resultat = self._compter_essais(
+            lambda: moteur.make_request("locations.json"))
+
+        self.assertEqual(essais, 3, "Une simple lecture doit encore être retentée.")
+        self.assertIsNone(resultat)
+
+    def test_un_ajustement_absolu_garde_ses_essais(self):
+        """`inventory_levels/set.json` fixe une valeur : le rejouer ne change rien."""
+        self.regler_shopify("boutique.myshopify.com", "jeton")
+        moteur = ShopifySync()
+
+        essais, _ = self._compter_essais(lambda: moteur.set_shopify_stock(777, 111, 5))
+
+        self.assertEqual(essais, 3, "Un mouvement absolu est idempotent : il reste rejouable.")
 
     def test_un_domaine_externe_est_toujours_appele_en_https(self):
         """Même si la commerçante a saisi « http:// », le jeton ne part jamais en clair."""
