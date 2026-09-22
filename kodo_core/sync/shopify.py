@@ -110,19 +110,37 @@ def normaliser_domaine_boutique(valeur) -> str:
     return hote
 
 
+# Seul suffixe où répond l'API d'administration Shopify (voir `domaine_boutique_valide`).
+SUFFIXE_BOUTIQUE = ".myshopify.com"
+
+
 def _est_boucle_locale(domaine: str) -> bool:
     """Vrai si le domaine désigne la machine elle-même (serveur d'essai, jamais une vraie boutique)."""
     return domaine.split(":", 1)[0] in ("localhost", "127.0.0.1", "::1", "[::1]")
 
 
 def domaine_boutique_valide(domaine: str) -> bool:
-    """Vrai si le domaine normalisé peut désigner une boutique (un point, ou la machine locale)."""
+    """
+    Vrai si le domaine normalisé peut désigner une boutique Shopify.
+
+    L'API d'administration ne vit QUE sur `<boutique>.myshopify.com` : un domaine
+    personnalisé ne sert que la vitrine et ne répond jamais `/admin/api/...`. Accepter
+    n'importe quel hôte pointé revenait donc à laisser l'appelant choisir la destination de
+    l'en-tête `X-Shopify-Access-Token`. Un simple `POST /api/shopify/test` avec un domaine
+    quelconque et sans jeton suffisait : la route complétait le jeton depuis `Parametres` et
+    le moteur l'expédiait, en HTTPS vérifié, au serveur du demandeur. Le jeton
+    d'administration de la vraie boutique — catalogue, stocks, commandes, donc les données
+    des clientes — partait ainsi en une requête.
+
+    La boucle locale reste admise : c'est le serveur d'essai des tests d'intégration, jamais
+    une vraie boutique.
+    """
     if not domaine:
         return False
     if _est_boucle_locale(domaine):
         return True
-    hote = domaine.split(":", 1)[0]
-    return "." in hote and not hote.startswith(".") and not hote.endswith(".")
+    hote = domaine.split(":", 1)[0].lower()
+    return hote.endswith(SUFFIXE_BOUTIQUE) and len(hote) > len(SUFFIXE_BOUTIQUE)
 
 
 def enregistrer_etat_sync(ok: bool, message: str = ""):

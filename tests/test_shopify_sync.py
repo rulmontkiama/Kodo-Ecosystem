@@ -286,7 +286,9 @@ class TestTransport(BaseTemporaire):
 
     def test_un_domaine_externe_est_toujours_appele_en_https(self):
         """Même si la commerçante a saisi « http:// », le jeton ne part jamais en clair."""
-        self.regler_shopify("http://boutique-de-la-cliente.exemple", "jeton")
+        # Domaine en `.myshopify.com` : c'est le seul suffixe où répond l'API d'administration,
+        # et donc la seule destination que `domaine_boutique_valide` accepte hors boucle locale.
+        self.regler_shopify("http://boutique-de-la-cliente.myshopify.com", "jeton")
         urls = []
 
         class ReponseBidon:
@@ -306,7 +308,7 @@ class TestTransport(BaseTemporaire):
         finally:
             urllib.request.urlopen = original
         self.assertEqual(len(urls), 1)
-        self.assertTrue(urls[0].startswith("https://boutique-de-la-cliente.exemple/"), urls[0])
+        self.assertTrue(urls[0].startswith("https://boutique-de-la-cliente.myshopify.com/"), urls[0])
 
 
 # =============================================================================================

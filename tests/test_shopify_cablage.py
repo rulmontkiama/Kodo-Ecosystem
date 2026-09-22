@@ -195,3 +195,140 @@ class TestJetonShopifyNeSortPas(TestCablageShopify):
         self.assertEqual(coupables, [],
                          "le jeton d'administration Shopify est de nouveau écrit ou lu "
                          "dans le stockage du navigateur : " + ", ".join(coupables))
+
+
+class TestLeJetonNePartQueVersLaBoutiqueEnregistree(TestCablageShopify):
+    """
+    Le jeton d'administration ne doit jamais partir vers un domaine choisi par l'appelant.
+
+    `POST /api/shopify/test` complétait le couple champ par champ : un appel local sans jeton,
+    avec un domaine quelconque, faisait relire le jeton en base et l'expédiait — en HTTPS
+    vérifié, donc proprement — au serveur du demandeur, dans l'en-tête
+    `X-Shopify-Access-Token`. Ce jeton ouvre le catalogue, les stocks et les COMMANDES de la
+    boutique, donc les données des clientes, depuis n'importe où et longtemps après.
+
+    Deux verrous, testés séparément parce qu'ils protègent deux chemins distincts :
+    la route refuse de mélanger appelant et base ; le moteur refuse toute destination qui
+    n'est pas une boutique Shopify.
+    """
+
+    JETON_REEL = "shpat_JETON_REEL_DE_LA_CLIENTE"
+
+    def setUp(self):
+        super().setUp()
+        for cle, valeur in (("shopify_store_url", "boutique-de-la-cliente.myshopify.com"),
+                            ("shopify_access_token", self.JETON_REEL)):
+            conn = database_manager.get_connection()
+            try:
+                conn.cursor().execute(
+                    "INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)", (cle, valeur))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _appeler_en_espionnant_le_reseau(self, charge):
+        """Exécute la route en interceptant TOUTE sortie réseau du moteur Shopify."""
+        import urllib.request
+        emises = []
+
+        def urlopen_espion(req, *args, **kwargs):
+            emises.append((req.full_url, dict(req.headers)))
+            raise AssertionError(
+                f"Le jeton est parti sur le réseau vers {req.full_url!r} : "
+                f"en-têtes {dict(req.headers)!r}")
+
+        vrai_urlopen = urllib.request.urlopen
+        urllib.request.urlopen = urlopen_espion
+        try:
+            status, body = self.api("POST", "/api/shopify/test", charge)
+        finally:
+            urllib.request.urlopen = vrai_urlopen
+        return status, body, emises
+
+    def test_un_domaine_d_attaquant_sans_jeton_ne_fait_rien_sortir(self):
+        """Le scénario complet : `{"domain": "collecte.attaquant.tld"}`, sans jeton."""
+        status, body, emises = self._appeler_en_espionnant_le_reseau(
+            {"domain": "collecte.attaquant.tld"})
+
+        self.assertEqual(emises, [],
+                         "Une requête est partie vers le domaine de l'appelant.")
+        self.assertEqual(status, 400,
+                         "La route a accepté de tester un domaine étranger avec le jeton de la base.")
+        self.assertNotIn(self.JETON_REEL, repr(body),
+                         "Le jeton enregistré ressort dans la réponse de la route.")
+
+    def test_une_autre_boutique_shopify_n_obtient_pas_le_jeton_enregistre(self):
+        """
+        Le cas que le verrou de destination NE couvre PAS : une boutique Shopify concurrente.
+
+        `attaquant.myshopify.com` est une destination parfaitement valable pour le moteur.
+        Seul le refus de mélanger appelant et base empêche le jeton de la cliente d'y partir.
+        """
+        status, body, emises = self._appeler_en_espionnant_le_reseau(
+            {"domain": "attaquant.myshopify.com"})
+
+        self.assertEqual(emises, [],
+                         "Le jeton de la cliente est parti vers la boutique Shopify de l'appelant.")
+        self.assertEqual(status, 400)
+
+    def test_un_domaine_d_attaquant_avec_un_jeton_fourni_ne_part_pas_non_plus(self):
+        """Fournir les deux champs contourne le premier verrou : le moteur doit tenir le second."""
+        status, body, emises = self._appeler_en_espionnant_le_reseau(
+            {"domain": "collecte.attaquant.tld", "token": "shpat_FOURNI_PAR_L_APPELANT"})
+
+        self.assertEqual(emises, [],
+                         "Le moteur a émis une requête vers un domaine qui n'est pas une boutique Shopify.")
+        self.assertEqual(status, 400)
+
+    def test_retester_la_boutique_enregistree_reste_possible(self):
+        """Le repli complet — aucun champ fourni — sert vraiment, il ne doit pas disparaître."""
+        import urllib.request
+        emises = []
+
+        class ReponseBidon:
+            def read(self_inner):
+                return b'{"locations": [{"id": 1, "name": "Depot", "active": true}]}'
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        def urlopen_bidon(req, *args, **kwargs):
+            emises.append((req.full_url, dict(req.headers)))
+            return ReponseBidon()
+
+        vrai_urlopen = urllib.request.urlopen
+        urllib.request.urlopen = urlopen_bidon
+        try:
+            status, body = self.api("POST", "/api/shopify/test", {})
+        finally:
+            urllib.request.urlopen = vrai_urlopen
+
+        self.assertEqual(status, 200, f"Le retest de la boutique enregistrée échoue : {body}")
+        self.assertEqual(len(emises), 1)
+        url, entetes = emises[0]
+        self.assertTrue(url.startswith("https://boutique-de-la-cliente.myshopify.com/"),
+                        f"La requête ne vise pas la boutique enregistrée : {url}")
+        self.assertEqual(entetes.get("X-shopify-access-token"), self.JETON_REEL)
+
+    def test_seules_les_vraies_boutiques_shopify_sont_des_destinations(self):
+        """Le verrou de destination, pris isolément."""
+        from kodo_core.sync.shopify import domaine_boutique_valide
+
+        for refuse in ("collecte.attaquant.tld",
+                       "boutique.myshopify.com.attaquant.tld",
+                       "myshopify.com",
+                       ".myshopify.com",
+                       "attaquant.tld:443",
+                       ""):
+            self.assertFalse(domaine_boutique_valide(refuse),
+                             f"{refuse!r} est accepté comme destination du jeton d'administration.")
+
+        for accepte in ("boutique-de-la-cliente.myshopify.com",
+                        "MaStore.myshopify.com",
+                        "localhost:8123",
+                        "127.0.0.1:8123"):
+            self.assertTrue(domaine_boutique_valide(accepte),
+                            f"{accepte!r} devrait être une destination valable.")

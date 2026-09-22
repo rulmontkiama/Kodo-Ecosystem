@@ -661,18 +661,25 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         raw_url = str(data.get("domain") or data.get("store_url") or "").strip()
         token = str(data.get("token") or data.get("access_token") or "").strip()
         
-        # Fallback sur les paramètres stockés si non fournis
-        if not raw_url or not token:
+        # Le couple domaine + jeton ne se mélange JAMAIS entre l'appelant et la base. Compléter
+        # champ par champ laissait envoyer le jeton d'administration enregistré vers un domaine
+        # choisi par l'appelant : une seule requête sans jeton suffisait à l'exfiltrer. L'écran
+        # Paramètres envoie toujours les deux champs (il refuse le test autrement), donc seul le
+        # repli complet — relire la configuration déjà enregistrée — reste utile.
+        if not raw_url and not token:
             conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT cle, valeur FROM Parametres WHERE cle IN ('shopify_store_url', 'shopify_access_token')")
             db_params = dict(cursor.fetchall())
             conn.close()
-            raw_url = raw_url or db_params.get("shopify_store_url", "")
-            token = token or db_params.get("shopify_access_token", "")
-
-        if not raw_url or not token:
-            return 400, {"success": False, "error": "URL et Jeton d'accès Shopify requis pour le test."}
+            raw_url = db_params.get("shopify_store_url", "") or ""
+            token = db_params.get("shopify_access_token", "") or ""
+            if not raw_url or not token:
+                return 400, {"success": False, "error": "Aucune boutique Shopify enregistrée à tester."}
+        elif not raw_url or not token:
+            return 400, {"success": False, "error": (
+                "Indiquez le domaine ET le jeton à tester ensemble, ou aucun des deux pour "
+                "retester la boutique déjà enregistrée.")}
 
         # Le test passe par le MÊME moteur que la synchronisation réelle : même normalisation du
         # domaine et même transport TLS vérifié. La route réimplémentait sa propre requête avec
