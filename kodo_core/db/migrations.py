@@ -98,6 +98,16 @@ class MigrationError(Exception):
     """Exception levée en cas d'erreur critique de migration de schéma."""
     pass
 
+def _executer_conversion_shpf(conn):
+    """Exécute la conversion des codes SHPF- en EAN-13 via InventoryManager."""
+    try:
+        from kodo_core.domain.catalog.inventory_manager import InventoryManager
+        InventoryManager.convertir_codes_shpf(conn)
+    except Exception as e:
+        import logging
+        logging.getLogger("kodo.migrations").warning(f"Conversion SHPF non exécutée : {e}")
+
+
 class MigrationManager:
     """
     Gestionnaire centralisé de migrations de schémas SQLite et d'initialisation usine.
@@ -597,10 +607,24 @@ class MigrationManager:
                            "ligne de stock négative, y compris l'`UPDATE Stocks SET "
                            "requires_stock_audit = 1` par lequel `OfflineSyncEngine` SIGNALE le "
                            "conflit : le stock négatif issu de deux caisses hors-ligne devenait "
-                           "non seulement irréparable, mais muet.",
+                            "non seulement irréparable, mais muet.",
             "sql": [
                 "DROP TRIGGER IF EXISTS prevent_negative_stock",
             ]
+        },
+        {
+            "version": "2.0.8",
+            "description": "Conversion des anciens codes-barres provisoires 'SHPF-<id>' en vrais "
+                           "codes-barres internes EAN-13 scannables à la douchette et imprimables. "
+                           "Préservation préalable de la correspondance dans Shopify_Variantes.",
+            "sql": [
+                """CREATE TABLE IF NOT EXISTS Shopify_Variantes (
+                    variant_id INTEGER PRIMARY KEY,
+                    id_produit INTEGER NOT NULL,
+                    date_maj TEXT
+                )"""
+            ],
+            "python": lambda conn: _executer_conversion_shpf(conn),
         }
     ]
 
@@ -672,12 +696,16 @@ class MigrationManager:
             cursor = safe_conn.cursor()
             for migration in pending:
                 version = migration["version"]
-                for statement in migration["sql"]:
+                for statement in migration.get("sql", []):
                     try:
                         cursor.execute(statement)
                     except sqlite3.OperationalError as oe:
                         if "duplicate column name" not in str(oe).lower():
                             raise oe
+
+                # Exécution d'une routine Python associée à la migration
+                if "python" in migration and callable(migration["python"]):
+                    migration["python"](safe_conn._conn)
 
                 cursor.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (version,))
 

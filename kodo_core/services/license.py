@@ -30,6 +30,9 @@ except ImportError:
 SECRET_SALT = "KODO_SECURE_LIC_SALT_2026_BELGIUM"
 API_LICENSE_VALIDATE_URL = "https://kodo-solutions-web.vercel.app/api/license/validate"
 
+# Liste noire des anciennes clés de démonstration révoquées
+BANNED_DEMO_KEYS = {"DEMO-ACTIVE-2026", "DEMO-ACTIVE-2025", "DEMO-ACTIVE", "DEMO"}
+
 # Clés publiques Ed25519 de confiance pour la vérification des licences hors-ligne.
 # Clé par défaut : racine de confiance issue de kodo_base.TRUSTED_PUBLIC_KEYS.
 LICENSE_TRUSTED_PUBLIC_KEYS = list(getattr(kodo_base, "TRUSTED_PUBLIC_KEYS", [])) if kodo_base else [
@@ -217,6 +220,15 @@ def get_machine_fingerprint() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Horloge système sécurisée & Anti-Rollback
+# ---------------------------------------------------------------------------
+
+def _get_current_date() -> datetime.date:
+    """Retourne la date système courante (isolée pour audit temporel et tests anti-rollback)."""
+    return datetime.date.today()
+
+
+# ---------------------------------------------------------------------------
 # Cache local signé (HMAC) & double stockage résilient
 # ---------------------------------------------------------------------------
 
@@ -240,15 +252,24 @@ def _get_backup_cache_path() -> str:
 
 
 def _write_cache_file(path: str, cache_data: dict) -> bool:
+    tmp_path = f"{path}.tmp.{os.getpid()}"
     try:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
         return True
     except Exception as e:
         logger.error(f"Erreur d'écriture du fichier de licence '{path}' : {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
         return False
 
 
@@ -333,6 +354,10 @@ def validate_license_online(key: str, fingerprint: str) -> dict:
     if not key or not fingerprint:
         return None
 
+    if str(key).strip().upper() in BANNED_DEMO_KEYS:
+        logger.warning(f"Tentative de validation d'une clé de démo révoquée: {key}")
+        return None
+
     try:
         from kodo_core.services.updater import CURRENT_VERSION
         payload = json.dumps({
@@ -405,8 +430,14 @@ def check_license(key_path: str = None) -> tuple:
         last_check_str = cache.get("last_check")
 
         try:
-            today = datetime.date.today()
+            today = _get_current_date()
             last_check = datetime.date.fromisoformat(last_check_str)
+
+            if today < last_check:
+                logger.warning(
+                    f"Falsification d'horloge détectée : date actuelle {today} antérieure au dernier contrôle {last_check}"
+                )
+                return False, "Falsification de la date système détectée. Veuillez rétablir l'horloge exacte."
 
             days_since_check = (today - last_check).days
             if days_since_check > 30 and expiry_date not in ["A vie", "Permanent", "2056-08-10"]:
@@ -610,6 +641,9 @@ def activate_license_key(key: str) -> tuple:
         return False, "Veuillez fournir une clé d'activation valide."
 
     clean_key = key.strip()
+    if clean_key.upper() in BANNED_DEMO_KEYS:
+        return False, "Cette clé de démonstration est révoquée et obsolète."
+
     fingerprint = get_machine_fingerprint()
 
     # 1. API Cloud (si réseau disponible et réponse valide)

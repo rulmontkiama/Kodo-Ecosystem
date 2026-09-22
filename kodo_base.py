@@ -10,7 +10,7 @@ donc de livrer un nouveau DMG.
 # Version du DMG. Synchronisée automatiquement avec kodo_core/services/updater.py::CURRENT_VERSION
 # par `python3 scripts/release/kodo_release.py stamp-base` (appelé par build_final_pro.sh).
 # Un patch backend ne s'applique que si cette version est dans sa plage [base_min, base_max].
-BASE_VERSION = "2.0.3"
+BASE_VERSION = "2.0.4"
 
 # Clés publiques Ed25519 (hex, 32 octets) autorisées à signer les mises à jour.
 # La clé privée correspondante reste HORS LIGNE sur le poste du développeur

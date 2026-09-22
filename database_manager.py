@@ -634,6 +634,12 @@ def _initialiser_db_raw(conn):
             try: cursor.execute(f"ALTER TABLE Tickets ADD COLUMN {col} {col_type}")
             except (sqlite3.OperationalError, sqlite3.DatabaseError): pass
 
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_unique_shopify_order_id
+        ON Tickets(shopify_order_id)
+        WHERE shopify_order_id IS NOT NULL AND shopify_order_id != ''
+    """)
+
     # Table Ventes_Details
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS Ventes_Details (
@@ -950,6 +956,13 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
             px = it.get("prix_vente_tvac", 0)
             details_list.append(f"{code}:{px}")
     details_articles = ";".join(details_list)
+
+    if numero_ticket:
+        cursor.execute("SELECT id FROM Tickets WHERE numero_ticket = ?", (numero_ticket,))
+        existing_tck = cursor.fetchone()
+        if existing_tck:
+            print(f"[IDEMPOTENCE] Ticket {numero_ticket} déjà existant (id={existing_tck[0]}). Aucun doublon créé.")
+            return existing_tck[0]
 
     current_hash, previous_hash = signer_ticket(cursor, numero_ticket, total_tvac, date_heure, caisse_id=caisse_id, details_articles=details_articles)
 

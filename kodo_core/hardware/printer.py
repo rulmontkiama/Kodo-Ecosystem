@@ -99,6 +99,20 @@ def strip_accents(text):
     return only_ascii
 
 
+def sanitize_escpos_text(text):
+    """
+    Purge les caractères de contrôle non imprimables pour empêcher toute
+    injection de commandes matérielles ESC/POS non sollicitées (ex: ESC @, GS V).
+    Conserve uniquement les retours chariot (\n), tabulations (\t)
+    et les caractères ASCII imprimables (codes 32 à 126).
+    """
+    if not isinstance(text, str):
+        text = str(text or "")
+    clean = strip_accents(text)
+    sanitized = "".join(c for c in clean if c in ("\n", "\t") or (32 <= ord(c) < 127))
+    return sanitized
+
+
 def _center(text, width=COL):
     return text.center(width)
 
@@ -944,7 +958,7 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, al
     3. Fallback sur ouverture d'un aperçu texte (si allow_gui_preview=True).
     """
     from PIL import Image
-    contenu_clean = strip_accents(contenu)
+    contenu_clean = sanitize_escpos_text(contenu)
 
     try:
         from database_manager import data_path

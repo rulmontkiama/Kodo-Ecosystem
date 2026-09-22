@@ -818,7 +818,12 @@ class ShopifySync:
                     # Réservation AVANT l'appel : si le poste s'éteint pendant l'échange, la ligne
                     # est retrouvée « en vol » au démarrage suivant et ne sera pas rejouée à l'aveugle.
                     self._journaliser(conn, vd_id, t_id, code_barre, inv_item_id, -qte, STATUT_EN_VOL)
-                    applique = self.adjust_shopify_stock(inv_item_id, location_id, -qte)
+                    try:
+                        applique = self.adjust_shopify_stock(inv_item_id, location_id, -qte)
+                    except Exception as exc:
+                        logger.error(f"Exception lors de l'ajustement du stock Shopify pour SKU {code_barre}: {exc}")
+                        applique = False
+                        self.dernier_echec = "reseau"
 
                     c2 = _ouvrir_ecriture(conn)
                     if applique:

@@ -240,6 +240,67 @@ class InventoryManager:
         )
 
     @classmethod
+    def convertir_codes_shpf(cls, conn) -> dict:
+        """
+        Convertit tous les anciens codes-barres provisoires 'SHPF-<id>' en vrais codes-barres
+        internes EAN-13 scannables et imprimables.
+
+        Préserve au préalable la correspondance dans la table `Shopify_Variantes` pour que
+        la synchronisation Shopify continue de retrouver le produit existant sans créer de doublon.
+
+        Retourne un dictionnaire récapitulatif :
+        {"convertis": int, "details": list}
+        """
+        if conn is None:
+            raise ValueError("Une connexion SQLite ouverte est requise pour la conversion.")
+
+        cursor = conn.cursor()
+
+        # 1. S'assurer que la table Shopify_Variantes existe
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Shopify_Variantes (
+                variant_id INTEGER PRIMARY KEY,
+                id_produit INTEGER NOT NULL,
+                date_maj TEXT
+            )
+        """)
+
+        # 2. Rechercher les produits portant un code SHPF-
+        cursor.execute("SELECT id, code_barre, nom FROM Produits WHERE code_barre LIKE 'SHPF-%'")
+        rows = cursor.fetchall()
+
+        convertis = []
+        for pid, old_code, nom in rows:
+            variant_part = old_code[5:].strip() if len(old_code) > 5 else ""
+
+            # Si l'identifiant de variante est présent, le pérenniser dans Shopify_Variantes
+            if variant_part.isdigit():
+                variant_id = int(variant_part)
+                cursor.execute("""
+                    INSERT OR IGNORE INTO Shopify_Variantes (variant_id, id_produit, date_maj)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                """, (variant_id, pid))
+
+            # Générer un nouveau code EAN-13 interne unique
+            new_ean = cls.generate_unique_internal_barcode(conn)
+
+            # Mettre à jour le produit avec le vrai code EAN-13
+            cursor.execute("UPDATE Produits SET code_barre = ? WHERE id = ?", (new_ean, pid))
+
+            convertis.append({
+                "id": pid,
+                "nom": nom,
+                "ancien_code": old_code,
+                "nouveau_code": new_ean,
+                "variant_id": int(variant_part) if variant_part.isdigit() else None,
+            })
+
+        return {
+            "convertis": len(convertis),
+            "details": convertis,
+        }
+
+    @classmethod
     def _validate_imposed_barcode(cls, barcode: Any) -> str:
         """
         Valide un code-barres saisi par la commerçante. Lève ValueError, en français,

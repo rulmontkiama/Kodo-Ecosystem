@@ -1,14 +1,14 @@
 {
-  "latestVersion": "2.0.3",
-  "latest_version": "2.0.3",
-  "version": "2.0.3",
-  "releaseDate": "2026-09-20",
+  "latestVersion": "2.0.4",
+  "latest_version": "2.0.4",
+  "version": "2.0.4",
+  "releaseDate": "2026-09-22",
   "downloadUrl": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "download_url": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "dmgUrl": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
   "dmg_url": "https://kodo-solutions-web.vercel.app/Installation_Kodo_POS.dmg",
-  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.3.zip",
-  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.3.zip",
+  "distPatchUrl": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.4.zip",
+  "dist_patch_url": "https://raw.githubusercontent.com/rulmontkiama/Kodo-Ecosystem/main/public/dist_v2.0.4.zip",
   "has_update": true,
-  "changelog": "v2.0.3 :\n• Ticket client : plus aucune mention interne imprimée. Quand le numéro de TVA n'est pas renseigné, le ticket n'affiche simplement rien à cet endroit ; l'alerte reste visible sur l'écran de caisse.\n• Plus de nom de vendeur inventé : si le vendeur n'est pas identifié, le ticket indique « Non renseigné » au lieu d'attribuer la vente à quelqu'un."
+  "changelog": "v2.0.4 :\n• Durcissement Elite 99% : Résistance aux coupures réseau en cours de synchronisation Shopify.\n• Protection NF525 et intégrité comptable : isolation étanche des commandes web sans impact sur le tiroir physique.\n• Assainissement automatique (Sanitizer) et sécurité anti-corruption SQLite."
 }
