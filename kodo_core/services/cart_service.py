@@ -4,7 +4,7 @@ Moteur de calcul de panier - pur, sans dépendance UI ni BDD.
 Toutes les valeurs sont manipulées en decimal.Decimal, arrondies ROUND_HALF_UP à 2 décimales.
 """
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from typing import List, Optional
 
 from kodo_core.domain.sales.models import (
@@ -13,15 +13,11 @@ from kodo_core.domain.sales.models import (
     CartTotal,
     DiscountType,
     VatBreakdownLine,
+    quantize_money,  # référence UNIQUE d'arrondi : voir son docstring
 )
 
 TWO_DECIMALS = Decimal("0.01")
 HUNDRED = Decimal("100")
-
-
-def quantize_money(amount: Decimal) -> Decimal:
-    """Arrondit un montant monétaire à 2 décimales (ROUND_HALF_UP)."""
-    return amount.quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
 
 
 def _apply_line_discount(item: CartItem) -> Decimal:

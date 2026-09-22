@@ -5,9 +5,39 @@ Aucune dépendance UI ni BDD. Toute valeur monétaire est un decimal.Decimal.
 """
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 from typing import List, Optional
+
+TWO_DECIMALS = Decimal("0.01")
+
+
+def quantize_money(value) -> Decimal:
+    """Arrondit un montant monétaire à 2 décimales (ROUND_HALF_UP). RÉFÉRENCE UNIQUE du projet.
+
+    Ce module est le seul de la chaîne comptable à ne dépendre de rien (ni BDD, ni UI) :
+    c'est pourquoi la référence est ancrée ici, et réexportée par cart_engine, cart_service,
+    closing_service, fiscal_service, z_report et printer_service. Il y avait auparavant cinq
+    implémentations divergentes, et un même montant ne s'arrondissait pas pareil selon le
+    module qui le traitait :
+
+      - `Decimal(value)` sur un float prenait la valeur BINAIRE exacte du float. 2.675 est
+        stocké 2.67499999... en binaire, donc arrondi à 2.67 au lieu de 2.68 : un centime
+        d'écart, et c'était le chemin du scellement fiscal (fiscal_service).
+      - `value.quantize(...)` sans conversion plantait (AttributeError) dès qu'un appelant
+        historique passait un float, une str ou une valeur sortie de SQLite.
+      - `f"{value:.2f}"` (printer_service) ne quantifiait pas : il formatait avec l'arrondi
+        BANQUIER de Python, et imprimait 8.345 -> 8.34 sur le ticket remis à la cliente.
+
+    On passe donc toujours par `str(value)` : c'est la valeur DÉCIMALE écrite par l'appelant
+    (`str(2.675)` == "2.675"), jamais son approximation binaire. `None` vaut 0.00, parce que
+    SQLite rend NULL sur un cumul vide et qu'un bilan ne doit pas planter pour autant.
+    """
+    if value is None:
+        return Decimal("0.00")
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+    return value.quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
 
 
 def to_decimal(value, field_name: str) -> Decimal:
@@ -22,6 +52,26 @@ def to_decimal(value, field_name: str) -> Decimal:
     if isinstance(value, (int, str)):
         return Decimal(value)
     raise TypeError(f"{field_name}: type non supporté ({type(value).__name__}).")
+
+
+def decimal_from_json(value, field_name: str) -> Decimal:
+    """Convertit une valeur issue d'un payload JSON en Decimal, sans perte.
+
+    `to_decimal` refuse les float À DESSEIN : à l'intérieur du domaine, un montant qui arrive
+    en float est un bug d'appelant. Mais en frontière JSON on ne choisit pas le type : un
+    client qui écrit `{"unit_price_ttc": 19.99}` produit un float, et json.loads le rend tel
+    quel. Les `from_dict` emballaient cette valeur dans `Decimal(...)` AVANT que le garde-fou
+    de `__post_init__` puisse voir un float : celui-ci ne se déclenchait donc jamais, et le
+    prix était stocké 19.98999999999999843680598132777959108352661132812500.
+
+    On convertit ici via `str()` — le texte décimal que le client a réellement écrit — plutôt
+    que de refuser durement : `to_dict` sérialise en str, donc l'aller-retour canonique est
+    déjà textuel, et un refus casserait tout appelant JSON qui envoie un nombre. Le garde-fou
+    strict reste entier sur le chemin direct (construction d'un CartItem en Python).
+    """
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return to_decimal(value, field_name)
 
 
 class DiscountType(str, Enum):
@@ -49,7 +99,10 @@ class CartDiscount:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CartDiscount":
-        return cls(type=DiscountType(data["type"]), value=Decimal(data["value"]))
+        return cls(
+            type=DiscountType(data["type"]),
+            value=decimal_from_json(data["value"], "CartDiscount.value"),
+        )
 
 
 @dataclass
@@ -92,9 +145,9 @@ class CartItem:
     def from_dict(cls, data: dict) -> "CartItem":
         discount_data = data.get("discount")
         return cls(
-            unit_price_ttc=Decimal(data["unit_price_ttc"]),
+            unit_price_ttc=decimal_from_json(data["unit_price_ttc"], "CartItem.unit_price_ttc"),
             quantity=data["quantity"],
-            vat_rate=Decimal(data["vat_rate"]),
+            vat_rate=decimal_from_json(data["vat_rate"], "CartItem.vat_rate"),
             product_id=data.get("product_id"),
             name=data.get("name", ""),
             discount=CartDiscount.from_dict(discount_data) if discount_data else None,

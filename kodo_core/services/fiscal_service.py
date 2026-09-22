@@ -8,10 +8,14 @@ de la chaîne complète. Aucune dépendance UI.
 import hashlib
 import sqlite3
 from datetime import datetime, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import Optional
 
 from kodo_core.domain.accounting.ledger import GENESIS_HASH, build_hash_payload, format_sequence_number
+# Référence UNIQUE d'arrondi monétaire du projet. Ce module utilisait `Decimal(amount)`, qui
+# sur un float prend sa valeur BINAIRE exacte : 2.675 y devenait 2.67 quand tous les autres
+# chemins rendaient 2.68 — un centime d'écart au moment même du scellement fiscal.
+from kodo_core.domain.sales.models import quantize_money
 
 TWO_DECIMALS = Decimal("0.01")
 
@@ -23,11 +27,6 @@ class FiscalTamperDetectedError(Exception):
         self.sequence_number = sequence_number
         self.reason = reason
         super().__init__(f"Falsification détectée sur le ticket {sequence_number} : {reason}")
-
-
-def quantize_money(amount: Decimal) -> Decimal:
-    """Arrondit un montant monétaire à 2 décimales (ROUND_HALF_UP)."""
-    return Decimal(amount).quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
 
 
 def _now_iso() -> str:

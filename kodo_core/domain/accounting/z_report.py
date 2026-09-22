@@ -10,7 +10,7 @@ import csv
 import json
 import os
 import datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from typing import Dict, Any, List, Optional
 
 import database_manager
@@ -18,14 +18,10 @@ from database_manager import (
     get_connection, generer_bilan_z_journalier, enregistrer_cloture_caisse, lister_jours_non_clotures,
 )
 import export_manager
+# Référence UNIQUE d'arrondi monétaire du projet (voir son docstring).
+from kodo_core.domain.sales.models import quantize_money
 
 TWO_DECIMALS = Decimal('0.01')
-
-
-def quantize_money(val: Any) -> Decimal:
-    if val is None:
-        return Decimal('0.00')
-    return Decimal(str(val)).quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
 
 
 class ZReportEngine:
@@ -96,14 +92,41 @@ class ZReportEngine:
                         tvac_net = quantize_money(tvac_brut_dec * ratio)
                         accum[taux_dec] = accum.get(taux_dec, Decimal('0.00')) + tvac_net
 
+                ventile: Dict[Decimal, Dict[str, Decimal]] = {}
                 for taux_dec, tvac_d in accum.items():
                     htva_d = quantize_money(tvac_d / (Decimal('1.00') + taux_dec))
-                    tva_d = tvac_d - htva_d
-                    rate_label = f"{float(taux_dec)*100:.1f}%".rstrip('0').rstrip('.') + "%"
+                    ventile[taux_dec] = {
+                        "htva": htva_d,
+                        "tva": tvac_d - htva_d,
+                        "tvac": tvac_d,
+                    }
+
+                # Réconciliation du centime d'arrondi sur la base HT. Le bilan somme les
+                # `Tickets.total_htva` DÉJÀ scellés (arrondis ligne par ligne au moment de la
+                # vente) ; la ventilation, elle, ré-arrondit une seule fois par taux agrégé.
+                # Les deux ne tombent pas sur le même centime : mesuré -0,02 € de base HT sur
+                # 40 ventes, soit un Z dont la ventilation TVA ne justifie pas ses propres
+                # totaux — exactement ce qu'un contrôle NF525 regarde.
+                # Le ticket scellé fait foi : on aligne la ventilation sur lui, jamais l'inverse.
+                # Garde-fou : on ne recale QUE si le TVAC ventilé correspond déjà exactement au
+                # TVAC du bilan. Sinon l'écart n'est pas un arrondi mais un vrai problème de
+                # données (ticket sans produit rattaché, taux manquant), et le masquer dans le
+                # plus gros taux le rendrait indétectable.
+                bilan_tvac = quantize_money(bilan.get("total_tvac"))
+                bilan_htva = quantize_money(bilan.get("total_htva"))
+                somme_tvac = sum((v["tvac"] for v in ventile.values()), Decimal('0.00'))
+                somme_htva = sum((v["htva"] for v in ventile.values()), Decimal('0.00'))
+                if ventile and somme_tvac == bilan_tvac and somme_htva != bilan_htva:
+                    cible = max(sorted(ventile.items()), key=lambda couple: couple[1]["tvac"])[1]
+                    cible["htva"] += bilan_htva - somme_htva
+                    cible["tva"] = cible["tvac"] - cible["htva"]
+
+                for taux_dec, montants in ventile.items():
+                    rate_label = f"{float(taux_dec)*100:.1f}".rstrip('0').rstrip('.') + "%"
                     vat_breakdown[rate_label] = {
-                        "htva": float(htva_d),
-                        "tva": float(tva_d),
-                        "tvac": float(tvac_d),
+                        "htva": float(montants["htva"]),
+                        "tva": float(montants["tva"]),
+                        "tvac": float(montants["tvac"]),
                         "rate": float(taux_dec)
                     }
 

@@ -8,22 +8,19 @@ TVA / modes de règlement en Decimal, et scelle le rapport par chaînage SHA-256
 import hashlib
 import sqlite3
 from datetime import datetime, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import List, Optional, Sequence, Tuple
 
 from kodo_core.db.connection import db_transaction
 from kodo_core.domain.accounting.models import PaymentBreakdown, TaxBreakdown, ZReport
+# Référence UNIQUE d'arrondi monétaire du projet (voir son docstring).
+from kodo_core.domain.sales.models import quantize_money
 
 TWO_DECIMALS = Decimal("0.01")
 
 
 class DuplicateZNumberError(Exception):
     """Levée quand un rapport Z avec ce numéro a déjà été généré (chaînage rompu)."""
-
-
-def quantize_money(amount: Decimal) -> Decimal:
-    """Arrondit un montant monétaire à 2 décimales (ROUND_HALF_UP)."""
-    return amount.quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
 
 
 def _now_iso() -> str:

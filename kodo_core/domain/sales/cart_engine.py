@@ -14,16 +14,13 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Dict, Any, Optional, Tuple
 
 from kodo_core.db.connection import get_connection
+# Référence UNIQUE d'arrondi monétaire du projet (cf. son docstring : cinq implémentations
+# divergentes se répondaient à un centime près). Réexportée ici : des appelants et des tests
+# importent `quantize_money` depuis ce module depuis l'origine.
+from kodo_core.domain.sales.models import quantize_money
 
 TWO_DECIMALS = Decimal('0.01')
 FOUR_DECIMALS = Decimal('0.0001')
-
-
-def quantize_money(amount: Decimal) -> Decimal:
-    """Arrondit un montant monétaire à 2 décimales selon la règle ROUND_HALF_UP."""
-    if not isinstance(amount, Decimal):
-        amount = Decimal(str(amount))
-    return amount.quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
 
 
 def apply_belgian_cash_rounding(amount: Decimal) -> Tuple[Decimal, Decimal]:
@@ -199,7 +196,10 @@ class CartEngine:
         total_htva = Decimal('0.00')
 
         for item in self.items:
-            rate_str = f"{float(item.vat_rate) * 100:.1f}%".rstrip('0').rstrip('.') + "%"
+            # `f"{x:.1f}%"` finit par '%', donc les .rstrip('0').rstrip('.') qui suivaient ne
+            # retiraient JAMAIS le zéro décimal, et le '%' final était ajouté une 2e fois :
+            # la ventilation était publiée sous les libellés « 21.0%% » / « 6.0%% ».
+            rate_str = f"{float(item.vat_rate) * 100:.1f}".rstrip('0').rstrip('.') + "%"
             item_tvac = quantize_money(item.get_line_total_tvac() * ratio)
             item_htva = quantize_money(item_tvac / (Decimal('1.00') + item.vat_rate))
             item_tva = item_tvac - item_htva
@@ -218,6 +218,27 @@ class CartEngine:
             vat_breakdown[rate_str]["tvac"] += item_tvac
 
         total_tva = final_tvac - total_htva
+
+        # Réconciliation du centime d'arrondi : chaque ligne est ramenée au centime APRÈS
+        # application du ratio de remise, donc la somme des lignes arrondies peut manquer (ou
+        # dépasser) `final_tvac` d'un ou deux centimes. Le total facturé, lui, ne bouge pas :
+        # c'est la ventilation qui doit se refermer dessus. Sans cela, la somme des TVA
+        # ventilées différait de la TVA annoncée sur ~17 % des paniers (mesuré : jusqu'à
+        # 0.02 €), soit une ventilation de TVA qui ne justifie pas le total du ticket.
+        # Le résidu est porté par le taux qui pèse le plus lourd (tri déterministe en cas
+        # d'égalité), et uniquement sur TVAC/TVA : le HTVA ventilé est déjà, lui, exactement
+        # égal au total HTVA puisque les deux cumulent les mêmes montants de ligne.
+        if vat_breakdown:
+            residu = final_tvac - sum(
+                (vals["tvac"] for vals in vat_breakdown.values()), Decimal('0.00')
+            )
+            if residu != Decimal('0.00'):
+                cible = max(
+                    sorted(vat_breakdown.items()),
+                    key=lambda couple: couple[1]["tvac"],
+                )[1]
+                cible["tvac"] += residu
+                cible["tva"] += residu
 
         vat_breakdown_serializable = {
             rate: {
