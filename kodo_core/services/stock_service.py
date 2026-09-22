@@ -3,6 +3,20 @@
 Service de gestion atomique des stocks - Kōdo POS Core.
 Décrémentation/incrémentation transactionnelles avec traçabilité (stock_movements)
 et détection des articles en alerte de stock.
+
+AVERTISSEMENT — CE MODULE N'EST SUR AUCUN CHEMIN DE PRODUCTION.
+
+Il travaille sur ses propres tables (`stock_items`, `stock_movements`), qu'aucun autre
+module ne crée, n'alimente ni ne lit. Le stock réel de la caisse vit dans la table
+`Stocks` et passe par `kodo_core/domain/catalog/inventory_manager.py` : c'est là — et
+nulle part ici — qu'une correction de stock doit être faite.
+
+Cet avertissement est écrit noir sur blanc parce que la signature de ce fichier est
+parfaitement crédible : corriger un défaut de stock ici ne changerait RIEN pour la
+commerçante, et on croirait l'avoir corrigé. C'est exactement ce qui s'est produit avec
+la synchronisation Shopify, complète et démarrée par une interface que le produit ne
+lance plus. Le module est conservé (il est référencé par `SanctuaryShield`) et testé,
+mais sa suppression éventuelle est une décision de produit, pas une correction.
 """
 
 import sqlite3
