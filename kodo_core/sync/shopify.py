@@ -58,6 +58,18 @@ CLE_TOKEN = "shopify_access_token"
 CLE_AUTO_SYNC = "shopify_auto_sync"
 CLE_SYNC_ORDERS = "shopify_sync_orders"
 
+# Dépôt d'inventaire visé dans la boutique. Une boutique Shopify peut en compter plusieurs
+# (le magasin, une réserve, un entrepôt de préparation, un marché temporaire) et l'ajustement
+# de stock s'applique à UN dépôt nommé : sans ce réglage, la caisse choisissait le premier
+# que l'API renvoyait, dans un ordre que Shopify ne garantit pas. Le stock d'une vente
+# pouvait donc être retiré de la réserve pendant que la boutique en ligne continuait
+# d'afficher le magasin plein — sans aucune erreur nulle part.
+CLE_LOCATION = "shopify_location_id"
+
+# Ce que la commerçante doit savoir sur le choix du dépôt, restitué par
+# `GET /api/shopify/status`. Un `logger.warning` ne sort pas de la machine : personne ne le lit.
+CLE_DEPOT_AVERTISSEMENT = "shopify_depot_avertissement"
+
 # État de la dernière passe, restitué à la commerçante par `GET /api/shopify/status`.
 # `Parametres` étant une table clé/valeur déjà en place, aucune migration n'est nécessaire.
 CLE_ETAT_DATE = "shopify_last_sync_at"
@@ -167,14 +179,14 @@ def enregistrer_etat_sync(ok: bool, message: str = ""):
 
 
 def lire_etat_sync() -> dict:
-    """État de la dernière passe (date, succès, message), pour l'écran Paramètres."""
-    etat = {"derniere_synchro": None, "succes": None, "message": ""}
+    """État de la dernière passe (date, succès, message, dépôt), pour l'écran Paramètres."""
+    etat = {"derniere_synchro": None, "succes": None, "message": "", "avertissement_depot": ""}
     try:
         conn = get_connection()
         try:
             c = conn.cursor()
-            c.execute("SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?)",
-                      (CLE_ETAT_DATE, CLE_ETAT_OK, CLE_ETAT_MESSAGE))
+            c.execute("SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?, ?)",
+                      (CLE_ETAT_DATE, CLE_ETAT_OK, CLE_ETAT_MESSAGE, CLE_DEPOT_AVERTISSEMENT))
             params = {row[0]: row[1] for row in c.fetchall()}
         finally:
             conn.close()
@@ -182,6 +194,7 @@ def lire_etat_sync() -> dict:
         if CLE_ETAT_OK in params:
             etat["succes"] = params.get(CLE_ETAT_OK) == "1"
         etat["message"] = params.get(CLE_ETAT_MESSAGE, "") or ""
+        etat["avertissement_depot"] = params.get(CLE_DEPOT_AVERTISSEMENT, "") or ""
     except Exception as e:
         logger.error(f"Impossible de lire l'état de synchronisation Shopify : {e}")
     return etat
@@ -189,24 +202,26 @@ def lire_etat_sync() -> dict:
 
 def lire_reglages_shopify(conn=None) -> dict:
     """
-    Les quatre réglages Shopify (URL, jeton, push du stock, rapatriement des commandes).
+    Les réglages Shopify : URL, jeton, dépôt d'inventaire, push du stock, rapatriement.
 
     Les défauts sont EXACTEMENT ceux de `/api/settings` (clé absente → "1", donc interrupteur
     allumé à l'écran) : un défaut divergent ici ferait mentir l'interrupteur affiché à la
     commerçante — coché dans les réglages, mais sans effet réel.
     """
-    reglages = {"store_url": "", "access_token": "", "auto_sync": True, "sync_orders": True}
+    reglages = {"store_url": "", "access_token": "", "location_id": "",
+                "auto_sync": True, "sync_orders": True}
     fermer = conn is None
     try:
         conn = conn or get_connection()
         c = conn.cursor()
         c.execute(
-            "SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?, ?)",
-            (CLE_URL, CLE_TOKEN, CLE_AUTO_SYNC, CLE_SYNC_ORDERS),
+            "SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?, ?, ?)",
+            (CLE_URL, CLE_TOKEN, CLE_LOCATION, CLE_AUTO_SYNC, CLE_SYNC_ORDERS),
         )
         params = {row[0]: row[1] for row in c.fetchall()}
         reglages["store_url"] = str(params.get(CLE_URL) or "").strip()
         reglages["access_token"] = str(params.get(CLE_TOKEN) or "").strip()
+        reglages["location_id"] = str(params.get(CLE_LOCATION) or "").strip()
         reglages["auto_sync"] = str(params.get(CLE_AUTO_SYNC, "1")) == "1"
         reglages["sync_orders"] = str(params.get(CLE_SYNC_ORDERS, "1")) == "1"
     except Exception as e:
@@ -323,6 +338,12 @@ class ShopifySync:
         self.access_token = access_token.strip()
         self.api_version = api_version
         self._location_id = None
+        # Dépôt d'inventaire choisi dans les réglages (vide = « laisse la caisse décider »).
+        self.location_id_configure = ""
+        # Dernier avertissement de dépôt écrit en base : évite de réécrire la même phrase à
+        # chaque passe quand rien ne change. `object()` force l'écriture au premier passage,
+        # même si la phrase à écrire est vide (cas du dépôt redevenu valide après redémarrage).
+        self._dernier_avertissement_depot = object()
         # Interrupteurs de l'écran Paramètres : allumés par défaut, comme les affiche `/api/settings`.
         self.auto_sync = True
         self.sync_orders = True
@@ -355,10 +376,20 @@ class ShopifySync:
         reglages = lire_reglages_shopify()
         self.auto_sync = reglages["auto_sync"]
         self.sync_orders = reglages["sync_orders"]
-        if self._config_injectee:
-            return
-        self.store_url = reglages["store_url"]
-        self.access_token = reglages["access_token"]
+        # Le dépôt est relu même quand les identifiants sont imposés par l'appelant : il désigne
+        # une étagère dans la boutique, pas la boutique elle-même.
+        ancien_depot, ancienne_boutique = self.location_id_configure, self.store_url
+        self.location_id_configure = reglages["location_id"]
+        if not self._config_injectee:
+            self.store_url = reglages["store_url"]
+            self.access_token = reglages["access_token"]
+        if self.location_id_configure != ancien_depot or self.store_url != ancienne_boutique:
+            # `_location_id` est un identifiant PROPRE à une boutique. Le thread de synchro vit
+            # des heures et relit ces réglages à chaque passe : sans cet oubli, changer de dépôt
+            # (ou de boutique) n'avait d'effet qu'au redémarrage de la caisse, et les ventes
+            # continuaient d'être retirées de l'ancien dépôt — voire d'un dépôt qui appartient
+            # à une autre boutique, où l'identifiant ne veut plus rien dire.
+            self._location_id = None
 
     def domaine(self) -> str:
         """Domaine normalisé de la boutique configurée (voir `normaliser_domaine_boutique`)."""
@@ -467,27 +498,121 @@ class ShopifySync:
                 "domain": domaine,
                 "error": f"Aucune réponse exploitable de {domaine} (domaine ou jeton refusé).",
             }
-        locations = [l.get("name", "Dépôt") for l in (data.get("locations") or [])]
+        bruts = data.get("locations") or []
+        locations = [l.get("name", "Dépôt") for l in bruts]
+        # `locations` ne porte que des noms : de quoi écrire une phrase, pas de quoi choisir.
+        # Le choix du dépôt a besoin de l'identifiant, et l'écran a besoin de savoir lesquels
+        # sont actifs (un dépôt désactivé ne peut pas recevoir d'ajustement de stock).
+        depots = [{"id": str(l.get("id")), "nom": l.get("name") or "Dépôt",
+                   "actif": bool(l.get("active", True))}
+                  for l in bruts if l.get("id") is not None]
         return {
             "success": True,
             "domain": domaine,
             "message": (f"Connexion Shopify réussie sur {domaine} ! Dépôts : {', '.join(locations)}"
                         if locations else f"Connexion établie avec {domaine}."),
             "locations": locations,
+            "depots": depots,
         }
 
+    @staticmethod
+    def _cle_de_tri_depot(depot: dict):
+        """Ordre stable des dépôts : par identifiant numérique croissant, le plus ancien d'abord."""
+        brut = str(depot.get("id"))
+        return (0, int(brut), "") if brut.isdigit() else (1, 0, brut)
+
+    def _avertir_depot(self, message: str):
+        """
+        Dépose (ou efface) l'avertissement de dépôt lu par `GET /api/shopify/status`.
+
+        Un `logger.warning` reste dans un fichier que la commerçante n'ouvrira jamais. Le choix
+        du dépôt décide de l'étagère d'où le stock est retiré : quand il est douteux, il faut
+        que ça se voie à l'écran, pas dans un journal.
+        """
+        if message == self._dernier_avertissement_depot:
+            return
+        try:
+            conn = get_connection()
+            try:
+                c = _ouvrir_ecriture(conn)
+                c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)",
+                          (CLE_DEPOT_AVERTISSEMENT, str(message or "")[:500]))
+                conn.commit()
+            finally:
+                conn.close()
+            self._dernier_avertissement_depot = message
+        except Exception as e:
+            logger.error(f"Avertissement de dépôt Shopify non enregistré : {e}")
+
     def get_location_id(self) -> str:
-        """Récupère et met en cache le location_id actif de l'inventaire Shopify."""
+        """
+        Le dépôt d'inventaire visé dans la boutique, mis en cache pour la durée de la passe.
+
+        Une boutique Shopify peut compter plusieurs dépôts et `available_adjustment` s'applique
+        à UN dépôt nommé. Le code d'origine prenait le premier dépôt actif renvoyé par l'API,
+        dans un ordre que Shopify ne garantit nulle part : sur une boutique à plusieurs dépôts,
+        une vente pouvait être retirée de la réserve au lieu du magasin — et le choix pouvait
+        même changer d'une passe à l'autre, éparpillant le stock sans qu'aucune erreur
+        n'apparaisse. Les quatre cas sont donc traités séparément :
+
+        1. **Dépôt choisi dans les réglages** : il est utilisé, et LUI SEUL. S'il a disparu ou
+           s'il a été désactivé côté Shopify, la synchronisation s'arrête et le dit. Se rabattre
+           sur un autre dépôt serait exactement le défaut d'origine, en pire : la commerçante
+           aurait fait un choix explicite que la caisse contredirait en silence.
+        2. **Aucun choix, un seul dépôt actif** : aucune ambiguïté, on prend celui-là.
+        3. **Aucun choix, plusieurs dépôts actifs** : on ne peut pas deviner, mais refuser
+           arrêterait net une boutique qui fonctionne aujourd'hui. On retient donc le dépôt le
+           plus ancien (identifiant le plus petit — celui créé avec la boutique, le magasin dans
+           l'immense majorité des cas), ce qui est au moins DÉTERMINISTE, et on affiche à
+           l'écran quel dépôt est utilisé pour que le choix puisse être fait.
+        4. **Aucun dépôt actif** : rien à ajuster, et il faut le dire.
+        """
         if self._location_id:
             return self._location_id
 
         data = self.make_request("locations.json")
-        if data and "locations" in data and len(data["locations"]) > 0:
-            active_locs = [l for l in data["locations"] if l.get("active", True)]
-            if active_locs:
-                self._location_id = active_locs[0]["id"]
-                return self._location_id
-        return None
+        if not data or not isinstance(data.get("locations"), list):
+            return None
+
+        actifs = [l for l in data["locations"]
+                  if l.get("active", True) and l.get("id") is not None]
+        if not actifs:
+            self._avertir_depot(
+                "Aucun dépôt actif sur la boutique Shopify : le stock en ligne ne peut pas être "
+                "ajusté. Réactivez un emplacement dans Shopify (Paramètres → Emplacements).")
+            return None
+
+        choisi = str(self.location_id_configure or "").strip()
+        if choisi:
+            for depot in actifs:
+                if str(depot["id"]) == choisi:
+                    self._avertir_depot("")
+                    self._location_id = depot["id"]
+                    return self._location_id
+            self._avertir_depot(
+                f"Le dépôt Shopify choisi (n° {choisi}) n'existe plus ou a été désactivé. "
+                f"La synchronisation du stock est arrêtée pour ne pas retirer les ventes d'un "
+                f"autre dépôt. Choisissez-en un autre dans les Réglages. "
+                f"Dépôts actifs : {', '.join(str(d.get('name') or d['id']) for d in actifs)}.")
+            logger.error(f"Dépôt Shopify configuré ({choisi}) absent des emplacements actifs.")
+            return None
+
+        if len(actifs) == 1:
+            self._avertir_depot("")
+            self._location_id = actifs[0]["id"]
+            return self._location_id
+
+        retenu = min(actifs, key=self._cle_de_tri_depot)
+        autres = [str(d.get("name") or d["id"]) for d in actifs if d["id"] != retenu["id"]]
+        self._avertir_depot(
+            f"Cette boutique Shopify a plusieurs dépôts et aucun n'a été choisi : les ventes "
+            f"sont retirées de « {retenu.get('name') or retenu['id']} ». Si ce n'est pas le bon, "
+            f"choisissez-le dans les Réglages. Autres dépôts : {', '.join(autres)}.")
+        logger.warning(
+            f"Dépôt Shopify non choisi parmi {len(actifs)} actifs : "
+            f"utilisation de {retenu.get('name') or retenu['id']} (n° {retenu['id']}).")
+        self._location_id = retenu["id"]
+        return self._location_id
 
     # --- Résolution d'une variante Shopify --------------------------------------------------
 

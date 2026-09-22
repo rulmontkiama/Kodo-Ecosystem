@@ -541,6 +541,9 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "shopifyToken": "",
             "shopifyTokenEnregistre": bool(params.get("shopify_access_token")),
             "shopifyConnected": bool(params.get("shopify_store_url") and params.get("shopify_access_token")),
+            # Dépôt d'inventaire visé dans la boutique. Vide = aucun choix fait ; la caisse
+            # tranche alors elle-même (cf. `ShopifySync.get_location_id`) et le dit à l'écran.
+            "shopifyLocationId": params.get("shopify_location_id", ""),
             "autoSyncStock": params.get("shopify_auto_sync", "1") == "1",
             "syncOrders": params.get("shopify_sync_orders", "1") == "1",
             "defaultAlertThreshold": default_alert,
@@ -574,8 +577,19 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         printer_ip = _pick("printerIP", "printer_ip")
         shopify_domain = _pick("shopifyDomain", "shopify_store_url")
         shopify_token = _pick("shopifyToken", "shopify_access_token")
+        shopify_location = _pick("shopifyLocationId", "shopify_location_id")
         auto_sync = data.get("autoSyncStock")
         sync_orders = data.get("syncOrders")
+
+        if shopify_location is not None:
+            # Les identifiants de dépôt Shopify sont des entiers. Une valeur d'une autre forme
+            # ne correspondra jamais à aucun dépôt, et `get_location_id` refuserait alors de
+            # synchroniser : autant le dire tout de suite plutôt que d'arrêter la boutique en
+            # silence. La chaîne vide reste un ordre légitime : « je ne choisis pas ».
+            shopify_location = str(shopify_location).strip()
+            if shopify_location and not shopify_location.isdigit():
+                return 400, {"error": f"Dépôt Shopify invalide : {shopify_location!r} "
+                                      f"n'est pas un identifiant d'emplacement."}
 
         if fond_caisse_val is not None:
             try:
@@ -626,6 +640,9 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             # des points et débrancherait la boutique en silence. La chaîne vide, elle, reste un
             # ordre légitime : c'est ainsi que l'écran déconnecte la boutique.
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_access_token', ?)", (str(shopify_token).strip(),))
+        if shopify_location is not None:
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_location_id', ?)",
+                           (str(shopify_location).strip(),))
         if auto_sync is not None:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_auto_sync', ?)", ("1" if auto_sync else "0",))
         if sync_orders is not None:
@@ -647,7 +664,8 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         # commerçante voyait « enregistré » et croyait la synchro active pour la journée.
         # start_auto_sync() est idempotent et relit lui-même la configuration ; il ne
         # démarre rien si la boutique n'est pas configurée ou si les deux sens sont éteints.
-        if any(v is not None for v in (shopify_domain, shopify_token, auto_sync, sync_orders)):
+        if any(v is not None for v in (shopify_domain, shopify_token, shopify_location,
+                                       auto_sync, sync_orders)):
             try:
                 from kodo_core.sync.shopify import start_auto_sync
                 start_auto_sync()
@@ -722,6 +740,9 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "lastSyncAt": etat["derniere_synchro"],
             "lastSyncOk": etat["succes"],
             "lastSyncMessage": etat["message"],
+            "locationId": reglages["location_id"],
+            # Pourquoi le dépôt utilisé peut ne pas être le bon. Vide quand il n'y a rien à dire.
+            "depotAvertissement": etat["avertissement_depot"],
         }
 
     # 15. Lancer l'importation du catalogue Shopify
