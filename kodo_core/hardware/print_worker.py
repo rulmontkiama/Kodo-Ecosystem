@@ -113,12 +113,20 @@ class PrintJob:
     STATUS_FAILED = "FAILED"
     STATUS_SKIPPED = "SKIPPED_CIRCUIT_OPEN"
 
-    def __init__(self, ticket_number: str, printer_name: Optional[str] = None, host: Optional[str] = None, port: int = 9100):
+    # Type de travail. TICKET reste la valeur par défaut : le chemin ticket de
+    # vente est inchangé, y compris pour les appelants qui ignorent ce champ.
+    TYPE_TICKET = "TICKET"
+    TYPE_LABEL = "LABEL"
+
+    def __init__(self, ticket_number: str, printer_name: Optional[str] = None, host: Optional[str] = None, port: int = 9100,
+                 job_type: str = TYPE_TICKET, payload: Optional[Dict[str, Any]] = None):
         self.job_id = str(uuid.uuid4())
         self.ticket_number = ticket_number
         self.printer_name = printer_name
         self.host = host
         self.port = port
+        self.job_type = job_type
+        self.payload: Dict[str, Any] = payload or {}
         self.status = self.STATUS_PENDING
         self.created_at = datetime.now(timezone.utc).isoformat()
         self.completed_at: Optional[str] = None
@@ -132,6 +140,7 @@ class PrintJob:
             "printer_name": self.printer_name,
             "host": self.host,
             "port": self.port,
+            "job_type": self.job_type,
             "status": self.status,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
@@ -152,6 +161,10 @@ class PrintWorker:
         self._recent_job_ids: List[str] = []
         self._lock = threading.Lock()
         self.circuit_breaker = PrinterCircuitBreaker()
+        # Disjoncteur DÉDIÉ à l'étiqueteuse. Il est distinct de celui du ticket :
+        # une étiqueteuse débranchée ne doit jamais ouvrir le circuit de
+        # l'imprimante de tickets et bloquer l'encaissement au comptoir.
+        self.label_circuit_breaker = PrinterCircuitBreaker()
         self._running = True
         self._worker_thread = threading.Thread(target=self._process_queue, name="KodoPrintWorker", daemon=True)
         self._worker_thread.start()
@@ -171,6 +184,41 @@ class PrintWorker:
 
         self._queue.put(job)
         return job
+
+    def enqueue_label_print(self, pdf_path: str, printer_name: str,
+                            media: Optional[str] = None, copies: int = 1) -> PrintJob:
+        """
+        Enfile l'impression d'un PDF d'étiquette de manière non-bloquante.
+
+        `printer_name` est obligatoire : on n'envoie jamais une étiquette sur la
+        file par défaut, qui est l'imprimante à tickets.
+        """
+        if not printer_name:
+            raise ValueError("Aucune étiqueteuse configurée (Parametres.label_printer_name).")
+        if not pdf_path:
+            raise ValueError("Aucun PDF d'étiquette à imprimer.")
+
+        import os
+        job = PrintJob(os.path.basename(str(pdf_path)),
+                       printer_name=printer_name,
+                       job_type=PrintJob.TYPE_LABEL,
+                       payload={"pdf_path": str(pdf_path), "media": media,
+                                "copies": max(1, int(copies or 1))})
+        with self._lock:
+            self._jobs[job.job_id] = job
+            self._recent_job_ids.append(job.job_id)
+            if len(self._recent_job_ids) > 100:
+                old = self._recent_job_ids.pop(0)
+                self._jobs.pop(old, None)
+
+        self._queue.put(job)
+        return job
+
+    def is_label_printer_available(self) -> bool:
+        return self.label_circuit_breaker.can_attempt()
+
+    def get_label_circuit_status(self) -> Dict[str, Any]:
+        return self.label_circuit_breaker.get_status()
 
     def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -196,6 +244,12 @@ class PrintWorker:
             try:
                 job = self._queue.get(timeout=1.0)
             except queue.Empty:
+                continue
+
+            # Les étiquettes sont traitées à part, avec leur propre disjoncteur.
+            # Le chemin ticket de vente ci-dessous reste strictement inchangé.
+            if job.job_type == PrintJob.TYPE_LABEL:
+                self._process_label_job(job)
                 continue
 
             # Vérification Circuit Breaker avant tout appel matériel
@@ -235,6 +289,51 @@ class PrintWorker:
                 self.circuit_breaker.record_failure(str(ex))
             finally:
                 self._queue.task_done()
+
+    def _process_label_job(self, job: PrintJob) -> None:
+        """
+        Traite une impression d'étiquette, sur le disjoncteur dédié aux
+        étiquettes. Isolé du chemin ticket pour qu'une étiqueteuse en panne
+        n'interrompe jamais l'encaissement.
+        """
+        breaker = self.label_circuit_breaker
+
+        if not breaker.can_attempt():
+            job.status = PrintJob.STATUS_SKIPPED
+            job.error = f"Circuit breaker étiqueteuse ouvert (indisponible : {breaker.last_failure_reason})"
+            job.completed_at = datetime.now(timezone.utc).isoformat()
+            self._queue.task_done()
+            return
+
+        job.status = PrintJob.STATUS_PRINTING
+        job.attempts += 1
+
+        try:
+            # Import paresseux pour éviter les cycles
+            from kodo_core.hardware.printer import imprimer_pdf_etiquette
+            success = imprimer_pdf_etiquette(
+                job.payload.get("pdf_path"),
+                printer_name=job.printer_name,
+                media=job.payload.get("media"),
+                copies=job.payload.get("copies", 1),
+            )
+
+            if success:
+                job.status = PrintJob.STATUS_SUCCESS
+                job.completed_at = datetime.now(timezone.utc).isoformat()
+                breaker.record_success()
+            else:
+                job.status = PrintJob.STATUS_FAILED
+                job.error = "Échec d'impression de l'étiquette (retour pilote False/None)"
+                job.completed_at = datetime.now(timezone.utc).isoformat()
+                breaker.record_failure(job.error)
+        except Exception as ex:
+            job.status = PrintJob.STATUS_FAILED
+            job.error = str(ex)
+            job.completed_at = datetime.now(timezone.utc).isoformat()
+            breaker.record_failure(str(ex))
+        finally:
+            self._queue.task_done()
 
 
 # Instance singleton globale

@@ -3,8 +3,11 @@ Générateur de PDF vectoriels via ReportLab pour Kōdo POS.
 Supporte le bilan Z (jour/mois/année), reçus A4/A5/ticket, factures vectorielles et étiquettes avec codes-barres (EAN13, Code128, QR Code).
 """
 import os
+import re
+import logging
 import sqlite3
 import datetime
+import subprocess
 from decimal import Decimal, ROUND_HALF_UP
 
 from reportlab.lib.pagesizes import A4, A5
@@ -22,30 +25,232 @@ C_SECONDARY = colors.HexColor("#86868B")  # Gris Apple
 C_LIGHT_BG  = colors.HexColor("#F5F5F7")  # Gris perle arrière-plan
 C_WHITE     = colors.HexColor("#FFFFFF")
 
+logger = logging.getLogger("kodo_core.hardware.pdf")
+
+# ---------------------------------------------------------------------------
+# Constantes de symbologie code-barres
+# ---------------------------------------------------------------------------
+PT_MM = 25.4 / 72.0
+
+# Un EAN-13 complet occupe 95 modules + 11 modules de zone de silence à gauche
+# et 7 à droite, soit 113 modules (valeur mesurée sur le rendu ReportLab).
+EAN13_MODULES = 113
+MODULE_NOMINAL_MM = 0.330   # module nominal EAN-13 (grossissement SC2)
+MODULE_MIN_MM = 0.264       # minimum absolu (SC0) : en dessous, plus de lecture fiable
+
+# Valeurs de repli de l'étiquette : elles reproduisent exactement le format
+# historique (6 x 3,5 cm, marges de 0,2 cm) pour ne casser aucun appel existant.
+LABEL_DEFAUT_LARGEUR_MM = 60.0
+LABEL_DEFAUT_HAUTEUR_MM = 35.0
+LABEL_DEFAUT_MARGE_MM = 2.0
+LABEL_DEFAUT_DPI = 203
+
+
+class BarcodeTropEtroitError(ValueError):
+    """Le support est trop étroit pour un EAN-13 lisible par une douchette."""
+
+
+def ean13_cle_controle(douze_chiffres):
+    """Clé de contrôle d'un EAN-13 à partir de ses 12 premiers chiffres."""
+    total = sum(int(d) * (3 if i % 2 else 1) for i, d in enumerate(douze_chiffres))
+    return str((10 - total % 10) % 10)
+
+
+def ean13_valide(code):
+    """True uniquement pour 13 chiffres dont la clé de contrôle est correcte."""
+    code = str(code or "")
+    return (len(code) == 13 and code.isdigit()
+            and code[12] == ean13_cle_controle(code[:12]))
+
+
+def largeur_mini_ean13_mm(dpi=LABEL_DEFAUT_DPI, marge_mm=LABEL_DEFAUT_MARGE_MM):
+    """
+    Largeur d'étiquette minimale permettant un EAN-13 conforme sur une tête `dpi`.
+
+    Un module doit tomber sur un nombre ENTIER de points de chauffe, sinon les
+    barres sont irrégulières. On cherche donc le plus petit nombre de points
+    dont la largeur atteint le module nominal.
+    """
+    point_mm = 25.4 / float(dpi)
+    points = 1
+    while points * point_mm < MODULE_NOMINAL_MM:
+        points += 1
+    return EAN13_MODULES * points * point_mm + 2 * marge_mm
+
+
+def build_barcode_drawing(barcode_type, value, width=160, height=40, dpi=LABEL_DEFAUT_DPI):
+    """
+    Code-barres vectoriel. Retourne (Drawing, métadonnées).
+
+    Lève plutôt que de produire un symbole différent de la donnée fournie :
+    ReportLab ne conserve que 12 chiffres d'un EAN-13 et recalcule lui-même la
+    clé de contrôle, ce qui imprimerait un code introuvable en base.
+    """
+    from reportlab.graphics.barcode import createBarcodeDrawing
+
+    b_type = (barcode_type or "").upper()
+    val_str = str(value or "")
+    if not val_str:
+        raise ValueError("Aucune donnée à encoder : refus d'inventer un code.")
+
+    if b_type in ("EAN13", "EAN-13"):
+        if not ean13_valide(val_str):
+            raise ValueError(
+                f"'{val_str}' n'est pas un EAN-13 valide (13 chiffres + clé de contrôle). "
+                "Encodage en Code128 requis pour respecter la donnée."
+            )
+        module_mm = (width / EAN13_MODULES) * PT_MM
+        if module_mm < MODULE_MIN_MM:
+            raise BarcodeTropEtroitError(
+                f"Module de {module_mm:.3f} mm (minimum {MODULE_MIN_MM} mm) : "
+                f"il faut {EAN13_MODULES * MODULE_NOMINAL_MM:.1f} mm de large pour un EAN-13, "
+                f"{width * PT_MM:.1f} mm disponibles."
+            )
+        d = createBarcodeDrawing('EAN13', value=val_str, width=width, height=height,
+                                 humanReadable=False)
+        symbologie = "EAN13"
+    elif b_type in ("QR", "QRCODE"):
+        d = createBarcodeDrawing('QR', value=val_str, width=width, height=height)
+        symbologie = "QR"
+    else:  # Par défaut Code128
+        d = createBarcodeDrawing('Code128', value=val_str, width=width, height=height,
+                                 humanReadable=False)
+        symbologie = "Code128"
+
+    widget = d.contents[0]
+    module_mm = getattr(widget, "barWidth", 0) * d.transform[0] * PT_MM
+    meta = {
+        "symbologie": symbologie,
+        "valeur": val_str,
+        "module_mm": module_mm,
+        "points_par_module": module_mm / (25.4 / float(dpi)) if module_mm else 0.0,
+        "sous_nominal": bool(module_mm) and module_mm < MODULE_NOMINAL_MM,
+    }
+    return d, meta
+
 
 def generate_barcode_drawing(barcode_type, value, width=160, height=40):
     """
     Génère un Drawing ReportLab contenant un code-barres vectoriel (Code128, EAN13, QR).
+
+    Conserve l'ancien contrat (retourne toujours un Drawing, ne lève jamais) pour
+    les appelants historiques. Le code appelant qui doit SAVOIR si le symbole a
+    été produit utilise `build_barcode_drawing`.
     """
     try:
-        from reportlab.graphics.barcode import createBarcodeDrawing
-        b_type = barcode_type.upper()
-        val_str = str(value or "000000000000")
-        
-        if b_type in ("EAN13", "EAN-13"):
-            # Ajustement longueur EAN13 si nécessaire (12 ou 13 chiffres)
-            if len(val_str) < 12:
-                val_str = val_str.zfill(12)
-            d = createBarcodeDrawing('EAN13', value=val_str, width=width, height=height)
-        elif b_type in ("QR", "QRCODE"):
-            d = createBarcodeDrawing('QR', value=val_str, width=width, height=height)
-        else:  # Par défaut Code128
-            d = createBarcodeDrawing('Code128', value=val_str, width=width, height=height)
+        d, _meta = build_barcode_drawing(barcode_type, value, width=width, height=height)
         return d
     except Exception as e:
-        print(f"[BARCODE VECTOR] Warning: impossible de générer le code-barres {barcode_type} ({e})")
-        d = Drawing(width, height)
-        return d
+        logger.warning("Code-barres %s non généré pour %r : %s", barcode_type, value, e)
+        return Drawing(width, height)
+
+
+# ---------------------------------------------------------------------------
+# Catalogue des formats d'étiquette
+#
+# Source de vérité : le PPD de la file d'impression choisie par la commerçante
+# (`formats_etiquette_disponibles`). Chaque étiqueteuse déclare ses propres
+# formats, il n'y a donc rien à coder en dur.
+#
+# La liste ci-dessous n'est qu'un REPLI, pour les files dont le PPD est
+# générique ou illisible. Elle ne contient que des dimensions relevées dans un
+# PPD DYMO réel (`*PaperDimension`, en points PostScript) : aucune dimension
+# approximative n'y figure. Les consommables Brother (DK) et Zebra ne sont
+# volontairement pas listés : leurs dimensions doivent être lues dans le PPD de
+# la machine, ou saisies en millimètres par la commerçante d'après l'emballage
+# de son rouleau. On ne fait pas acheter un consommable sur une dimension
+# approximative.
+# ---------------------------------------------------------------------------
+LABEL_FORMATS_REPLI = [
+    # (identifiant, libellé, largeur_pt, hauteur_pt)
+    ("dymo_w54h144",  "DYMO Return Address (19 x 51 mm)",   54, 144),
+    ("dymo_w81h252",  "DYMO Address (29 x 89 mm)",          81, 252),
+    ("dymo_w101h252", "DYMO Large Address (36 x 89 mm)",   101, 252),
+    ("dymo_w153h198", "DYMO 3.5\" Disk (54 x 70 mm)",      153, 198),
+    ("dymo_w162h225", "DYMO Paint Can (57 x 79 mm)",       162, 225),
+    ("dymo_w162h288", "DYMO 2.25 x 4.00\" (57 x 102 mm)",  162, 288),
+    ("dymo_w41h144",  "DYMO Hanging Folder (14 x 51 mm)",   41, 144),
+    ("dymo_w41h248",  "DYMO File Folder (14 x 87 mm)",      41, 248),
+]
+
+
+def _format_depuis_nom_cups(nom_cups):
+    """
+    Dimensions d'un format CUPS nommé `w<largeur>h<hauteur>` (en points).
+    Retourne (largeur_mm, hauteur_mm) ou None si le nom ne suit pas ce schéma.
+    """
+    m = re.fullmatch(r"w(\d+)h(\d+)", str(nom_cups or "").strip())
+    if not m:
+        return None
+    return (int(m.group(1)) * PT_MM, int(m.group(2)) * PT_MM)
+
+
+def formats_etiquette_disponibles(printer_name=None):
+    """
+    Formats d'étiquette proposés à la commerçante pour une file d'impression.
+
+    1. Lit le PPD de la file (`*PaperDimension`), qui donne les dimensions
+       exactes des consommables reconnus par SA machine.
+    2. À défaut, interroge `lpoptions -p <file> -l` (noms `wLARGEURhHAUTEUR`).
+    3. En dernier recours, retourne le catalogue de repli.
+
+    Ne fait aucune impression et n'écrit rien : uniquement de la lecture.
+    """
+    formats = []
+
+    if printer_name:
+        ppd = f"/etc/cups/ppd/{printer_name}.ppd"
+        try:
+            with open(ppd, "r", encoding="utf-8", errors="replace") as fh:
+                for ligne in fh:
+                    m = re.match(r'\*PaperDimension\s+(\S+?)\s*/([^:]*):\s*"([\d.]+)\s+([\d.]+)"', ligne)
+                    if m:
+                        formats.append({
+                            "id": m.group(1),
+                            "libelle": m.group(2).strip() or m.group(1),
+                            "media": m.group(1),
+                            "largeur_mm": round(float(m.group(3)) * PT_MM, 2),
+                            "hauteur_mm": round(float(m.group(4)) * PT_MM, 2),
+                            "source": "ppd",
+                        })
+        except Exception as e:
+            logger.info("PPD illisible pour %s (%s), repli sur lpoptions.", printer_name, e)
+
+        if not formats:
+            try:
+                out = subprocess.check_output(["lpoptions", "-p", printer_name, "-l"],
+                                              stderr=subprocess.DEVNULL, timeout=2).decode()
+                for ligne in out.splitlines():
+                    if not ligne.startswith("PageSize"):
+                        continue
+                    for brut in ligne.split(":", 1)[1].split():
+                        nom = brut.lstrip("*")
+                        dims = _format_depuis_nom_cups(nom)
+                        if dims:
+                            formats.append({
+                                "id": nom, "libelle": nom, "media": nom,
+                                "largeur_mm": round(dims[0], 2),
+                                "hauteur_mm": round(dims[1], 2),
+                                "source": "lpoptions",
+                            })
+            except Exception as e:
+                logger.info("lpoptions indisponible pour %s : %s", printer_name, e)
+
+    if not formats:
+        formats = [{
+            "id": fid, "libelle": lib, "media": fid.split("_", 1)[-1],
+            "largeur_mm": round(w * PT_MM, 2), "hauteur_mm": round(h * PT_MM, 2),
+            "source": "repli",
+        } for fid, lib, w, h in LABEL_FORMATS_REPLI]
+
+    # Chaque format est annoté : un EAN-13 y tient-il à une densité lisible ?
+    for f in formats:
+        for sens, utile in (("portrait", f["largeur_mm"]), ("paysage", f["hauteur_mm"])):
+            module = (utile - 2 * LABEL_DEFAUT_MARGE_MM) / EAN13_MODULES
+            f[f"ean13_{sens}"] = round(module, 4) >= MODULE_MIN_MM
+        f["ean13_ok"] = f["ean13_portrait"] or f["ean13_paysage"]
+
+    return formats
 
 
 class NumberedCanvas(canvas.Canvas):
@@ -683,89 +888,210 @@ def generer_rapport_pdf(type_rapport, date_val, save_path):
 # ---------------------------------------------------------------------------
 # 2. GÉNÉRATEUR D'ÉTIQUETTES DE PRIX AVEC CODE-BARRES
 # ---------------------------------------------------------------------------
-def generer_etiquettes_pdf(nom, code_barre, taille, prix, prix_solde, qte, output_path):
+def _largeur_ean13_alignee_pt(largeur_dispo_pt, dpi):
     """
-    Génère un PDF d'étiquettes adhésives de prix avec code-barres (6cm x 3.5cm).
-    """
-    doc = SimpleDocTemplate(
-        output_path,
-        pagesize=(6 * cm, 3.5 * cm),
-        leftMargin=0.2 * cm,
-        rightMargin=0.2 * cm,
-        topMargin=0.2 * cm,
-        bottomMargin=0.2 * cm
-    )
+    Largeur (pt) d'un EAN-13 dont le module tombe sur un nombre ENTIER de points
+    de chauffe, sans dépasser la place disponible. Un module fractionnaire
+    produit des barres irrégulières que les douchettes lisent mal.
 
+    Retourne la largeur disponible telle quelle si aucun alignement n'est
+    possible : `build_barcode_drawing` tranchera alors sur la conformité.
+    """
+    point_mm = 25.4 / float(dpi)
+    module_max_mm = (largeur_dispo_pt * PT_MM) / EAN13_MODULES
+    points = int(module_max_mm // point_mm)
+    if points < 1 or points * point_mm < MODULE_MIN_MM:
+        # Aucun alignement possible sans descendre sous le seuil de lisibilité.
+        # On rend la largeur disponible telle quelle : le contrôle de conformité
+        # de `build_barcode_drawing` rapportera alors la place réellement
+        # manquante sur l'étiquette, et non une largeur rabotée par l'alignement.
+        return largeur_dispo_pt
+    return (EAN13_MODULES * points * point_mm) / PT_MM
+
+
+def _etiquette_styles(prix_solde=None):
+    """Styles de paragraphe d'une étiquette de prix."""
     styles = getSampleStyleSheet()
-    
-    style_shop = ParagraphStyle(
-        'EtiquetteShop',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=8,
-        leading=9,
-        alignment=1,
-        textColor=C_PRIMARY
-    )
-    
-    style_name = ParagraphStyle(
-        'EtiquetteNom',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=7,
-        leading=8,
-        alignment=1,
-        textColor=C_PRIMARY
-    )
-    
-    style_price = ParagraphStyle(
-        'EtiquettePrix',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=9,
-        leading=10,
-        alignment=1,
-        textColor=C_CORAL if prix_solde else C_PRIMARY
-    )
+    return {
+        "shop": ParagraphStyle(
+            'EtiquetteShop', parent=styles['Normal'], fontName='Helvetica-Bold',
+            fontSize=8, leading=9, alignment=1, textColor=C_PRIMARY),
+        "nom": ParagraphStyle(
+            'EtiquetteNom', parent=styles['Normal'], fontName='Helvetica',
+            fontSize=7, leading=8, alignment=1, textColor=C_PRIMARY),
+        # Le code lisible à l'œil : ReportLab écrase son propre texte lors de la
+        # mise à l'échelle non uniforme du Drawing (jusqu'à 2,3 pt), on le
+        # dessine donc nous-mêmes à une taille réellement lisible.
+        "code": ParagraphStyle(
+            'EtiquetteCode', parent=styles['Normal'], fontName='Helvetica',
+            fontSize=6, leading=7, alignment=1, textColor=C_PRIMARY),
+        "prix": ParagraphStyle(
+            'EtiquettePrix', parent=styles['Normal'], fontName='Helvetica-Bold',
+            fontSize=9, leading=10, alignment=1,
+            textColor=C_CORAL if prix_solde else C_PRIMARY),
+    }
 
-    story = []
-    barcode_text = code_barre or "000000000000"
-    
-    for page_idx in range(qte):
-        story.append(Paragraph("Mon Commerce", style_shop))
-        story.append(Spacer(1, 2))
-        
-        taille_suffix = f" ({taille})" if taille and taille != "—" else ""
+
+def _etiquette_flowables(nom, code_barre, taille, prix, prix_solde, shop_name,
+                         largeur_code_pt, hauteur_code_pt, dpi, show_price,
+                         avertissements):
+    """Contenu d'UNE étiquette. N'invente jamais de code-barres."""
+    from xml.sax.saxutils import escape
+
+    styles = _etiquette_styles(prix_solde)
+    flow = []
+    if shop_name:
+        flow.extend([Paragraph(escape(str(shop_name)), styles["shop"]), Spacer(1, 2)])
+
+    # La taille distingue les étiquettes entre elles : elle ne doit jamais être
+    # avalée par la troncature du nom.
+    taille_suffix = f" ({taille})" if taille and str(taille) != "—" else ""
+    nom = str(nom or "")
+    if len(nom) + len(taille_suffix) > 35:
+        place = max(35 - len(taille_suffix) - 3, 8)
+        nom_complet = f"{nom[:place]}...{taille_suffix}"
+    else:
         nom_complet = f"{nom}{taille_suffix}"
-        if len(nom_complet) > 35:
-            nom_complet = nom_complet[:32] + "..."
-        story.append(Paragraph(nom_complet, style_name))
-        story.append(Spacer(1, 3))
-        
+    flow.append(Paragraph(escape(nom_complet), styles["nom"]))
+    flow.append(Spacer(1, 3))
+
+    barcode_text = str(code_barre or "").strip()
+    if not barcode_text:
+        # Règle projet : ne rien inventer sur le document remis à la cliente.
+        # L'ancien repli "000000000000" imprimait un EAN-13 valide et scannable.
+        avertissements.append(f"{nom_complet} : aucun code-barres enregistré, étiquette sans code.")
+        flow.append(Paragraph("<i>Sans code-barres</i>", styles["nom"]))
+        flow.append(Spacer(1, hauteur_code_pt - 8))
+    else:
+        est_ean13 = ean13_valide(barcode_text)
+        symbologie = "EAN13" if est_ean13 else "Code128"
+        largeur = (_largeur_ean13_alignee_pt(largeur_code_pt, dpi) if est_ean13
+                   else largeur_code_pt)
         try:
-            b_type = "EAN13" if len(barcode_text) in (12, 13) and barcode_text.isdigit() else "Code128"
-            d = generate_barcode_drawing(b_type, barcode_text, width=150, height=24)
-            story.append(d)
+            d, meta = build_barcode_drawing(symbologie, barcode_text,
+                                            width=largeur, height=hauteur_code_pt, dpi=dpi)
+            flow.append(d)
+            if meta["sous_nominal"]:
+                avertissements.append(
+                    f"{barcode_text} : module de {meta['module_mm']:.3f} mm, "
+                    f"sous le nominal de {MODULE_NOMINAL_MM} mm."
+                )
+        except BarcodeTropEtroitError:
+            raise  # remonte à l'appelant : le format d'étiquette est à changer
         except Exception as e:
-            print(f"[ETIQUETTE PDF] Erreur code-barres : {e}")
-            story.append(Spacer(1, 24))
-            
-        story.append(Spacer(1, 3))
-        
+            logger.error("Code-barres %r non généré : %s", barcode_text, e)
+            avertissements.append(f"{barcode_text} : code-barres non généré ({e}).")
+            flow.append(Paragraph("<i>Code-barres indisponible</i>", styles["nom"]))
+            flow.append(Spacer(1, hauteur_code_pt - 8))
+        # Toujours imprimé : si le scan échoue, la caissière peut saisir le code.
+        flow.append(Paragraph(escape(barcode_text), styles["code"]))
+
+    flow.append(Spacer(1, 3))
+
+    if show_price:
         if prix_solde:
             p_orig = Decimal(str(prix)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             p_solde = Decimal(str(prix_solde)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            txt_price = f"<font color='#86868B'><s>{p_orig:.2f} €</s></font>  <b><font color='#FF3B30'>{p_solde:.2f} € SOLDE</font></b>"
-            story.append(Paragraph(txt_price, style_price))
+            txt_price = (f"<font color='#86868B'><s>{p_orig:.2f} €</s></font>  "
+                         f"<b><font color='#FF3B30'>{p_solde:.2f} € SOLDE</font></b>")
+            flow.append(Paragraph(txt_price, styles["prix"]))
         else:
             p_reg = Decimal(str(prix)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            story.append(Paragraph(f"<b>{p_reg:.2f} €</b>", style_price))
-            
-        if page_idx < qte - 1:
-            story.append(PageBreak())
-            
+            flow.append(Paragraph(f"<b>{p_reg:.2f} €</b>", styles["prix"]))
+
+    return flow
+
+
+def generer_etiquettes_lot_pdf(lignes, output_path,
+                               largeur_mm=LABEL_DEFAUT_LARGEUR_MM,
+                               hauteur_mm=LABEL_DEFAUT_HAUTEUR_MM,
+                               marge_mm=LABEL_DEFAUT_MARGE_MM,
+                               dpi=LABEL_DEFAUT_DPI,
+                               orientation="portrait",
+                               shop_name=None,
+                               show_price=True):
+    """
+    PDF d'étiquettes pour PLUSIEURS articles, au format d'étiquette configuré.
+
+    `lignes` : liste de dicts
+        {product_id, name, barcode, size, price, price_sale, quantity}
+    `quantity` étiquettes sont produites par ligne, à raison d'UNE ÉTIQUETTE PAR
+    PAGE au format du support : c'est la mise en page attendue d'une étiqueteuse
+    à rouleau, où chaque page correspond à une étiquette détachée. Ce n'est pas
+    une planche A4.
+
+    `orientation="paysage"` permute largeur et hauteur du support : sur une
+    étiquette étroite et longue (type adresse), c'est le seul sens qui laisse
+    assez de place à un EAN-13 lisible.
+
+    Retourne {"path", "pages", "avertissements"}.
+    Lève `BarcodeTropEtroitError` si le format choisi ne permet aucun EAN-13
+    conforme : mieux vaut refuser que livrer un code que la douchette ne lira pas.
+    """
+    if orientation == "paysage":
+        page_w_mm, page_h_mm = float(hauteur_mm), float(largeur_mm)
+    else:
+        page_w_mm, page_h_mm = float(largeur_mm), float(hauteur_mm)
+
+    page_w, page_h = page_w_mm / PT_MM, page_h_mm / PT_MM
+    marge = float(marge_mm) / PT_MM
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=(page_w, page_h),
+        leftMargin=marge, rightMargin=marge,
+        topMargin=marge, bottomMargin=marge,
+    )
+
+    largeur_code_pt = page_w - 2 * marge
+    hauteur_code_pt = max(20.0, (page_h - 2 * marge) * 0.32)
+
+    avertissements = []
+    story = []
+    pages = 0
+    for ligne in (lignes or []):
+        qte = max(1, int(ligne.get("quantity") or 1))
+        for _ in range(qte):
+            if story:
+                story.append(PageBreak())
+            story.extend(_etiquette_flowables(
+                ligne.get("name"), ligne.get("barcode"), ligne.get("size"),
+                ligne.get("price") or 0, ligne.get("price_sale"),
+                shop_name, largeur_code_pt, hauteur_code_pt, dpi, show_price,
+                avertissements,
+            ))
+            pages += 1
+
+    if not story:
+        raise ValueError("Aucun article à étiqueter.")
+
     doc.build(story)
-    print(f"Étiquettes PDF générées ({qte} page(s)) : {output_path}")
+    logger.info("Étiquettes PDF générées (%d page(s), %.1f x %.1f mm) : %s",
+                pages, page_w_mm, page_h_mm, output_path)
+    return {"path": output_path, "pages": pages, "avertissements": avertissements}
+
+
+def generer_etiquettes_pdf(nom, code_barre, taille, prix, prix_solde, qte, output_path,
+                           largeur_mm=LABEL_DEFAUT_LARGEUR_MM,
+                           hauteur_mm=LABEL_DEFAUT_HAUTEUR_MM,
+                           marge_mm=LABEL_DEFAUT_MARGE_MM,
+                           dpi=LABEL_DEFAUT_DPI,
+                           orientation="portrait",
+                           shop_name="Mon Commerce"):
+    """
+    Génère un PDF d'étiquettes adhésives de prix avec code-barres pour UN article.
+
+    Les six premiers paramètres et les valeurs par défaut reproduisent le
+    comportement historique (6 cm x 3,5 cm, marges de 0,2 cm) : tout appel
+    existant continue de fonctionner à l'identique. Retourne `output_path`.
+    """
+    generer_etiquettes_lot_pdf(
+        [{"name": nom, "barcode": code_barre, "size": taille,
+          "price": prix, "price_sale": prix_solde, "quantity": qte}],
+        output_path,
+        largeur_mm=largeur_mm, hauteur_mm=hauteur_mm, marge_mm=marge_mm,
+        dpi=dpi, orientation=orientation, shop_name=shop_name,
+    )
     return output_path
 
 
