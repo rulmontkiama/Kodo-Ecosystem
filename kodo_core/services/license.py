@@ -15,9 +15,26 @@ import datetime
 import urllib.request
 import urllib.parse
 import logging
+import base64
+
+try:
+    import kodo_base
+except ImportError:
+    kodo_base = None
+
+try:
+    import kodo_ed25519
+except ImportError:
+    kodo_ed25519 = None
 
 SECRET_SALT = "KODO_SECURE_LIC_SALT_2026_BELGIUM"
 API_LICENSE_VALIDATE_URL = "https://kodo-solutions-web.vercel.app/api/license/validate"
+
+# Clés publiques Ed25519 de confiance pour la vérification des licences hors-ligne.
+# Clé par défaut : racine de confiance issue de kodo_base.TRUSTED_PUBLIC_KEYS.
+LICENSE_TRUSTED_PUBLIC_KEYS = list(getattr(kodo_base, "TRUSTED_PUBLIC_KEYS", [])) if kodo_base else [
+    "6d511f281e615a7635526033676c4b8d71d00d9f107028c6e2a1af7c3d4e31f7",
+]
 
 logger = logging.getLogger("kodo_core.services.license")
 if not logger.handlers:
@@ -462,8 +479,122 @@ def get_license_info() -> dict:
     }
 
 
+def generate_signed_license(
+    secret_key: bytes,
+    fingerprint: str,
+    plan: str = "PRO",
+    expiry_date: str = "PERMANENT"
+) -> str:
+    """
+    Génère une clé de licence hors-ligne signée cryptographiquement avec Ed25519.
+    Utilisé sur le poste de l'éditeur (scripts/generate_license.py) ou dans les tests.
+
+    Format généré : KODO1.<payload_b64>.<sig_b64>
+    """
+    if kodo_ed25519 is None:
+        raise RuntimeError("Le module kodo_ed25519 est requis pour signer une licence.")
+    if len(secret_key) != 32:
+        raise ValueError("La clé secrète Ed25519 doit comporter exactement 32 octets.")
+
+    clean_fp = str(fingerprint).strip().upper()
+    clean_plan = str(plan).strip().upper()
+    clean_exp = str(expiry_date).strip().upper()
+
+    message_str = f"KODO-LIC-V1|{clean_fp}|{clean_plan}|{clean_exp}"
+    message_bytes = message_str.encode("utf-8")
+
+    sig_bytes = kodo_ed25519.sign(secret_key, message_bytes)
+
+    payload_b64 = base64.urlsafe_b64encode(message_bytes).decode("ascii").rstrip("=")
+    sig_b64 = base64.urlsafe_b64encode(sig_bytes).decode("ascii").rstrip("=")
+
+    return f"KODO1.{payload_b64}.{sig_b64}"
+
+
+def verify_signed_license(key: str, expected_fingerprint: str) -> tuple:
+    """
+    Vérifie la signature Ed25519 et la conformité matérielle d'une clé de licence hors-ligne.
+    Retourne (est_valide: bool, details: dict, message_erreur: str).
+    """
+    if not key or not isinstance(key, str):
+        return False, {}, "Clé de licence vide ou invalide."
+
+    clean_key = key.strip()
+    if not clean_key.startswith("KODO1."):
+        return False, {}, "Format de clé de licence non reconnu."
+
+    parts = clean_key.split(".")
+    if len(parts) != 3:
+        return False, {}, "Format de clé de licence altéré ou incomplet."
+
+    _, payload_b64, sig_b64 = parts
+
+    try:
+        pad_payload = payload_b64 + "=" * (-len(payload_b64) % 4)
+        pad_sig = sig_b64 + "=" * (-len(sig_b64) % 4)
+
+        message_bytes = base64.urlsafe_b64decode(pad_payload.encode("ascii"))
+        sig_bytes = base64.urlsafe_b64decode(pad_sig.encode("ascii"))
+    except Exception:
+        return False, {}, "Données de licence corrompues ou illisibles."
+
+    if len(sig_bytes) != 64:
+        return False, {}, "Signature de licence invalide (longueur incorrecte)."
+
+    if kodo_ed25519 is None:
+        logger.error("Vérification de licence impossible : module kodo_ed25519 manquant.")
+        return False, {}, "Module cryptographique kodo_ed25519 indisponible."
+
+    verified = False
+    for pub_hex in LICENSE_TRUSTED_PUBLIC_KEYS:
+        try:
+            pub_bytes = bytes.fromhex(pub_hex)
+            if kodo_ed25519.verify(pub_bytes, message_bytes, sig_bytes):
+                verified = True
+                break
+        except Exception:
+            continue
+
+    if not verified:
+        return False, {}, "Signature cryptographique de licence invalide ou clé publique non reconnue."
+
+    try:
+        message_str = message_bytes.decode("utf-8")
+        elements = message_str.split("|")
+        if len(elements) != 4 or elements[0] != "KODO-LIC-V1":
+            return False, {}, "Structure interne de la licence invalide."
+
+        _, lic_fp, lic_plan, lic_exp = elements
+    except Exception:
+        return False, {}, "Impossible d'interpréter le contenu de la licence."
+
+    if lic_fp.upper() != expected_fingerprint.strip().upper():
+        return False, {}, f"Cette clé de licence est destinée à un autre appareil (HWID {lic_fp})."
+
+    today = datetime.date.today()
+    if lic_exp != "PERMANENT":
+        try:
+            exp_date = datetime.date.fromisoformat(lic_exp)
+            if exp_date < today:
+                return False, {}, f"Cette clé de licence a expiré le {lic_exp}."
+        except ValueError:
+            return False, {}, "Date d'expiration de la licence invalide."
+
+    details = {
+        "fingerprint": lic_fp,
+        "plan": lic_plan,
+        "expiry_date": "Permanent" if lic_exp == "PERMANENT" else lic_exp,
+        "verified_at": today.isoformat(),
+    }
+    return True, details, ""
+
+
 def _expected_master_key(fingerprint: str) -> str:
-    """Calcule la clé maître attendue pour cet appareil via HMAC-SHA256 (dérivée du HWID)."""
+    """
+    [DÉPRÉCIÉ - NE PLUS UTILISER POUR L'ACTIVATION]
+    Ancienne dérivation de clé maître basée sur HMAC-SHA256. Conservée uniquement
+    pour compatibilité d'appel interne, mais refusée par activate_license_key.
+    """
     expected_hash = hmac.new(
         SECRET_SALT.encode("utf-8"), fingerprint.encode("utf-8"), hashlib.sha256
     ).hexdigest()[:12].upper()
@@ -472,18 +603,16 @@ def _expected_master_key(fingerprint: str) -> str:
 
 def activate_license_key(key: str) -> tuple:
     """
-    Active une clé de licence en tentant une validation Cloud puis fallback algorithmique local.
-    La validation locale exige une correspondance EXACTE avec la clé maître dérivée du HWID
-    (HMAC-SHA256), ou la clé de démonstration explicite. Aucune validation laxiste (préfixe,
-    longueur minimale) n'est tolérée.
+    Active une clé de licence en tentant une validation Cloud puis fallback hors-ligne signé Ed25519.
+    Aucune clé maîtresse prédictible ni mot-clé magique n'est accepté.
     """
     if not key or not isinstance(key, str):
         return False, "Veuillez fournir une clé d'activation valide."
 
-    clean_key = key.strip().upper()
+    clean_key = key.strip()
     fingerprint = get_machine_fingerprint()
 
-    # 1. API Cloud
+    # 1. API Cloud (si réseau disponible et réponse valide)
     online_res = validate_license_online(clean_key, fingerprint)
     if online_res and isinstance(online_res, dict):
         if online_res.get("valid"):
@@ -495,19 +624,14 @@ def activate_license_key(key: str) -> tuple:
         else:
             return False, online_res.get("reason", "Clé d'activation invalide ou déjà utilisée sur un autre appareil.")
 
-    # 2. Clé Master / Algorithmique (fallback hors-ligne strict, correspondance exacte uniquement)
-    expected_key_format = _expected_master_key(fingerprint)
-
-    is_valid_key = clean_key == expected_key_format or clean_key == "DEMO-ACTIVE-2026"
-
-    if is_valid_key:
+    # 2. Clé Hors-Ligne signée Ed25519 (authentification asymétrique pure)
+    valid, details, err_msg = verify_signed_license(clean_key, fingerprint)
+    if valid:
         today_str = datetime.date.today().isoformat()
-        if "30Y" in clean_key or "MASTER" in clean_key or "PERMANENT" in clean_key or "30YS" in clean_key:
-            target_expiry = (datetime.date.today() + datetime.timedelta(days=365 * 30)).isoformat()
-        else:
-            target_expiry = (datetime.date.today() + datetime.timedelta(days=365)).isoformat()
-
+        target_expiry = details.get("expiry_date", "Permanent")
         save_local_license("active", target_expiry, today_str, clean_key)
-        return True, "Licence Kōdo POS activée avec succès (Mode Hors-Ligne) !"
+        return True, "Licence Kōdo POS activée avec succès (Mode Hors-Ligne Signé) !"
     else:
+        if clean_key.startswith("KODO1."):
+            return False, err_msg or "Clé de licence hors-ligne invalide."
         return False, "Clé d'activation incorrecte ou invalide pour cet appareil."

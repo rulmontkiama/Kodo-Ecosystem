@@ -88,14 +88,22 @@ class TestKodoCore(unittest.TestCase):
         self.assertIn("enabled_features", info)
 
         # Activation vérifiée hors ligne, de façon déterministe : l'ancien appel réseau visait
-        # /api/license/validate, route absente du site kodo-solutions-web ; il ne pouvait qu'échouer,
-        # ou déclencher une activation en production à chaque exécution de la CI. Hors ligne, seule
-        # la clé maître dérivée du HWID (ou la clé de démonstration) est acceptée.
+        # /api/license/validate ; hors ligne, seule une clé signée Ed25519 pour ce HWID est
+        # acceptée. L'ancienne clé maître dérivée par HMAC et DEMO-ACTIVE-2026 sont rejetées.
         from kodo_core.services import license as licence
-        with patch.object(licence, "validate_license_online", return_value=None):
+        import kodo_ed25519
+        test_secret = bytes.fromhex("11" * 32)
+        test_pub = kodo_ed25519.public_key_from_secret(test_secret).hex()
+        with patch.object(licence, "validate_license_online", return_value=None), \
+             patch.object(licence, "LICENSE_TRUSTED_PUBLIC_KEYS", [test_pub]):
             cle_inconnue_acceptee, _ = activate_license_key("KODO-TEST-KEY-123456")
             self.assertFalse(cle_inconnue_acceptee)
-            success, msg = activate_license_key(licence._expected_master_key(hwid))
+            ancienne_cle_refusee, _ = activate_license_key(licence._expected_master_key(hwid))
+            self.assertFalse(ancienne_cle_refusee)
+            demo_refusee, _ = activate_license_key("DEMO-ACTIVE-2026")
+            self.assertFalse(demo_refusee)
+            cle_signee = licence.generate_signed_license(test_secret, hwid, "PRO", "2056-01-01")
+            success, msg = activate_license_key(cle_signee)
         self.assertTrue(success, msg)
 
     def test_shopify_sync_engine(self):

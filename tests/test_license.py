@@ -183,6 +183,16 @@ def test_load_recovers_from_backup_when_primary_missing(temp_cache_paths, fixed_
 # Activation locale (fallback hors-ligne strict) & en ligne
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def test_ed25519_keypair(monkeypatch):
+    """Génère une paire de clés Ed25519 éphémère et l'injecte comme clé de confiance."""
+    import kodo_ed25519
+    secret = bytes.fromhex("42" * 32)
+    pub_hex = kodo_ed25519.public_key_from_secret(secret).hex()
+    monkeypatch.setattr(license_module, "LICENSE_TRUSTED_PUBLIC_KEYS", [pub_hex])
+    return secret, pub_hex
+
+
 def test_weak_validation_no_longer_accepted(temp_cache_paths, fixed_fingerprint):
     ok, msg = license_module.activate_license_key("KODO-ANYTHING-1234567890")
     assert ok is False
@@ -193,24 +203,97 @@ def test_arbitrary_long_key_is_rejected(temp_cache_paths, fixed_fingerprint):
     assert ok is False
 
 
-def test_exact_master_key_for_this_hardware_is_accepted(temp_cache_paths, fixed_fingerprint):
+def test_old_master_key_is_now_rejected(temp_cache_paths, fixed_fingerprint):
+    """L'ancienne clé maître dérivée par HMAC-SHA256 est désormais rejetée."""
     expected_key = license_module._expected_master_key(fixed_fingerprint)
     ok, msg = license_module.activate_license_key(expected_key)
+    assert ok is False
+
+
+def test_demo_key_is_now_rejected(temp_cache_paths, fixed_fingerprint):
+    """Le mot-clé magique DEMO-ACTIVE-2026 est désormais rejeté sans exception."""
+    ok, msg = license_module.activate_license_key("demo-active-2026")
+    assert ok is False
+
+
+def test_signed_ed25519_license_is_accepted(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+    """Une clé signée Ed25519 valide pour ce matériel active l'application."""
+    secret, _ = test_ed25519_keypair
+    signed_key = license_module.generate_signed_license(
+        secret, fixed_fingerprint, plan="PRO", expiry_date="2030-01-01"
+    )
+    ok, msg = license_module.activate_license_key(signed_key)
     assert ok is True
 
     cache = license_module.load_local_license()
     assert cache["status"] == "active"
-    assert cache["license_key"] == expected_key
+    assert cache["expiry_date"] == "2030-01-01"
+    assert cache["license_key"] == signed_key
 
 
-def test_demo_key_is_accepted(temp_cache_paths, fixed_fingerprint):
-    ok, msg = license_module.activate_license_key("demo-active-2026")
+def test_signed_ed25519_license_for_other_hardware_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+    """Une clé signée pour un autre HWID est immédiatement refusée."""
+    secret, _ = test_ed25519_keypair
+    other_key = license_module.generate_signed_license(
+        secret, "OTHERHWID0000000", plan="PRO", expiry_date="2030-01-01"
+    )
+    ok, msg = license_module.activate_license_key(other_key)
+    assert ok is False
+    assert "autre appareil" in msg
+
+
+def test_signed_ed25519_license_expired_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+    """Une clé signée dont la date est passée est refusée."""
+    secret, _ = test_ed25519_keypair
+    expired_key = license_module.generate_signed_license(
+        secret, fixed_fingerprint, plan="PRO", expiry_date="2020-01-01"
+    )
+    ok, msg = license_module.activate_license_key(expired_key)
+    assert ok is False
+    assert "expiré" in msg
+
+
+def test_signed_ed25519_license_permanent_is_accepted(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+    """Une clé signée PERMANENT configure une date d'expiration permanente."""
+    secret, _ = test_ed25519_keypair
+    perm_key = license_module.generate_signed_license(
+        secret, fixed_fingerprint, plan="PRO", expiry_date="PERMANENT"
+    )
+    ok, msg = license_module.activate_license_key(perm_key)
     assert ok is True
 
+    cache = license_module.load_local_license()
+    assert cache["status"] == "active"
+    assert cache["expiry_date"] == "Permanent"
 
-def test_master_key_from_other_hardware_is_rejected(temp_cache_paths, fixed_fingerprint):
-    other_key = license_module._expected_master_key("OTHERHWID0000000")
-    ok, msg = license_module.activate_license_key(other_key)
+
+def test_signed_ed25519_tampered_payload_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+    """Altérer un seul caractère du payload fait échouer la signature (test de falsification)."""
+    secret, _ = test_ed25519_keypair
+    key = license_module.generate_signed_license(
+        secret, fixed_fingerprint, plan="PRO", expiry_date="2030-01-01"
+    )
+    parts = key.split(".")
+    # Remplacer un caractère du payload
+    tampered_payload = parts[1][:-1] + ("A" if parts[1][-1] != "A" else "B")
+    tampered_key = f"KODO1.{tampered_payload}.{parts[2]}"
+
+    ok, msg = license_module.activate_license_key(tampered_key)
+    assert ok is False
+
+
+def test_signed_ed25519_tampered_signature_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+    """Altérer un bit de la signature fait échouer la vérification (test de mutation)."""
+    secret, _ = test_ed25519_keypair
+    key = license_module.generate_signed_license(
+        secret, fixed_fingerprint, plan="PRO", expiry_date="2030-01-01"
+    )
+    parts = key.split(".")
+    # Remplacer le dernier caractère de la signature
+    tampered_sig = parts[2][:-1] + ("X" if parts[2][-1] != "X" else "Y")
+    tampered_key = f"KODO1.{parts[1]}.{tampered_sig}"
+
+    ok, msg = license_module.activate_license_key(tampered_key)
     assert ok is False
 
 

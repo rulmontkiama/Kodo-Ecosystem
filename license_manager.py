@@ -15,6 +15,8 @@ from kodo_core.services.license import (
     check_license,
     get_license_info,
     activate_license_key,
+    generate_signed_license,
+    verify_signed_license,
 )
 
 __all__ = [
@@ -30,4 +32,6 @@ __all__ = [
     "check_license",
     "get_license_info",
     "activate_license_key",
+    "generate_signed_license",
+    "verify_signed_license",
 ]
