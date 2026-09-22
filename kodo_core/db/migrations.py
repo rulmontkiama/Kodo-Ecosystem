@@ -585,6 +585,22 @@ class MigrationManager:
                 """CREATE INDEX IF NOT EXISTS idx_shopify_remboursements_order
                    ON Shopify_Remboursements(order_id)""",
             ]
+        },
+        {
+            "version": "2.0.7",
+            "description": "Retrait du déclencheur `prevent_negative_stock` des bases DÉJÀ en "
+                           "service. Le retirer de `initialiser_db` ne suffisait pas : cette "
+                           "fonction crée, elle ne supprime jamais. Les bases des boutiques en "
+                           "activité — créées par une version antérieure ou restaurées depuis "
+                           "une sauvegarde — le gardaient donc, et ce sont exactement celles-là "
+                           "qui souffrent du défaut. Le déclencheur refusait toute UPDATE sur une "
+                           "ligne de stock négative, y compris l'`UPDATE Stocks SET "
+                           "requires_stock_audit = 1` par lequel `OfflineSyncEngine` SIGNALE le "
+                           "conflit : le stock négatif issu de deux caisses hors-ligne devenait "
+                           "non seulement irréparable, mais muet.",
+            "sql": [
+                "DROP TRIGGER IF EXISTS prevent_negative_stock",
+            ]
         }
     ]
 
