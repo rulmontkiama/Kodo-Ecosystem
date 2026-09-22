@@ -5,10 +5,15 @@ du flux binaire ESC/POS du ticket, et commande d'ouverture du tiroir-caisse.
 Découplé de l'UI : toute interaction OS (subprocess CUPS / win32print) passe
 par des points d'entrée injectables pour rester testable avec des flux simulés.
 """
+import os
 import sys
 import subprocess
 from decimal import Decimal
 from typing import Optional, Sequence
+
+# Référence UNIQUE d'arrondi monétaire du projet (voir son docstring) : le ticket imprimé
+# doit afficher exactement le montant que la vente scelle en base.
+from kodo_core.domain.sales.models import quantize_money
 
 ESC = b'\x1b'
 GS = b'\x1d'
@@ -26,6 +31,25 @@ GS_CUT_FUNCTION = GS + b'VB\x00'  # GS V 66 0 : coupure papier
 ESC_DRAWER_PIN2 = ESC + b'p\x00\x19\xfa'  # ESC p 0 25 250
 
 COL = 42  # Largeur standard ticket thermique 80mm (42 colonnes)
+
+
+def env_cups() -> dict:
+    """
+    Environnement à passer à tout appel `lpstat`/`lp` dont on relit la sortie.
+
+    CUPS traduit ses messages : sur un Mac en français `lpstat -p` répond
+    « l'imprimante Kodo est inactive », où le code cherchait « idle » / « enabled ».
+    Une imprimante parfaitement prête était donc rapportée « unknown » — donc
+    indisponible à l'écran de caisse — pour la seule raison que le système n'était
+    pas en anglais. On fige la langue des messages plutôt que d'énumérer les
+    traductions : `lpstat` reste le même programme, seule sa langue est imposée.
+    `LANGUAGE` est vidé car GNU gettext lui donne la priorité sur `LC_ALL`.
+    """
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    env["LANGUAGE"] = ""
+    return env
 
 
 def check_printer_status(printer_name: str) -> tuple[bool, str]:
@@ -51,6 +75,7 @@ def _check_printer_status_cups(printer_name: str) -> tuple[bool, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=5,
+            env=env_cups(),
         )
     except Exception:
         return False, "unknown"
@@ -104,8 +129,15 @@ def _right(label: str, value: str, width: int = COL) -> str:
     return f"{label}{' ' * padding}{value}"
 
 
-def _quantize(amount: Decimal) -> str:
-    return f"{amount:.2f}"
+def _quantize(amount) -> str:
+    """Arrondit ROUND_HALF_UP puis formate le montant imprimé sur le ticket.
+
+    Cette fonction ne faisait que formater (`f"{amount:.2f}"`), ce qui applique l'arrondi
+    BANQUIER de Python et non ROUND_HALF_UP : 8.345 s'imprimait 8.34 et 1234.565 s'imprimait
+    1234.56, alors que la vente scellée en base retenait 8.35 et 1234.57. Le document remis à
+    la cliente pouvait donc afficher un centime de moins que le montant réellement encaissé.
+    """
+    return f"{quantize_money(amount):.2f}"
 
 
 def generate_esc_pos_receipt(ticket_data: dict, fiscal_hash: str) -> bytes:

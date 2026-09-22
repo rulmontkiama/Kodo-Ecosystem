@@ -132,7 +132,11 @@ class ESCPOSThermalPrinter:
         if not self.printer_name and sys.platform in ["darwin", "linux"]:
             try:
                 import subprocess, re
-                out_d = subprocess.check_output(["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=1).decode()
+                # Langue des messages CUPS figée : voir `printer_service.env_cups`.
+                from kodo_core.hardware.printer_service import env_cups
+                out_d = subprocess.check_output(
+                    ["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=1, env=env_cups()
+                ).decode()
                 m_d = re.search(r':\s*(\S+)', out_d)
                 if m_d:
                     self.printer_name = m_d.group(1)
@@ -1262,4 +1266,50 @@ def imprimer_ticket_test(printer_name=None, host=None, port=9100):
         "printerIP": printer_ip,
         "content": txt
     }
+
+
+def imprimer_pdf_etiquette(pdf_path, printer_name, media=None, copies=1):
+    """
+    Envoie un PDF d'étiquette à CUPS en laissant les filtres faire leur travail.
+
+    Ne PAS passer par `ESCPOSThermalPrinter.send_raw` : celui-ci force `-o raw`,
+    qui court-circuite les filtres CUPS. Un PDF arriverait alors tel quel à
+    l'étiqueteuse, qui ne sait pas l'interpréter.
+
+    `media` doit correspondre EXACTEMENT au format du PDF (nom de format du PPD,
+    par exemple « w101h252 », ou « Custom.LARGEURxHAUTEURmm »). Sans lui, CUPS
+    impose le format par défaut du PPD et dessine la page SANS mise à l'échelle
+    (« Drawing unscaled page » dans cgpdftoraster) : une page plus large que le
+    support est alors rognée, code-barres compris.
+
+    `printer_name` est obligatoire : on n'envoie jamais une étiquette sur la file
+    par défaut, qui est l'imprimante à tickets.
+    """
+    if not pdf_path or not os.path.exists(pdf_path):
+        print(f"[ETIQUETTE] PDF introuvable : {pdf_path}")
+        return False
+    if not printer_name:
+        print("[ETIQUETTE] Aucune étiqueteuse configurée : impression annulée.")
+        return False
+
+    cmd = ["lp", "-d", str(printer_name), "-n", str(max(1, int(copies or 1)))]
+    if media:
+        cmd += ["-o", f"media={media}"]
+    # Pas de mise à l'échelle : le PDF est déjà produit à la taille du support.
+    cmd += ["-o", "fit-to-page=false", str(pdf_path)]
+
+    try:
+        # 10 s (et non les 2 s du chemin ticket) : un PDF traverse une chaîne de
+        # filtres CUPS, là où le ticket part en octets bruts sur une socket.
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10.0)
+    except Exception as e:
+        print(f"[ETIQUETTE] Échec de l'envoi à CUPS : {e}")
+        return False
+
+    if res.returncode == 0:
+        print(f"[SUCCESS] Étiquette envoyée à '{printer_name}' (media={media or 'défaut'}).")
+        return True
+
+    print(f"[ETIQUETTE] lp a échoué (code {res.returncode}) : {res.stderr.decode(errors='replace').strip()}")
+    return False
 
