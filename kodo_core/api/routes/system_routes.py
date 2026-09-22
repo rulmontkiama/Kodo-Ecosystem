@@ -9,7 +9,7 @@ import time
 import datetime
 import sqlite3
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional
 
 import database_manager
 from database_manager import get_connection, hash_pin, verify_pin_hash
@@ -20,6 +20,193 @@ from kodo_core.api.session_manager import create_session_token
 # Mécanisme de Rate Limiting anti-bruteforce en mémoire pour les vérifications de PIN
 # Structure: { client_id: {"failures": int, "locked_until": float} }
 _PIN_ATTEMPTS: Dict[str, Dict[str, Any]] = {}
+
+
+# ---------------------------------------------------------------------------------------------
+# ÉTIQUETTES CODE-BARRES : réglages de l'étiqueteuse et inventaire du matériel.
+#
+# AUCUN FORMAT PAR DÉFAUT N'EST INVENTÉ. Tant que l'étiqueteuse et la taille de l'étiquette ne sont
+# pas renseignées, l'impression est refusée. Un format supposé (« on met du 57 × 32, ça passera »)
+# produit une étiquette dont les barres sont tronquées ou mal dimensionnées : le code reste lisible
+# à l'œil mais la douchette ne le lit plus. La commerçante ne s'en aperçoit qu'en caisse, une fois
+# les étiquettes collées sur la marchandise.
+# ---------------------------------------------------------------------------------------------
+
+CLES_REGLAGES_ETIQUETTE = (
+    "label_printer_name",
+    "label_format_id",
+    "label_width_mm",
+    "label_height_mm",
+    "label_margin_mm",
+    "label_orientation",
+    "label_dpi",
+    "label_show_price",
+)
+
+# Réglages sans lesquels aucune étiquette ne peut être imprimée.
+CLES_ETIQUETTE_OBLIGATOIRES = ("label_printer_name", "label_width_mm", "label_height_mm")
+
+ORIENTATIONS_ETIQUETTE = {"portrait": "portrait", "paysage": "paysage", "landscape": "paysage"}
+
+MESSAGE_ETIQUETEUSE_NON_CONFIGUREE = (
+    "Étiqueteuse non configurée : choisissez l'imprimante à étiquettes et indiquez la taille de "
+    "l'étiquette (largeur et hauteur en millimètres) dans les réglages avant d'imprimer."
+)
+
+# Repères de reconnaissance du matériel, lus dans le `printer-make-and-model` déclaré par CUPS.
+# PUREMENT INDICATIF : l'écran s'en sert pour mettre une étiqueteuse en avant, jamais pour filtrer
+# la liste. Une imprimante absente de ces tables reste sélectionnable — sinon un modèle non répertorié
+# deviendrait inutilisable chez la cliente.
+MODELES_ETIQUETEUSE = (
+    "dymo", "labelwriter", "label printer", "brother ql", "zebra", "zdesigner", "godex",
+    "tsc ", "sato", "bixolon slp", "citizen cl-", "intermec", "pc42", "argox", "seiko slp",
+)
+MODELES_TICKET = (
+    "tm-t", "tm-m", "epson tm", "star tsp", "star tup", "srp-", "citizen ct-",
+    "pos-80", "pos80", "pos-58", "receipt",
+)
+
+
+def lire_reglages_etiquette(cursor=None) -> Dict[str, Any]:
+    """
+    Relit les réglages de l'étiqueteuse depuis la table `Parametres`.
+
+    Retourne toujours les mêmes clés, avec une chaîne VIDE quand le réglage n'a jamais été saisi :
+    l'écran doit pouvoir distinguer « jamais configuré » d'une valeur réelle, et rien n'est supposé.
+    `est_configuree` reste faux tant qu'un réglage indispensable manque ; `message` est alors
+    directement affichable telle quelle à la commerçante.
+    """
+    conn = None
+    if cursor is None:
+        conn = get_connection()
+        cursor = conn.cursor()
+    try:
+        marques = ",".join("?" * len(CLES_REGLAGES_ETIQUETTE))
+        cursor.execute(
+            f"SELECT cle, valeur FROM Parametres WHERE cle IN ({marques})",
+            CLES_REGLAGES_ETIQUETTE,
+        )
+        stockes = {r[0]: (r[1] if r[1] is not None else "") for r in cursor.fetchall()}
+    finally:
+        if conn is not None:
+            conn.close()
+
+    reglages: Dict[str, Any] = {cle: str(stockes.get(cle, "")).strip() for cle in CLES_REGLAGES_ETIQUETTE}
+    manquants = [cle for cle in CLES_ETIQUETTE_OBLIGATOIRES if not reglages.get(cle)]
+    reglages["est_configuree"] = not manquants
+    reglages["reglages_manquants"] = manquants
+    reglages["message"] = "" if not manquants else MESSAGE_ETIQUETEUSE_NON_CONFIGUREE
+    return reglages
+
+
+def _classer_imprimante(modele: str, uri: str) -> Tuple[str, str]:
+    """
+    « etiqueteuse », « ticket » ou « inconnu », avec la source ayant servi au classement.
+
+    L'URI est examinée AVANT le modèle : elle contient le nom que le matériel déclare lui-même
+    (`usb://Printer/POS-80`), alors que `printer-make-and-model` ne reflète que le pilote choisi à
+    l'installation. Un cas réel du poste de développement le montre : une imprimante à tickets POS-80
+    installée avec un PPD DYMO s'annonce « DYMO Label Printer ». Classer sur le modèle seul y
+    désignerait l'imprimante à tickets comme étiqueteuse — et les étiquettes partiraient sur le
+    rouleau de tickets.
+
+    Le résultat reste INDICATIF : il met une file en avant dans l'écran, il n'en exclut aucune.
+    """
+    signature_uri = (uri or "").lower()
+    if any(mot in signature_uri for mot in MODELES_TICKET):
+        return "ticket", "uri"
+    if any(mot in signature_uri for mot in MODELES_ETIQUETEUSE):
+        return "etiqueteuse", "uri"
+
+    signature_modele = (modele or "").lower()
+    if any(mot in signature_modele for mot in MODELES_TICKET):
+        return "ticket", "modele"
+    if any(mot in signature_modele for mot in MODELES_ETIQUETEUSE):
+        return "etiqueteuse", "modele"
+
+    return "inconnu", ""
+
+
+def _lister_imprimantes_cups(limite: int = 20) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    Inventaire des imprimantes installées, INDÉPENDANT DE LA LANGUE DU SYSTÈME.
+
+    `lpstat -v` est inutilisable pour cela : il répond en toutes lettres — « périphérique pour X : »
+    en français, « device for X: » en anglais, « apparaat voor X: » en néerlandais. Une lecture par
+    expression régulière française renvoie donc une liste VIDE sur un Mac anglais ou néerlandais,
+    configuration courante chez une clientèle belge : l'écran des réglages n'affiche alors aucune
+    imprimante et la commerçante ne peut plus en choisir une.
+
+    `lpstat -e` ne renvoie que des noms, un par ligne, et `lpoptions -p <nom>` des paires
+    clé=valeur : ni l'un ni l'autre n'est traduit.
+    """
+    if sys.platform not in ("darwin", "linux"):
+        return [], None
+
+    import shlex
+    import subprocess
+
+    def _executer(args: List[str]) -> str:
+        try:
+            return subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=2).decode("utf-8", "replace")
+        except Exception:
+            return ""
+
+    noms = [ligne.strip() for ligne in _executer(["lpstat", "-e"]).splitlines() if ligne.strip()][:limite]
+
+    # « destination système par défaut : NOM » / « system default destination: NOM » : seul le nom,
+    # après le dernier « : », est commun à toutes les langues. Quand il n'y a pas de destination par
+    # défaut, CUPS répond une phrase sans deux-points, dans toutes les langues également.
+    defaut = None
+    sortie_defaut = _executer(["lpstat", "-d"])
+    if ":" in sortie_defaut:
+        defaut = sortie_defaut.split(":")[-1].strip() or None
+
+    imprimantes: List[Dict[str, Any]] = []
+    for nom in noms:
+        options: Dict[str, str] = {}
+        try:
+            jetons = shlex.split(_executer(["lpoptions", "-p", nom]))
+        except ValueError:
+            jetons = []
+        for jeton in jetons:
+            if "=" in jeton:
+                cle, valeur = jeton.split("=", 1)
+                options[cle] = valeur
+
+        formats: List[str] = []
+        resolutions: List[str] = []
+        for ligne in _executer(["lpoptions", "-p", nom, "-l"]).splitlines():
+            if ":" not in ligne:
+                continue
+            gauche, droite = ligne.split(":", 1)
+            mot_cle = gauche.split("/", 1)[0].strip()
+            choix = [c.lstrip("*") for c in droite.split() if c.strip()]
+            if mot_cle == "PageSize":
+                formats = choix
+            elif mot_cle == "Resolution":
+                resolutions = choix
+
+        modele = options.get("printer-make-and-model", "")
+        uri = options.get("device-uri", "")
+        genre, genre_source = _classer_imprimante(modele, uri)
+        imprimantes.append({
+            "name": nom,
+            "uri": uri,
+            "model": modele,
+            "info": options.get("printer-info", ""),
+            "location": options.get("printer-location", ""),
+            "is_usb": uri.lower().startswith("usb:"),
+            "is_network": uri.lower().startswith(("socket:", "ipp:", "ipps:", "lpd:", "dnssd:")),
+            "is_default": (nom == defaut),
+            "accepting_jobs": options.get("printer-is-accepting-jobs", "") == "true",
+            "kind": genre,
+            "kind_source": genre_source,
+            "page_sizes": formats,
+            "resolutions": resolutions,
+        })
+
+    return imprimantes, defaut
 
 
 def handle_system_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any]]:
@@ -344,7 +531,15 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             # quelconque du réseau du commerçant, pas forcément son imprimante.
             "printerIP": params.get("printer_ip", ""),
             "shopifyDomain": params.get("shopify_store_url", ""),
-            "shopifyToken": params.get("shopify_access_token", ""),
+            # Le jeton d'administration Shopify n'est JAMAIS renvoyé. Il ouvre le catalogue,
+            # les stocks et les commandes de la boutique ; le servir en clair à chaque
+            # ouverture de l'écran Réglages le faisait transiter puis dormir dans le stockage
+            # du navigateur, hors de la base et hors de toute sauvegarde chiffrée, à la portée
+            # de n'importe quelle extension ou de quiconque ouvre la caisse. L'écran n'a pas
+            # besoin de le lire : il a besoin de savoir s'il y en a un, et de pouvoir le
+            # remplacer. C'est exactement ce que disent les deux champs ci-dessous.
+            "shopifyToken": "",
+            "shopifyTokenEnregistre": bool(params.get("shopify_access_token")),
             "shopifyConnected": bool(params.get("shopify_store_url") and params.get("shopify_access_token")),
             "autoSyncStock": params.get("shopify_auto_sync", "1") == "1",
             "syncOrders": params.get("shopify_sync_orders", "1") == "1",
@@ -363,6 +558,12 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 if k in data and data[k] is not None:
                     return data[k]
             return None
+
+        def _est_un_masque(valeur):
+            # Les espaces sont ignorés : un masque affiché peut être groupé (« ••• ••• »),
+            # et un vrai jeton Shopify n'en contient jamais.
+            texte = "".join(str(valeur or "").split())
+            return bool(texte) and all(caractere in "\u2022*\u00b7\u2219\u25cf." for caractere in texte)
 
         store_name = _pick("storeName", "shop_name")
         address = _pick("address", "shop_address")
@@ -409,9 +610,21 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('printer_ip', ?)", (printer_ip,))
 
         if shopify_domain is not None:
-            clean_domain = str(shopify_domain).replace("https://", "").replace("http://", "").strip("/")
+            # Même normalisation que le moteur de synchro, pour que la base stocke un
+            # domaine propre : un domaine collé depuis l'admin Shopify (« ...myshopify.com/admin »)
+            # ne perdait que son protocole et produisait ensuite « /admin/admin/api/... »,
+            # un 404 que l'application lisait comme « la boutique n'a aucun produit ».
+            try:
+                from kodo_core.sync.shopify import normaliser_domaine_boutique
+                clean_domain = normaliser_domaine_boutique(shopify_domain)
+            except Exception:
+                clean_domain = str(shopify_domain).replace("https://", "").replace("http://", "").strip("/")
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_store_url', ?)", (clean_domain,))
-        if shopify_token is not None:
+        if shopify_token is not None and not _est_un_masque(shopify_token):
+            # Une chaîne faite uniquement de puces ou d'étoiles est un AFFICHAGE, pas un jeton :
+            # un client qui renverrait le masque qu'il a à l'écran remplacerait la vraie clé par
+            # des points et débrancherait la boutique en silence. La chaîne vide, elle, reste un
+            # ordre légitime : c'est ainsi que l'écran déconnecte la boutique.
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_access_token', ?)", (str(shopify_token).strip(),))
         if auto_sync is not None:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_auto_sync', ?)", ("1" if auto_sync else "0",))
@@ -428,6 +641,19 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
         conn.commit()
         conn.close()
+
+        # Les réglages Shopify prennent effet tout de suite. Sans cela, brancher (ou
+        # débrancher) la boutique n'avait d'effet qu'au redémarrage de la caisse : la
+        # commerçante voyait « enregistré » et croyait la synchro active pour la journée.
+        # start_auto_sync() est idempotent et relit lui-même la configuration ; il ne
+        # démarre rien si la boutique n'est pas configurée ou si les deux sens sont éteints.
+        if any(v is not None for v in (shopify_domain, shopify_token, auto_sync, sync_orders)):
+            try:
+                from kodo_core.sync.shopify import start_auto_sync
+                start_auto_sync()
+            except Exception as _sync_err:
+                print(f"⚠️ [SHOPIFY] Réglages enregistrés mais synchro non relancée : {_sync_err}")
+
         return 200, {"success": True, "message": "Paramètres enregistrés avec succès dans SQLite"}
 
     # 14. Tester la connexion Shopify
@@ -448,35 +674,48 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         if not raw_url or not token:
             return 400, {"success": False, "error": "URL et Jeton d'accès Shopify requis pour le test."}
 
-        clean_url = raw_url.replace("https://", "").replace("http://", "").strip("/")
-        
+        # Le test passe par le MÊME moteur que la synchronisation réelle : même normalisation du
+        # domaine et même transport TLS vérifié. La route réimplémentait sa propre requête avec
+        # `CERT_NONE` : le jeton d'administration partait dans un tunnel non vérifié, et un
+        # « Connexion réussie ! » pouvait s'afficher alors que la synchro, elle, n'aboutissait pas.
         try:
-            import urllib.request
-            import json as json_lib
-            import ssl
-
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-
-            api_url = f"https://{clean_url}/admin/api/2025-01/locations.json"
-            req = urllib.request.Request(api_url, headers={
-                "Content-Type": "application/json",
-                "X-Shopify-Access-Token": token,
-                "User-Agent": "KodoPOS-Engine/1.0"
-            })
-            with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
-                resp_data = json_lib.loads(resp.read().decode())
-                if "locations" in resp_data:
-                    locations = [l.get("name", "Dépôt") for l in resp_data.get("locations", [])]
-                    return 200, {
-                        "success": True,
-                        "message": f"Connexion Shopify Réussie ! Dépôts : {', '.join(locations)}",
-                        "locations": locations
-                    }
-                return 200, {"success": True, "message": "Connexion établie avec succès.", "locations": []}
+            from kodo_core.sync.shopify import ShopifySync, start_auto_sync
+            resultat = ShopifySync(store_url=raw_url, access_token=token).tester_connexion()
+            if resultat.get("success"):
+                # La boutique répond : c'est le moment où la configuration devient utilisable,
+                # donc celui où la synchronisation automatique doit prendre le relais.
+                try:
+                    start_auto_sync()
+                except Exception:
+                    pass
+                return 200, resultat
+            return 400, resultat
         except Exception as e:
             return 400, {"success": False, "error": f"Erreur de communication Shopify: {str(e)}"}
+
+    # 14 bis. État de la dernière synchronisation Shopify
+    elif method == "GET" and path == "/api/shopify/status":
+        # Sans ce retour, une synchronisation qui échoue en boucle (jeton révoqué, domaine mal
+        # saisi) ne remonte nulle part : l'interrupteur reste allumé et rien ne circule.
+        from kodo_core.sync.shopify import (
+            lire_reglages_shopify, lire_etat_sync, normaliser_domaine_boutique,
+            domaine_boutique_valide, auto_sync_actif,
+        )
+        reglages = lire_reglages_shopify()
+        domaine = normaliser_domaine_boutique(reglages["store_url"])
+        etat = lire_etat_sync()
+        return 200, {
+            "success": True,
+            "domain": domaine,
+            "domainValid": domaine_boutique_valide(domaine),
+            "configured": bool(domaine_boutique_valide(domaine) and reglages["access_token"]),
+            "autoSyncStock": reglages["auto_sync"],
+            "syncOrders": reglages["sync_orders"],
+            "running": auto_sync_actif(),
+            "lastSyncAt": etat["derniere_synchro"],
+            "lastSyncOk": etat["succes"],
+            "lastSyncMessage": etat["message"],
+        }
 
     # 15. Lancer l'importation du catalogue Shopify
     elif method == "POST" and path == "/api/shopify/import":
@@ -897,8 +1136,12 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             default_printer = None
 
             if sys.platform in ["darwin", "linux"]:
+                # Langue des messages CUPS figée : voir `printer_service.env_cups`.
+                from kodo_core.hardware.printer_service import env_cups
+                env_lp = env_cups()
+
                 try:
-                    out_d = subprocess.check_output(["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=2).decode()
+                    out_d = subprocess.check_output(["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=2, env=env_lp).decode()
                     m_d = re.search(r':\s*(\S+)', out_d)
                     if m_d:
                         default_printer = m_d.group(1)
@@ -906,9 +1149,15 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     pass
 
                 try:
-                    out_v = subprocess.check_output(["lpstat", "-v"], stderr=subprocess.DEVNULL, timeout=2).decode()
+                    out_v = subprocess.check_output(["lpstat", "-v"], stderr=subprocess.DEVNULL, timeout=2, env=env_lp).decode()
                     for line in out_v.splitlines():
-                        m_v = re.search(r'p[ée]riph[ée]rique pour (\S+)\s*:\s*(.+)', line, re.IGNORECASE)
+                        # La phrase qui precede etait cherchee en francais uniquement
+                        # (« peripherique pour X : usb://... ») : sur un Mac en anglais,
+                        # en neerlandais ou en allemand, AUCUNE imprimante n'etait
+                        # detectee et l'ecran Reglages restait desesperement vide.
+                        # On ne reconnait plus la phrase, on reconnait la structure :
+                        # <nom> : <schema>://<...>, vraie dans toutes les langues.
+                        m_v = re.search(r'(\S+)\s*:\s*([A-Za-z][A-Za-z0-9+.\-]*:.+?)\s*$', line)
                         if m_v:
                             p_name = m_v.group(1)
                             p_uri = m_v.group(2).strip()
@@ -959,6 +1208,232 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             return 200, {"success": res, "message": "Signal d'ouverture envoyé au tiroir-caisse"}
         except Exception as e:
             return 500, {"success": False, "error": str(e)}
+
+    # 21. Réglages de l'étiqueteuse (bloc code-barres)
+    elif method == "GET" and path == "/api/labels/settings":
+        return 200, {"success": True, "settings": lire_reglages_etiquette()}
+
+    # 22. Enregistrement des réglages de l'étiqueteuse (bloc code-barres)
+    elif method == "POST" and path == "/api/labels/settings":
+        # Écriture PARTIELLE, comme /api/settings : une requête qui ne porte que sur la largeur ne
+        # doit pas effacer le nom de l'imprimante ni l'orientation déjà réglés. Une chaîne vide
+        # explicite remet en revanche le réglage à « non configuré » : c'est une demande, pas un oubli.
+        def _fourni(*cles):
+            for cle in cles:
+                if cle in data and data[cle] is not None:
+                    return data[cle]
+            return None
+
+        a_ecrire: Dict[str, str] = {}
+
+        nom_imprimante = _fourni("labelPrinterName", "label_printer_name")
+        if nom_imprimante is not None:
+            a_ecrire["label_printer_name"] = str(nom_imprimante).strip()
+
+        format_id = _fourni("labelFormatId", "label_format_id")
+        if format_id is not None:
+            a_ecrire["label_format_id"] = str(format_id).strip()
+
+        for cle_ecran, cle_param, libelle, zero_permis in (
+            ("labelWidthMm", "label_width_mm", "La largeur de l'étiquette", False),
+            ("labelHeightMm", "label_height_mm", "La hauteur de l'étiquette", False),
+            ("labelMarginMm", "label_margin_mm", "La marge de l'étiquette", True),
+        ):
+            brut = _fourni(cle_ecran, cle_param)
+            if brut is None:
+                continue
+            texte = str(brut).strip().replace(",", ".")
+            if not texte:
+                a_ecrire[cle_param] = ""
+                continue
+            try:
+                valeur = Decimal(texte)
+            except Exception:
+                return 400, {"error": f"{libelle} doit être un nombre de millimètres (par exemple 57)."}
+            if valeur < 0 or (valeur == 0 and not zero_permis):
+                return 400, {"error": f"{libelle} doit être supérieure à zéro."}
+            if valeur > Decimal("500"):
+                return 400, {"error": f"{libelle} dépasse 500 mm : vérifiez l'unité, elle s'exprime en millimètres."}
+            a_ecrire[cle_param] = str(valeur.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+        orientation = _fourni("labelOrientation", "label_orientation")
+        if orientation is not None:
+            texte = str(orientation).strip().lower()
+            if not texte:
+                a_ecrire["label_orientation"] = ""
+            elif texte in ORIENTATIONS_ETIQUETTE:
+                a_ecrire["label_orientation"] = ORIENTATIONS_ETIQUETTE[texte]
+            else:
+                return 400, {"error": "L'orientation de l'étiquette doit être « portrait » ou « paysage »."}
+
+        dpi = _fourni("labelDpi", "label_dpi")
+        if dpi is not None:
+            texte = str(dpi).strip().lower().replace("dpi", "").strip()
+            if not texte:
+                a_ecrire["label_dpi"] = ""
+            else:
+                try:
+                    valeur_dpi = int(texte)
+                except (TypeError, ValueError):
+                    return 400, {"error": "La résolution de l'étiqueteuse doit être un nombre de points par pouce (par exemple 203)."}
+                if valeur_dpi <= 0 or valeur_dpi > 2400:
+                    return 400, {"error": "La résolution de l'étiqueteuse doit être comprise entre 1 et 2400 points par pouce."}
+                a_ecrire["label_dpi"] = str(valeur_dpi)
+
+        afficher_prix = _fourni("labelShowPrice", "label_show_price")
+        if afficher_prix is not None:
+            a_ecrire["label_show_price"] = "1" if afficher_prix in (True, 1, "1", "true", "True", "oui") else "0"
+
+        if not a_ecrire:
+            return 400, {"error": "Aucun réglage d'étiquette à enregistrer."}
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            for cle, valeur in a_ecrire.items():
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)", (cle, valeur))
+            conn.commit()
+            reglages = lire_reglages_etiquette(cursor)
+        finally:
+            conn.close()
+
+        # Avertissement NON bloquant : la commerçante a le droit d'enregistrer un support étroit
+        # (l'étiquette peut porter autre chose qu'un code-barres). Le refus ferme, lui, intervient
+        # à l'impression, quand le moteur sait dans quel sens le code sera réellement tracé.
+        avertissements: List[str] = []
+        try:
+            largeur_reglee = str(reglages.get("label_width_mm") or "").strip()
+            if largeur_reglee:
+                from kodo_core.hardware.pdf import largeur_mini_ean13_mm
+                dpi_regle = str(reglages.get("label_dpi") or "").strip()
+                mini = (largeur_mini_ean13_mm(int(dpi_regle)) if dpi_regle
+                        else largeur_mini_ean13_mm())
+                if float(Decimal(largeur_reglee)) < mini:
+                    avertissements.append(
+                        f"Une étiquette de {largeur_reglee} mm de large est trop étroite pour un "
+                        f"code-barres EAN-13 lisible : il en faut au moins {mini:.1f} mm. "
+                        f"Choisissez un support plus large, ou l'orientation paysage."
+                    )
+        except Exception as e:
+            print(f"[ETIQUETTE LARGEUR WARNING] {e}")
+
+        return 200, {
+            "success": True,
+            "message": "Réglages de l'étiqueteuse enregistrés.",
+            "settings": reglages,
+            "warnings": avertissements
+        }
+
+    # 23. Inventaire des imprimantes installées, indépendant de la langue du système (bloc code-barres)
+    elif method == "GET" and path == "/api/labels/printers":
+        try:
+            imprimantes, defaut = _lister_imprimantes_cups()
+        except Exception as e:
+            print(f"[ETIQUETTE MATERIEL WARNING] {e}")
+            return 200, {
+                "success": False,
+                "error": "La liste des imprimantes installées n'a pas pu être lue sur cet ordinateur.",
+                "printers": []
+            }
+
+        reglages = lire_reglages_etiquette()
+        choisie = reglages.get("label_printer_name") or ""
+
+        # Formats de la file interrogée (celle qu'on est en train de choisir à l'écran, ou celle
+        # déjà enregistrée). Chaque format est annoté « un EAN-13 y tient-il, en portrait et en
+        # paysage » : c'est ce qui permet à la commerçante d'éviter un support trop étroit AVANT
+        # d'étiqueter sa marchandise.
+        interrogee = (query.get("printer") or query.get("printerName") or [choisie])[0] or ""
+        formats_etiquette: List[Dict[str, Any]] = []
+        if interrogee:
+            try:
+                from kodo_core.hardware.pdf import formats_etiquette_disponibles
+                formats_etiquette = formats_etiquette_disponibles(interrogee)
+            except Exception as e:
+                print(f"[ETIQUETTE FORMATS WARNING] {interrogee} : {e}")
+
+        return 200, {
+            "success": True,
+            "defaultPrinter": defaut,
+            "selectedLabelPrinter": choisie,
+            "formatsPrinter": interrogee,
+            "labelFormats": formats_etiquette,
+            # None = aucune étiqueteuse choisie ; False = celle qui est enregistrée n'est plus
+            # installée (imprimante débranchée ou renommée), ce que l'écran doit signaler.
+            "selectedIsInstalled": (any(p["name"] == choisie for p in imprimantes) if choisie else None),
+            "printers": imprimantes,
+            "labelPrinters": [p for p in imprimantes if p["kind"] == "etiqueteuse"]
+        }
+
+    # 24. Impression d'une étiquette de test (bloc code-barres)
+    elif method == "POST" and (path == "/api/labels/print-test" or path == "/api/labels/test"):
+        reglages = lire_reglages_etiquette()
+        if not reglages["est_configuree"]:
+            return 409, {
+                "success": False,
+                "error": reglages["message"],
+                "code": "LABEL_PRINTER_NOT_CONFIGURED",
+                "settings": reglages
+            }
+
+        # Code de démonstration : EAN-13 à clé de contrôle valide, dans la plage interne « 200 »,
+        # volontairement absent du catalogue. Un scan de cette étiquette ne doit ramener AUCUN
+        # article : c'est le test du matériel, pas celui du catalogue.
+        ligne_test = {
+            "product_id": None,
+            "name": "ÉTIQUETTE DE TEST",
+            "barcode": "2000000000008",
+            "size": "",
+            "price": Decimal("0.00"),
+            "price_sale": None,
+            "quantity": 1,
+            "is_test": True
+        }
+
+        from kodo_core.api.routes.products_routes import _generer_pdf_etiquettes
+        from kodo_core.hardware.pdf import BarcodeTropEtroitError
+
+        try:
+            rendu, media = _generer_pdf_etiquettes([ligne_test], reglages, None)
+        except BarcodeTropEtroitError as be:
+            # Le test remplit ici tout son rôle : il dit à la commerçante, AVANT qu'elle n'étiquette
+            # sa marchandise, que le format réglé ne peut pas porter un code-barres lisible.
+            return 400, {"success": False, "error": str(be), "code": "LABEL_TOO_NARROW"}
+        except Exception as e:
+            print(f"[ETIQUETTE TEST ERREUR] {e}")
+            return 500, {
+                "success": False,
+                "error": "L'étiquette de test n'a pas pu être générée.",
+                "detail": str(e)
+            }
+
+        try:
+            from kodo_core.hardware.print_worker import get_print_worker
+            worker = get_print_worker()
+            job = worker.enqueue_label_print(
+                rendu.get("path"),
+                printer_name=(data.get("printerName") or data.get("printer_name")
+                              or reglages["label_printer_name"]),
+                media=media,
+                copies=1
+            )
+            etat = worker.get_label_circuit_status()
+            return 200, {
+                "success": True,
+                "message": "Étiquette de test envoyée à l'étiqueteuse.",
+                "print_job_id": job.job_id,
+                "status": job.status,
+                "warnings": rendu.get("avertissements") or [],
+                "printer_available": etat.get("is_available", True),
+                "printer_state": etat.get("state")
+            }
+        except Exception as pe:
+            print(f"[ETIQUETTE TEST WARNING] {pe}")
+            return 500, {
+                "success": False,
+                "error": "L'étiquette de test n'a pas pu être envoyée à l'étiqueteuse.",
+                "detail": str(pe)
+            }
 
     return None
 

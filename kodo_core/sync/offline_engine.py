@@ -35,10 +35,12 @@ class OfflineSyncEngine:
     def check_internet_connection(cls, host: str = "https://www.google.com", timeout: int = 2) -> bool:
         """Vérifie si la connexion Internet est active."""
         try:
-            import ssl
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            # Vérification TLS complète (contexte maison de l'updater, magasin certifi) :
+            # un portail captif d'hôtel ou de centre commercial répond 200 à tout et serait
+            # pris pour un accès Internet valide, ce qui relancerait la file de synchro dans
+            # le vide. Un certificat qui ne valide pas = pas d'Internet utilisable.
+            from kodo_core.services.updater import build_ssl_context
+            ctx = build_ssl_context()
             req = urllib.request.Request(host, headers={"User-Agent": "KodoPOS-NetworkCheck/1.0"})
             with urllib.request.urlopen(req, context=ctx, timeout=timeout):
                 return True

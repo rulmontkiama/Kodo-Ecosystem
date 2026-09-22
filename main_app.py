@@ -1692,7 +1692,14 @@ class MainApp(ctk.CTk):
     def _save_shopify_params(self):
         url = self.entry_shopify_url.get().strip()
         token = self.entry_shopify_token.get().strip()
-        clean_url = url.replace("https://", "").replace("http://", "").strip("/")
+        # Même normalisation que la synchronisation : une adresse copiée depuis l'admin
+        # Shopify (« ma-boutique.myshopify.com/admin ») laissait le suffixe dans le domaine
+        # et produisait un 404 que l'écran présentait comme un jeton refusé.
+        try:
+            from kodo_core.sync.shopify import normaliser_domaine_boutique
+            clean_url = normaliser_domaine_boutique(url)
+        except Exception:
+            clean_url = url.replace("https://", "").replace("http://", "").strip("/")
         self._set_param("shopify_store_url", clean_url)
         self._set_param("shopify_access_token", token)
         self._st("Paramètres Shopify enregistrés.", GRN)
@@ -1703,16 +1710,26 @@ class MainApp(ctk.CTk):
         if not url or not token:
             self._st("URL et Token requis pour le test.", RED)
             return
-        clean_url = url.replace("https://", "").replace("http://", "").strip("/")
+        # Même normalisation que la synchronisation : une adresse copiée depuis l'admin
+        # Shopify (« ma-boutique.myshopify.com/admin ») laissait le suffixe dans le domaine
+        # et produisait un 404 que l'écran présentait comme un jeton refusé.
+        try:
+            from kodo_core.sync.shopify import normaliser_domaine_boutique
+            clean_url = normaliser_domaine_boutique(url)
+        except Exception:
+            clean_url = url.replace("https://", "").replace("http://", "").strip("/")
         import threading
         def run_test():
             import urllib.request
             import json
-            import ssl
-            
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+
+            # Le jeton d'administration Shopify part dans cette requête : la vérification du
+            # certificat ET du nom d'hôte est obligatoire. Ce contexte forçait `CERT_NONE`,
+            # ce qui laissait n'importe quel intermédiaire lire le jeton — ou répondre à la
+            # place de Shopify et faire afficher « connexion réussie » pour une boutique qui
+            # n'est pas celle de la commerçante. Même patron que `kodo_core/sync/shopify.py`.
+            from kodo_core.services.updater import build_ssl_context
+            ctx = build_ssl_context()
 
             api_url = f"https://{clean_url}/admin/api/2025-01/locations.json"
             req = urllib.request.Request(api_url, headers={

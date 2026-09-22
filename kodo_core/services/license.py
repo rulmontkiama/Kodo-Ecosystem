@@ -324,10 +324,14 @@ def validate_license_online(key: str, fingerprint: str) -> dict:
             "app_version": CURRENT_VERSION
         }).encode("utf-8")
 
-        import ssl
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        # La clé de licence et l'empreinte matérielle transitent ici : la vérification du
+        # certificat ET du nom d'hôte est obligatoire. Sans elle, un intermédiaire peut lire
+        # les clés en clair, ou forger une réponse {"valid": true} / {"status": "suspended"}
+        # pour activer une copie ou éteindre la caisse d'une boutique. On réutilise le
+        # contexte maison de l'updater (magasin certifi, jamais de repli non vérifié) :
+        # un échec de validation retombe sur le Mode Hors-Ligne Assuré, comme une panne réseau.
+        from kodo_core.services.updater import build_ssl_context
+        ctx = build_ssl_context()
 
         req = urllib.request.Request(
             API_LICENSE_VALIDATE_URL,
