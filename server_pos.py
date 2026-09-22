@@ -543,6 +543,21 @@ def run_server(port=8765, busy_wait=8.0, host=None):
             _s_conn.close()
     except Exception as _se:
         pass
+    # Synchronisation Shopify. Le moteur existait depuis toujours mais n'était démarré
+    # QUE par main_app.py, l'ancienne interface Tkinter que le produit ne lance plus :
+    # aucune vente ne décrémentait le stock de la boutique en ligne, aucune commande en
+    # ligne ne décrémentait le stock de la caisse, et les deux interrupteurs de l'écran
+    # Réglages ne commandaient rien. C'est ici, dans le serveur réellement lancé par
+    # launch_app.py, que le branchement manquait.
+    # start_auto_sync() ne démarre que si la boutique est configurée dans les Réglages
+    # (domaine ET jeton) et qu'au moins un des deux sens est activé : une caisse sans
+    # Shopify n'ouvre aucune connexion.
+    try:
+        from kodo_core.sync.shopify import start_auto_sync
+        start_auto_sync()
+    except Exception as _shop_err:
+        print(f"⚠️ [SHOPIFY] Synchronisation non démarrée : {_shop_err}")
+
     print(f"🚀 [KODO POS SERVER Multi-Thread v2.0.1] REST API kodo_core & Web App en ligne sur http://localhost:{port} (écoute {host})")
     httpd.serve_forever()
 

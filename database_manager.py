@@ -1044,7 +1044,7 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
     return ticket_id
 
 
-def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mode, vendeur_nom, date_heure, quantite=1, caisse_id="POS-01"):
+def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mode, vendeur_nom, date_heure, quantite=1, caisse_id="POS-01", recrediter_stock=True):
     """Enregistre un remboursement (NF525).
 
     Le prix, le taux de TVA et le stock à recréditer sont TOUJOURS relus depuis la
@@ -1054,6 +1054,14 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
     contre le ticket réellement propriétaire de `vd_id`, et la quantité déjà
     remboursée pour cette ligne (via `refund_of_vd_id`) est déduite pour empêcher
     tout remboursement en double ou au-delà de la quantité effectivement vendue.
+
+    `recrediter_stock=False` enregistre le remboursement financier SANS remettre
+    l'article en rayon. Seule la synchronisation Shopify s'en sert, pour honorer le
+    `restock_type: "no_restock"` d'un remboursement fait en ligne : la cliente est
+    remboursée mais l'article ne revient pas au stock vendable (abîmé, ou conservé).
+    Le recrédit reste le défaut, donc le comportement de la caisse est inchangé ; la
+    ligne négative de `Ventes_Details` est écrite dans les DEUX cas, sans quoi le
+    garde-fou anti-double-remboursement perdrait sa trace.
     """
     cursor.execute("""
         SELECT vd.quantite, vd.prix_unitaire_tvac, vd.id_stock, t.numero_ticket, p.taux_tva
@@ -1101,7 +1109,28 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
 
     import time
     timestamp_suffix = str(int(time.time()))[-5:]
-    new_tk = f"REF-{numero_ticket_origine}-{timestamp_suffix}"
+    base_tk = f"REF-{numero_ticket_origine}-{timestamp_suffix}"
+
+    # Le suffixe n'est que l'horodatage tronqué à 5 chiffres : deux remboursements de
+    # lignes DIFFÉRENTES d'un même ticket d'origine produisaient le même numéro s'ils
+    # tombaient dans la même seconde (cas banal : la vendeuse rembourse deux articles
+    # d'affilée, ou le serveur HTTP multi-threadé traite deux requêtes en parallèle), et
+    # l'horodatage tronqué reboucle en plus toutes les 100 000 s (~27 h 46). L'INSERT
+    # violait alors la contrainte UNIQUE et le remboursement ÉCHOUAIT — alors que l'argent
+    # avait déjà été rendu à la cliente. Le chemin vente était, lui, protégé par un retry
+    # borné (cf. `process_sale_transaction`) ; le chemin remboursement avait été oublié.
+    # On est ici sous BEGIN IMMEDIATE (cf. `process_return_transaction`) : aucun autre
+    # écrivain ne peut s'intercaler entre ce SELECT et l'INSERT, donc choisir un numéro
+    # libre suffit — pas de boucle de retry, et le ticket n'est signé qu'une seule fois.
+    # La contrainte UNIQUE reste le garde-fou ultime contre tout doublon.
+    new_tk = base_tk
+    discriminant = 1
+    while True:
+        cursor.execute("SELECT 1 FROM Tickets WHERE numero_ticket = ?", (new_tk,))
+        if cursor.fetchone() is None:
+            break
+        discriminant += 1
+        new_tk = f"{base_tk}-{discriminant}"
 
     signature, hash_prec = signer_ticket(cursor, new_tk, total_tvac, date_heure, caisse_id=caisse_id)
 
@@ -1113,7 +1142,8 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
     ticket_id = cursor.lastrowid
 
     if id_stock_origine:
-        cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?", (quantite, id_stock_origine))
+        if recrediter_stock:
+            cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?", (quantite, id_stock_origine))
         cursor.execute("""
             INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac, refund_of_vd_id)
             VALUES (?, ?, ?, ?, ?)

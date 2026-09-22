@@ -11,6 +11,89 @@ from decimal import Decimal
 from kodo_core.config import ShopConfig
 from kodo_core.db.connection import get_connection, hash_pin
 
+# ---------------------------------------------------------------------------
+# Hygiène du code-barres (Produits.code_barre)
+# ---------------------------------------------------------------------------
+# `code_barre` est déclaré TEXT UNIQUE partout où la table est créée. En SQLite,
+# UNIQUE tolère autant de NULL qu'on veut, mais une seule chaîne vide : sans
+# nettoyage, la DEUXIÈME fiche créée sans code-barres est refusée par
+# « UNIQUE constraint failed », message incompréhensible sur un formulaire où la
+# commerçante n'a justement rien saisi.
+#
+# Les blancs comptent autant que la chaîne vide : espace, tabulation, saut de
+# ligne, et surtout le retour chariot que certaines douchettes ajoutent en fin
+# de trame. Pour UNIQUE, '3245678901234' et '3245678901234\r' sont deux valeurs
+# différentes : l'article existe en base mais reste introuvable au scan, et le
+# même code peut être enregistré deux fois.
+#
+# Pourquoi AFTER et non BEFORE : BEFORE serait le moment naturel pour corriger
+# la valeur avant le contrôle d'unicité, mais SQLite ne sait pas réécrire NEW
+# (« SET NEW.code_barre = ... » est une erreur de syntaxe, contrairement à
+# MySQL). AFTER est donc le seul moment possible — et il suffit : le trigger
+# neutralise la ligne dans la même instruction, aucune ligne vide ne subsiste
+# entre deux insertions, et les créations successives sans code-barres passent
+# toutes (vérifié en insertions séquentielles, executemany et INSERT
+# multi-lignes). Le seul cas que le trigger ne peut pas rattraper est une ligne
+# vide écrite AVANT son existence : d'où la reprise de données ci-dessous.
+_BARCODE_BLANKS = "' ' || char(9) || char(10) || char(13)"
+
+# Forme normalisée de NEW.code_barre : rognée de ses blancs, et NULL si plus rien
+# ne reste. NULL est la seule valeur que UNIQUE accepte en plusieurs exemplaires.
+_BARCODE_NORMALISED = f"NULLIF(TRIM(NEW.code_barre, {_BARCODE_BLANKS}), '')"
+
+# Source unique des deux déclencheurs : la liste versionnée MIGRATIONS les pose
+# sur les bases existantes, et initialiser_db les réutilise telles quelles pour
+# les bases neuves. Les deux chemins ne peuvent donc pas diverger.
+# La condition WHEN compare la valeur à sa forme normalisée avec l'opérateur
+# `IS NOT` (comparaison sûre vis-à-vis de NULL) : elle est donc fausse dès que la
+# valeur est déjà propre. Le déclencheur s'arrête de lui-même après une passe,
+# y compris si `PRAGMA recursive_triggers` est activé (vérifié).
+#
+# Le DROP préalable n'est pas un détail : « CREATE TRIGGER IF NOT EXISTS » ne
+# remplace pas un déclencheur existant, il le CONSERVE. Les bases déjà passées
+# par initialiser_db portent l'ancienne version (« WHEN NEW.code_barre = '' »),
+# qui ignore espaces et retour chariot ; sans DROP elles la garderaient pour
+# toujours et la correction ne les atteindrait jamais (vérifié). Un déclencheur
+# ne contient aucune donnée : le détruire puis le recréer est sans perte, et
+# rend l'ensemble rejouable à volonté.
+BARCODE_HYGIENE_TRIGGERS_SQL = [
+    "DROP TRIGGER IF EXISTS clean_empty_barcode_insert",
+    f"""CREATE TRIGGER IF NOT EXISTS clean_empty_barcode_insert
+        AFTER INSERT ON Produits
+        FOR EACH ROW
+        WHEN NEW.code_barre IS NOT NULL
+         AND NEW.code_barre IS NOT {_BARCODE_NORMALISED}
+        BEGIN
+            UPDATE Produits SET code_barre = {_BARCODE_NORMALISED} WHERE id = NEW.id;
+        END;""",
+    "DROP TRIGGER IF EXISTS clean_empty_barcode_update",
+    f"""CREATE TRIGGER IF NOT EXISTS clean_empty_barcode_update
+        AFTER UPDATE ON Produits
+        FOR EACH ROW
+        WHEN NEW.code_barre IS NOT NULL
+         AND NEW.code_barre IS NOT {_BARCODE_NORMALISED}
+        BEGIN
+            UPDATE Produits SET code_barre = {_BARCODE_NORMALISED} WHERE id = NEW.id;
+        END;""",
+]
+
+# Reprise des lignes écrites avant l'existence des déclencheurs : un trigger ne
+# rétroagit pas. Volontairement limitée aux valeurs VIDES, qui ne peuvent que
+# devenir NULL — et UNIQUE accepte les NULL en nombre, donc cette instruction ne
+# peut pas échouer, quel que soit le contenu de la base cliente.
+# Les codes NON vides mal formés (espace ou retour chariot résiduel) ne sont
+# délibérément PAS rognés ici : deux lignes se rognant vers la même valeur
+# entreraient en collision avec UNIQUE et feraient échouer la migration au
+# démarrage, boutique à l'arrêt. Ils sont signalés dans le rapport d'audit et
+# relèvent d'une reprise manuelle contrôlée.
+BARCODE_HYGIENE_BACKFILL_SQL = [
+    f"""UPDATE Produits
+           SET code_barre = NULL
+         WHERE code_barre IS NOT NULL
+           AND TRIM(code_barre, {_BARCODE_BLANKS}) = ''""",
+]
+
+
 class MigrationError(Exception):
     """Exception levée en cas d'erreur critique de migration de schéma."""
     pass
@@ -50,7 +133,11 @@ class MigrationManager:
                     marque TEXT DEFAULT NULL,
                     attributs_json TEXT DEFAULT NULL,
                     sync_status INTEGER DEFAULT 0,
-                    seuil_alerte INTEGER DEFAULT 5
+                    seuil_alerte INTEGER DEFAULT 5,
+                    -- Drapeau de survente. database_manager l'ajoute par ALTER sur les bases
+                    -- existantes ; sans lui ICI, une base née uniquement de ce fichier perdait
+                    -- en silence toute trace des ventes passées sous le stock disponible.
+                    requires_stock_audit INTEGER DEFAULT 0
                 )""",
                 """CREATE TABLE IF NOT EXISTS Stocks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -419,6 +506,84 @@ class MigrationManager:
                 # Seule l'egalite stricte avec la constante de demonstration est purgee ;
                 # un IBAN reellement saisi par le commercant n'est jamais touche.
                 """UPDATE Parametres SET valeur = '' WHERE cle = 'shop_iban' AND REPLACE(valeur, ' ', '') = 'BE68000000000000'""",
+            ]
+        },
+        {
+            "version": "2.0.4",
+            "description": "Hygiène du code-barres : déclencheurs de nettoyage et reprise des valeurs vides",
+            "sql": [
+                # Les deux déclencheurs n'étaient définis que dans initialiser_db, qui
+                # n'est PAS le chemin de démarrage de l'application : celui-ci passe par
+                # database_manager.initialiser_db, lequel appelle run_migrations puis sa
+                # propre création de tables, et aucun des deux ne posait ces triggers.
+                # Constaté sur les bases du dépôt : elles ont bien la contrainte UNIQUE
+                # mais aucun déclencheur de nettoyage. Le filet existait dans le code et
+                # pas chez les clientes ; cette entrée versionnée l'y installe enfin.
+                *BARCODE_HYGIENE_TRIGGERS_SQL,
+                # Puis on rattrape les lignes vides déjà présentes, qu'un déclencheur
+                # posé après coup ne corrige pas de lui-même (vérifié).
+                *BARCODE_HYGIENE_BACKFILL_SQL,
+            ]
+        },
+        {
+            "version": "2.0.5",
+            "description": "Synchronisation Shopify : journal d'idempotence par ligne de vente et "
+                           "table de réconciliation des variantes. Sans le journal, un ticket dont "
+                           "UNE ligne échouait n'était jamais marqué comme synchronisé, et les lignes "
+                           "déjà poussées repartaient à chaque passe : le stock Shopify était "
+                           "décrémenté plusieurs fois pour une seule vente, et l'écart ne se "
+                           "rattrapait jamais de lui-même.",
+            "sql": [
+                # La clé primaire EST la garantie d'idempotence : une ligne de vente ne peut
+                # figurer qu'une fois dans le journal, donc ne peut être poussée qu'une fois,
+                # même si le ticket entier n'a pas pu être clos. Statuts possibles :
+                # EN_VOL (réservée avant l'appel réseau), POUSSE, ABSENT_SHOPIFY, SANS_OBJET,
+                # INDETERMINE (coupure réseau : on ignore si l'ajustement a porté, donc on ne
+                # rejoue JAMAIS — sous-décompter se corrige à l'inventaire, sur-décompter non).
+                """CREATE TABLE IF NOT EXISTS Shopify_Sync_Lignes (
+                    id_vente_detail INTEGER PRIMARY KEY,
+                    id_ticket INTEGER NOT NULL,
+                    code_barre TEXT,
+                    inventory_item_id INTEGER,
+                    quantite_poussee INTEGER NOT NULL DEFAULT 0,
+                    statut TEXT NOT NULL,
+                    date_heure TEXT NOT NULL
+                )""",
+                """CREATE INDEX IF NOT EXISTS idx_shopify_sync_lignes_ticket
+                   ON Shopify_Sync_Lignes(id_ticket)""",
+                # Correspondance variante Shopify → produit local. C'est la clé de
+                # réconciliation stable : le SKU et le code-barres d'une variante peuvent
+                # changer côté Shopify, son id de variante non. Sans elle, l'import
+                # s'appuyait sur le code-barres et recréait un doublon à chaque renommage.
+                """CREATE TABLE IF NOT EXISTS Shopify_Variantes (
+                    variant_id INTEGER PRIMARY KEY,
+                    id_produit INTEGER NOT NULL,
+                    date_maj TEXT
+                )""",
+            ]
+        },
+        {
+            "version": "2.0.6",
+            "description": "Shopify : prise en compte des remboursements et annulations survenus "
+                           "APRÈS l'import de la commande. Sans elle, une commande en ligne "
+                           "remboursée restait comptée comme une vente pleine dans le rapport Z et "
+                           "dans la TVA, et l'article remboursé ne revenait jamais en rayon.",
+            "sql": [
+                # Même patron d'idempotence que `Shopify_Sync_Lignes` : la clé primaire EST la
+                # garantie. `cle` vaut 'refund:<id>' pour un remboursement Shopify et
+                # 'annulation:<order_id>' pour une commande annulée — un identifiant de
+                # remboursement et un identifiant de commande vivent dans deux espaces de
+                # numérotation distincts et pourraient se télescoper sur un entier nu.
+                """CREATE TABLE IF NOT EXISTS Shopify_Remboursements (
+                    cle TEXT PRIMARY KEY,
+                    order_id TEXT NOT NULL,
+                    refund_id TEXT,
+                    tickets TEXT,
+                    montant DECIMAL,
+                    date_traitement TEXT NOT NULL
+                )""",
+                """CREATE INDEX IF NOT EXISTS idx_shopify_remboursements_order
+                   ON Shopify_Remboursements(order_id)""",
             ]
         }
     ]
@@ -987,35 +1152,30 @@ def initialiser_db(db_path: str = None, conn=None):
         # ---------------------------------------------------------------------
         # 21. DÉCLENCHEURS (TRIGGERS) ET INDEXES DE SÉCURITÉ
         # ---------------------------------------------------------------------
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS prevent_negative_stock
-            BEFORE UPDATE ON Stocks
-            FOR EACH ROW
-            WHEN NEW.quantite_actuelle < 0
-            BEGIN
-                SELECT RAISE(ABORT, 'Le stock ne peut pas être négatif');
-            END;
-        ''')
+        # PAS de déclencheur `prevent_negative_stock` ici, et ce retrait est délibéré.
+        # Un stock négatif est un ÉTAT MÉTIER LÉGITIME dans Kōdo POS : quand deux caisses
+        # hors-ligne vendent le dernier article, la vente physiquement conclue n'est jamais
+        # rejetée (Last-Write-Wins), le compteur passe sous zéro et `OfflineSyncEngine`
+        # le détecte pour le signaler (`offline_engine.py:228-233`).
+        # Le déclencheur interdisait toute UPDATE sur une ligne négative — y compris
+        # l'`UPDATE Stocks SET requires_stock_audit = 1` qui pose justement le signalement.
+        # Il rendait donc le conflit non seulement irréparable mais INVISIBLE.
+        # Il ne s'installait que par ce chemin-ci, c'est-à-dire à l'IMPORT D'UN PACK DE
+        # MIGRATION : une boutique changeant de Mac aurait hérité d'une base où son
+        # mécanisme d'audit de stock était muet. Constaté en exécutant la suite :
+        # `test_offline_engine_lww_and_audit` échoue dès que ce déclencheur est posé.
+        # La protection contre une saisie négative est faite au bon niveau, dans
+        # `InventoryManager.save_product`, qui refuse la valeur avec un message clair.
 
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS clean_empty_barcode_insert
-            AFTER INSERT ON Produits
-            FOR EACH ROW
-            WHEN NEW.code_barre = ''
-            BEGIN
-                UPDATE Produits SET code_barre = NULL WHERE id = NEW.id;
-            END;
-        ''')
-
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS clean_empty_barcode_update
-            AFTER UPDATE ON Produits
-            FOR EACH ROW
-            WHEN NEW.code_barre = ''
-            BEGIN
-                UPDATE Produits SET code_barre = NULL WHERE id = NEW.id;
-            END;
-        ''')
+        # Hygiène du code-barres : mêmes déclencheurs que la migration 2.0.4, pris à
+        # la même source pour que les bases neuves et les bases migrées ne puissent
+        # pas diverger. Ils restent posés ici parce que initialiser_db marque toutes
+        # les versions de MIGRATIONS comme appliquées (voir plus haut) : une base
+        # passant par ce chemin ne rejouerait jamais 2.0.4 et se retrouverait sans
+        # filet. La reprise des valeurs vides est jouée ensuite, pour une base
+        # préexistante que initialiser_db viendrait compléter.
+        for _barcode_sql in BARCODE_HYGIENE_TRIGGERS_SQL + BARCODE_HYGIENE_BACKFILL_SQL:
+            cursor.execute(_barcode_sql)
 
         # Seul le marquage z_id (clôture Z) est autorisé après coup ; toute autre colonne
         # financière ou d'identité du ticket est figée dès l'insertion.
