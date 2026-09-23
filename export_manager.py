@@ -6,6 +6,8 @@ import csv
 import datetime
 import os
 import json
+import re
+import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection
 
@@ -135,18 +137,18 @@ def export_winbooks_csv(mois=None, annee=None):
             "Libellé": "Vente Marchandises",
             "Sens": "C",
             "Montant": str(Decimal(str(htva))).replace(".", ","),
-            "Code TVA": "21"
+            "Code TVA": "21" if abs(Decimal(str(tva))) > 0 else "00"
         })
         
-        # 3. Ligne Crédit (TVA Due)
-        if float(tva) > 0:
+        # 3. Ligne Crédit (TVA Due / A Régulariser)
+        if abs(Decimal(str(tva))) > Decimal("0.00"):
             records.append({
                 "Code Journal": "VEN",
                 "Période": periode,
                 "Date": date_format,
                 "Document": num,
                 "Compte": "451000",
-                "Libellé": "TVA à payer",
+                "Libellé": "TVA à payer" if Decimal(str(tva)) >= 0 else "TVA à régulariser (Avoir)",
                 "Sens": "C",
                 "Montant": str(Decimal(str(tva))).replace(".", ","),
                 "Code TVA": ""
@@ -379,12 +381,15 @@ def sauvegarder_rapport_z_journalier(comptage_details=None):
         lignes = c.fetchall()
         
         if lignes:
+            total_brut_lignes = sum(Decimal(str(p)) * Decimal(str(q)) for p, q, _ in lignes)
+            prorata = (tvac_d / total_brut_lignes) if (total_brut_lignes > Decimal("0.00") and tvac_d > Decimal("0.00") and total_brut_lignes != tvac_d) else Decimal("1.0")
+
             for p_tvac, qte, taux in lignes:
                 t_taux = str(taux) if taux is not None else "0.21"
                 if t_taux not in ventilation_tva:
                     ventilation_tva[t_taux] = {"base_htva": Decimal("0.00"), "montant_tva": Decimal("0.00"), "ttc": Decimal("0.00")}
                 
-                l_ttc = Decimal(str(p_tvac)) * Decimal(str(qte))
+                l_ttc = (Decimal(str(p_tvac)) * Decimal(str(qte)) * prorata).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 l_htva = (l_ttc / (Decimal("1") + Decimal(t_taux))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 l_tva = l_ttc - l_htva
 
@@ -722,3 +727,240 @@ def export_comptable_mensuel(mois, annee, format_type="excel"):
         _style_header(ws, row=4, ncols=len(headers))
         wb.save(path)
         return path
+
+
+# ---------------------------------------------------------------------------------------------
+# EXPORT DU CATALOGUE POUR SHOPIFY (Format officiel CSV)
+# ---------------------------------------------------------------------------------------------
+
+SHOPIFY_PRODUCT_HEADERS = [
+    "Handle", "Title", "Body (HTML)", "Vendor", "Product Category", "Type", "Tags",
+    "Published", "Option1 Name", "Option1 Value", "Option2 Name", "Option2 Value",
+    "Option3 Name", "Option3 Value", "Variant SKU", "Variant Grams",
+    "Variant Inventory Tracker", "Variant Inventory Qty", "Variant Inventory Policy",
+    "Variant Fulfillment Service", "Variant Price", "Variant Compare At Price",
+    "Variant Requires Shipping", "Variant Taxable", "Variant Barcode", "Image Src",
+    "Image Position", "Image Alt Text", "Gift Card", "SEO Title", "SEO Description",
+    "Google Shopping / Google Product Category", "Google Shopping / Gender",
+    "Google Shopping / Age Group", "Google Shopping / MPN", "Google Shopping / Condition",
+    "Google Shopping / Custom Product", "Google Shopping / Custom Label 0",
+    "Google Shopping / Custom Label 1", "Google Shopping / Custom Label 2",
+    "Google Shopping / Custom Label 3", "Google Shopping / Custom Label 4",
+    "Variant Image", "Variant Weight Unit", "Variant Tax Code", "Cost per item",
+    "Included / United States", "Price / United States", "Compare At Price / United States",
+    "Included / International", "Price / International", "Compare At Price / International",
+    "Status"
+]
+
+def _slugify_shopify(text: str) -> str:
+    """Transforme un titre en handle Shopify conforme (minuscules, tirets, sans caractères accentués)."""
+    text = unicodedata.normalize('NFKD', str(text or '')).encode('ascii', 'ignore').decode('utf-8')
+    text = text.lower().strip()
+    text = re.sub(r'[^\w\s-]', '', text)
+    text = re.sub(r'[\s_-]+', '-', text)
+    return text.strip('-')
+
+def export_shopify_catalog_csv(status: str = "active", output_path: str = None, conn=None) -> str:
+    """
+    Génère un fichier CSV 100% conforme au format officiel d'import produit de Shopify
+    (Shopify Admin > Produits > Importer).
+    
+    Règles :
+      - Un seul Handle par produit pour regrouper toutes ses déclinaisons (tailles).
+      - Quantités en stock réelles avec suivi Shopify activé (Variant Inventory Tracker = 'shopify').
+      - Gestion fine des prix : prix soldé dans 'Variant Price' et ancien prix barré dans 'Variant Compare At Price'.
+      - Coût d'achat HTVA dans 'Cost per item' pour le calcul des marges sur Shopify.
+      - Unicité des codes-barres : seul le premier variant ou variant unique porte le code-barres produit
+        pour éviter le rejet Shopify 'Barcode has already been taken'.
+      - Séparateur virgule et encodage UTF-8 avec BOM (utf-8-sig) pour compatibilité Excel et Shopify.
+    """
+    if status not in ("active", "draft"):
+        status = "active"
+
+    should_close = False
+    if conn is None:
+        conn = get_connection()
+        should_close = True
+
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                p.id, 
+                p.code_barre, 
+                p.nom, 
+                p.categorie, 
+                p.marque,
+                p.prix_vente_tvac, 
+                p.prix_achat_htva, 
+                p.taux_tva, 
+                p.en_solde, 
+                p.prix_solde_tvac,
+                p.image_path
+            FROM Produits p
+            ORDER BY p.id ASC
+        """)
+        produits = c.fetchall()
+
+        c.execute("""
+            SELECT id_produit, taille, quantite_actuelle
+            FROM Stocks
+            ORDER BY id ASC
+        """)
+        stock_rows = c.fetchall()
+        stocks_by_prod = {}
+        for pid, taille, qte in stock_rows:
+            if pid not in stocks_by_prod:
+                stocks_by_prod[pid] = []
+            stocks_by_prod[pid].append((taille, qte))
+
+        rows = []
+        for p_id, barcode, nom, cat, marque, prix, achat, taux_tva, en_solde, prix_solde, img_path in produits:
+            nom_propre = (nom or f"Article #{p_id}").strip()
+            handle_slug = _slugify_shopify(nom_propre)
+            handle = f"{handle_slug}-{p_id}" if handle_slug else f"produit-{p_id}"
+
+            variantes = stocks_by_prod.get(p_id, [])
+            if not variantes:
+                variantes = [("Taille Unique", 0)]
+
+            # Calcul des prix décimaux avec point
+            d_prix = None
+            if prix is not None and str(prix).strip() != "":
+                try:
+                    d_prix = Decimal(str(prix).strip().replace(",", "."))
+                except Exception:
+                    d_prix = Decimal("0.00")
+            else:
+                d_prix = Decimal("0.00")
+
+            d_solde = None
+            if prix_solde is not None and str(prix_solde).strip() != "":
+                try:
+                    d_solde = Decimal(str(prix_solde).strip().replace(",", "."))
+                except Exception:
+                    d_solde = None
+
+            d_achat = None
+            if achat is not None and str(achat).strip() != "":
+                try:
+                    d_achat = Decimal(str(achat).strip().replace(",", "."))
+                except Exception:
+                    d_achat = None
+
+            is_sale = bool(en_solde) and (d_solde is not None) and (d_solde < d_prix)
+            if is_sale:
+                price_str = f"{d_solde:.2f}"
+                compare_str = f"{d_prix:.2f}"
+            else:
+                price_str = f"{d_prix:.2f}"
+                compare_str = ""
+
+            cost_str = f"{d_achat:.2f}" if (d_achat is not None and d_achat > Decimal("0.00")) else ""
+            barcode_clean = str(barcode).strip() if barcode else ""
+
+            # Image : uniquement si URL web valide http/https
+            image_src = str(img_path).strip() if img_path and str(img_path).startswith(("http://", "https://")) else ""
+
+            # Tags (Catégorie, Marque)
+            tags_parts = []
+            if cat and str(cat).strip():
+                tags_parts.append(str(cat).strip())
+            if marque and str(marque).strip():
+                tags_parts.append(str(marque).strip())
+            tags_str = ", ".join(tags_parts)
+
+            est_mono_variante = (len(variantes) == 1)
+            premiere_taille_norm = (variantes[0][0] or "").strip().lower() if variantes else ""
+            est_sans_taille = est_mono_variante and (premiere_taille_norm in ("", "unique", "taille unique", "tu", "default title", "__no_size__"))
+
+            d_tva = None
+            if taux_tva is not None and str(taux_tva).strip() != "":
+                try:
+                    d_tva = Decimal(str(taux_tva).strip().replace(",", "."))
+                except Exception:
+                    d_tva = None
+            is_taxable = True if (d_tva is None or d_tva > Decimal("0.00")) else False
+
+            for idx, (taille, qte) in enumerate(variantes):
+                t_label = (taille or "Taille Unique").strip()
+                if not t_label:
+                    t_label = "Taille Unique"
+
+                row = {h: "" for h in SHOPIFY_PRODUCT_HEADERS}
+                row["Handle"] = handle
+
+                # Colonnes produit (sur la première ligne uniquement pour accélérer l'import Shopify)
+                if idx == 0:
+                    row["Title"] = nom_propre
+                    row["Body (HTML)"] = f"<p>{nom_propre}</p>"
+                    row["Vendor"] = str(marque).strip() if marque else ""
+                    row["Type"] = str(cat).strip() if cat else ""
+                    row["Tags"] = tags_str
+                    row["Published"] = "TRUE" if status == "active" else "FALSE"
+                    row["Status"] = status
+                    row["Image Src"] = image_src
+
+                # Déclinaison / Option
+                if est_sans_taille:
+                    row["Option1 Name"] = "Title"
+                    row["Option1 Value"] = "Default Title"
+                else:
+                    row["Option1 Name"] = "Taille"
+                    row["Option1 Value"] = t_label
+
+                # SKU unique et sans espace
+                if est_sans_taille:
+                    row["Variant SKU"] = barcode_clean if barcode_clean else f"KODO-{p_id}"
+                else:
+                    sku_suffix = re.sub(r'[^A-Za-z0-9_-]', '', t_label)
+                    if not sku_suffix:
+                        sku_suffix = f"V{idx + 1}"
+                    row["Variant SKU"] = f"{barcode_clean}-{sku_suffix}" if barcode_clean else f"KODO-{p_id}-{sku_suffix}"
+
+                # Code-barres : pour éviter le rejet Shopify 'Barcode has already been taken',
+                # seul le premier variant reçoit le code-barres si le catalogue ne différencie pas par taille
+                if idx == 0:
+                    row["Variant Barcode"] = barcode_clean
+                else:
+                    row["Variant Barcode"] = ""
+
+                try:
+                    qty_int = int(qte) if qte is not None else 0
+                except (ValueError, TypeError):
+                    qty_int = 0
+
+                row["Variant Grams"] = "0"
+                row["Variant Inventory Tracker"] = "shopify"
+                row["Variant Inventory Qty"] = str(qty_int)
+                row["Variant Inventory Policy"] = "deny"
+                row["Variant Fulfillment Service"] = "manual"
+                row["Variant Price"] = price_str
+                row["Variant Compare At Price"] = compare_str
+                row["Variant Requires Shipping"] = "TRUE"
+                row["Variant Taxable"] = "TRUE" if is_taxable else "FALSE"
+                row["Cost per item"] = cost_str
+
+                rows.append(row)
+
+        if output_path is None:
+            _ensure_dir()
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(EXPORT_DIR, f"export_shopify_produits_{ts}.csv")
+        else:
+            out_dir = os.path.dirname(output_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+
+        # Sauvegarde avec séparateur virgule et encodage utf-8-sig
+        with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=SHOPIFY_PRODUCT_HEADERS, delimiter=",")
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return output_path
+
+    finally:
+        if should_close and conn:
+            conn.close()
+

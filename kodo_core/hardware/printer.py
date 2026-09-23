@@ -92,6 +92,12 @@ def strip_accents(text):
         'æ': 'ae',
         'Æ': 'AE',
         '€': 'EUR',
+        'ō': 'o',
+        'Ō': 'O',
+        '\u00a0': ' ',
+        '\u202f': ' ',
+        '\u2007': ' ',
+        '\u2009': ' ',
     }
     for k, v in replacements.items():
         only_ascii = only_ascii.replace(k, v)
@@ -598,20 +604,24 @@ def generer_ticket_promo(code_promo, description, pourcentage=None, montant_fixe
 def get_ticket_logo_path():
     """
     Retourne le chemin d'accès au logo pour le ticket de caisse.
-    Cherche en priorité le logo personnalisé téléversé par l'utilisateur,
-    puis se replie sur le logo par défaut de l'application.
-    Si le logo n'existe pas sur disque mais est présent en base SQLite (Parametres), le régénère.
+    Cherche en priorité le logo personnalisé téléversé par l'utilisateur.
+    Si aucun logo n'a été téléversé ou s'il a été supprimé, retourne None
+    (aucun logo par défaut d'un autre client n'est jamais injecté).
     """
-    # 1. Vérifier si présent en base SQLite et reconstituer sur disque si besoin
     try:
         import database_manager
         conn = database_manager.get_connection()
         c = conn.cursor()
-        c.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_logo_b64'")
-        row = c.fetchone()
+        c.execute("SELECT cle, valeur FROM Parametres WHERE cle IN ('receipt_logo_b64', 'receipt_logo_custom')")
+        params = dict(c.fetchall())
         conn.close()
-        if row and row[0]:
-            raw_b64 = row[0]
+
+        # Si le logo n'est pas explicitement personnalisé ou s'il est absent
+        if params.get("receipt_logo_custom") != "1" and "receipt_logo_b64" not in params:
+            return None
+
+        raw_b64 = params.get("receipt_logo_b64")
+        if raw_b64:
             if "," in raw_b64:
                 raw_b64 = raw_b64.split(",", 1)[1]
             import base64
@@ -627,47 +637,27 @@ def get_ticket_logo_path():
     except Exception:
         pass
 
-    # 2. Vérifier les répertoires de données utilisateur
-    try:
-        import database_manager
-        candidate_paths = [
-            database_manager.data_path("logo_ticket.png"),
-            os.path.expanduser("~/Documents/Kodo_POS/logo_ticket.png"),
-            os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png"),
-            os.path.join(os.path.abspath("."), "logo_ticket.png")
-        ]
-        for p in candidate_paths:
-            if os.path.exists(p) and os.path.getsize(p) > 100:
-                return p
-    except Exception:
-        pass
-
-    # 3. Repli sur le logo par défaut
-    default_p = get_resource_path("logo_ticket.png")
-    if os.path.exists(default_p) and os.path.getsize(default_p) > 100:
-        return default_p
-
     return None
 
 
-def generate_social_qr_image(title=None, url=None, subtitle=None, width=512, qr_size="large"):
+def generate_social_qr_image(title=None, url=None, subtitle=None, header=None, width=512, qr_size="large"):
     """
-    Génère un bloc visuel de communication avec QR Code haute résolution
-    pour le pied de ticket thermique (80mm / 512 dots).
-    Optimisé pour être grand, ultra-net et facilement scannable par tout smartphone.
+    Génère un bloc visuel de communication avec disposition horizontale élégante :
+    QR Code à gauche, ligne séparatrice verticale, et textes hiérarchisés à droite
+    (chapeau, titre réseau en gras, et identifiant/@compte/message).
     """
     import qrcode
     from PIL import Image, ImageDraw, ImageFont
 
-    url_str = (url or "https://kodo-pos.com").strip()
+    url_str = (url or "https://kōdo-solutions.com").strip()
 
-    # Taille du QR Code (ajustée pour ticket thermique 80mm)
+    # Taille du QR Code
     if qr_size == "extra_large":
-        box_size = 9
-    elif qr_size == "normal":
         box_size = 6
-    else:  # "large" par défaut (environ 240px de largeur)
-        box_size = 8
+    elif qr_size == "normal":
+        box_size = 4
+    else:  # "large" par défaut (environ 120-130px de côté)
+        box_size = 5
 
     qr = qrcode.QRCode(
         version=None,
@@ -681,70 +671,108 @@ def generate_social_qr_image(title=None, url=None, subtitle=None, width=512, qr_
     qr_w, qr_h = qr_img.size
 
     # Polices de caractères optimisées pour l'impression thermique
-    font_title = None
-    font_sub = None
+    possible_regular_fonts = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttf",
+        "/System/Library/Fonts/Monaco.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ]
     possible_bold_fonts = [
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Helvetica-Bold.ttf",
         "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
         "/System/Library/Fonts/Monaco.ttf",
-        "/System/Library/Fonts/Menlo.ttc",
         "C:\\Windows\\Fonts\\arialbd.ttf",
-        "C:\\Windows\\Fonts\\courbd.ttf",
     ]
-    for p in possible_bold_fonts:
+
+    font_header = None
+    font_title = None
+    font_sub = None
+
+    for p in possible_regular_fonts:
         if os.path.exists(p):
             try:
-                font_title = ImageFont.truetype(p, 24)
-                font_sub = ImageFont.truetype(p, 19)
+                font_header = ImageFont.truetype(p, 14)
                 break
             except Exception:
                 pass
+    for p in possible_bold_fonts:
+        if os.path.exists(p):
+            try:
+                font_title = ImageFont.truetype(p, 22)
+                font_sub = ImageFont.truetype(p, 20)
+                break
+            except Exception:
+                pass
+
+    if not font_header:
+        font_header = ImageFont.load_default()
     if not font_title:
         font_title = ImageFont.load_default()
+    if not font_sub:
         font_sub = ImageFont.load_default()
 
-    pad_top = 18
-    pad_bottom = 18
-    spacing = 14
-
+    header_text = (header or "").strip()
     title_text = (title or "").strip()
     sub_text = (subtitle or "").strip()
 
+    # Si aucun chapeau fourni mais un titre est présent, déduction intelligente
+    if not header_text and title_text:
+        upper_title = title_text.upper()
+        if any(k in upper_title for k in ("INSTAGRAM", "TIKTOK", "FACEBOOK", "RESEAU")):
+            header_text = "SUIVEZ-NOUS SUR"
+        elif any(k in upper_title for k in ("SITE", "WEB", "SHOP", "BOUTIQUE EN LIGNE")):
+            header_text = "VISITEZ NOTRE SITE"
+        elif any(k in upper_title for k in ("AVIS", "GOOGLE", "ETOILE")):
+            header_text = "VOTRE AVIS COMPTE"
+
     dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1), "white"))
-    title_h = 0
-    if title_text:
-        bbox = dummy_draw.textbbox((0, 0), title_text, font=font_title)
-        title_h = (bbox[3] - bbox[1]) + spacing
+    gap_lines = 4
 
-    sub_h = 0
-    if sub_text:
-        bbox_s = dummy_draw.textbbox((0, 0), sub_text, font=font_sub)
-        sub_h = (bbox_s[3] - bbox_s[1]) + spacing
+    b_hdr = dummy_draw.textbbox((0, 0), header_text, font=font_header) if header_text else (0, 0, 0, 0)
+    b_ttl = dummy_draw.textbbox((0, 0), title_text, font=font_title) if title_text else (0, 0, 0, 0)
+    b_sub = dummy_draw.textbbox((0, 0), sub_text, font=font_sub) if sub_text else (0, 0, 0, 0)
 
-    total_h = pad_top + title_h + qr_h + sub_h + pad_bottom
+    h_hdr = (b_hdr[3] - b_hdr[1]) if header_text else 0
+    h_ttl = (b_ttl[3] - b_ttl[1]) if title_text else 0
+    h_sub = (b_sub[3] - b_sub[1]) if sub_text else 0
+
+    text_lines_count = sum(1 for h in [h_hdr, h_ttl, h_sub] if h > 0)
+    text_total_h = h_hdr + h_ttl + h_sub + max(0, text_lines_count - 1) * gap_lines
+
+    sep_spacing = 20
+    text_w = max(b_hdr[2] - b_hdr[0], b_ttl[2] - b_ttl[0], b_sub[2] - b_sub[0], 0)
+    content_w = qr_w + (sep_spacing * 2 + 1 + text_w if text_total_h > 0 else 0)
+
+    pad_y = 14
+    max_h = max(qr_h, text_total_h)
+    total_h = max_h + 2 * pad_y
+
     img = Image.new("RGB", (width, total_h), "white")
     draw = ImageDraw.Draw(img)
 
-    y = pad_top
-    if title_text:
-        bbox = draw.textbbox((0, 0), title_text, font=font_title)
-        tw = bbox[2] - bbox[0]
-        tx = max(10, (width - tw) // 2)
-        draw.text((tx, y), title_text, fill="black", font=font_title)
-        y += (bbox[3] - bbox[1]) + spacing
+    # Position horizontale centrée sur la largeur du ticket (512 dots)
+    start_x = max(10, (width - content_w) // 2)
+    qr_y = (total_h - qr_h) // 2
+    img.paste(qr_img, (start_x, qr_y))
 
-    # QR code centré
-    qx = max(0, (width - qr_w) // 2)
-    img.paste(qr_img, (qx, y))
-    y += qr_h + spacing
+    if text_total_h > 0:
+        sep_x = start_x + qr_w + sep_spacing
+        line_y1 = max(pad_y, (total_h - max(qr_h, text_total_h)) // 2 + 4)
+        line_y2 = min(total_h - pad_y, line_y1 + max(qr_h, text_total_h) - 8)
+        draw.line([(sep_x, line_y1), (sep_x, line_y2)], fill=(180, 180, 180), width=1)
 
-    # Sous-titre / Handle centré
-    if sub_text:
-        bbox_s = draw.textbbox((0, 0), sub_text, font=font_sub)
-        sw = bbox_s[2] - bbox_s[0]
-        sx = max(10, (width - sw) // 2)
-        draw.text((sx, y), sub_text, fill="black", font=font_sub)
+        text_x = sep_x + sep_spacing
+        cur_text_y = (total_h - text_total_h) // 2
+
+        if header_text:
+            draw.text((text_x, cur_text_y), header_text, fill="black", font=font_header)
+            cur_text_y += h_hdr + gap_lines
+        if title_text:
+            draw.text((text_x, cur_text_y), title_text, fill="black", font=font_title)
+            cur_text_y += h_ttl + gap_lines
+        if sub_text:
+            draw.text((text_x, cur_text_y), sub_text, fill="black", font=font_sub)
 
     return img
 
@@ -752,9 +780,8 @@ def generate_social_qr_image(title=None, url=None, subtitle=None, width=512, qr_
 def get_ticket_social_path():
     """
     Retourne le chemin d'accès au bloc réseaux sociaux / communication du ticket de caisse.
-    Cherche en priorité le bloc personnalisé configuré par l'utilisateur (QR Code ou image personnalisée),
-    puis se replie sur le bloc Instagram par défaut de l'application.
-    Si le bloc est explicitement désactivé ('none'), retourne None.
+    Cherche en priorité le bloc personnalisé configuré par l'utilisateur (QR Code ou image personnalisée).
+    Si le bloc est désactivé ('none') ou non configuré, retourne None.
     Si le bloc n'existe pas sur disque mais est présent en base SQLite (Parametres), le régénère.
     """
     try:
@@ -766,18 +793,19 @@ def get_ticket_social_path():
         conn.close()
 
         mode = params.get("receipt_social_mode")
-        if mode == "none":
+        if not mode or mode == "none":
             return None
 
         raw_b64 = params.get("receipt_social_b64")
 
         # Régénération automatique si mode QR sans image stockée
         if not raw_b64 and mode == "qr":
-            title = params.get("receipt_social_title", "")
-            url = params.get("receipt_social_url", "https://instagram.com")
+            header = params.get("receipt_social_header", "")
+            title = params.get("receipt_social_title", "INSTAGRAM")
+            url = params.get("receipt_social_url", "https://kōdo-solutions.com")
             subtitle = params.get("receipt_social_subtitle", "")
             qr_size = params.get("receipt_social_size", "large")
-            img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, width=512, qr_size=qr_size)
+            img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, header=header, width=512, qr_size=qr_size)
             from io import BytesIO
             import base64
             buf = BytesIO()
@@ -799,24 +827,6 @@ def get_ticket_social_path():
                 pass
     except Exception:
         pass
-
-    try:
-        import database_manager
-        candidate_paths = [
-            database_manager.data_path("social_ticket.png"),
-            os.path.expanduser("~/Documents/Kodo_POS/social_ticket.png"),
-            os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png"),
-            os.path.join(os.path.abspath("."), "social_ticket.png")
-        ]
-        for p in candidate_paths:
-            if os.path.exists(p) and os.path.getsize(p) > 100:
-                return p
-    except Exception:
-        pass
-
-    default_p = get_resource_path("instagram_block.png")
-    if os.path.exists(default_p) and os.path.getsize(default_p) > 100:
-        return default_p
 
     return None
 
@@ -908,16 +918,22 @@ def generer_image_ticket(contenu, numero):
     return nom_fichier_img
 
 
-def pil_to_escpos_raster(image, max_width=512):
+def pil_to_escpos_raster(image, max_width=512, max_height=None):
     """
     Convertit une image PIL en bytes d'impression ESC/POS (Commande GS v 0).
-    Ajusté à max_width=512 pour une largeur d'impression 80mm complète, nette et agrandie.
+    Ajusté pour une largeur d'impression 80mm nette et découpé par tranches de 48 dots
+    pour éviter tout débordement de buffer sur les imprimantes thermiques sensibles.
     """
     from PIL import Image
     if image.width > max_width:
         ratio = max_width / float(image.width)
         new_height = int(float(image.height) * ratio)
         image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
+
+    if max_height and image.height > max_height:
+        ratio = max_height / float(image.height)
+        new_width = int(float(image.width) * ratio)
+        image = image.resize((new_width, max_height), Image.Resampling.LANCZOS)
 
     if image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info):
         bg = Image.new("RGB", image.size, (255, 255, 255))
@@ -932,25 +948,36 @@ def pil_to_escpos_raster(image, max_width=512):
 
     width, height = image.size
     byte_width = (width + 7) // 8
-
-    header = bytearray([0x1D, 0x76, 0x30, 0x00, byte_width & 0xFF, (byte_width >> 8) & 0xFF, height & 0xFF, (height >> 8) & 0xFF])
     pixels = image.load()
-    raster_data = bytearray()
 
-    for y in range(height):
-        for x_byte in range(byte_width):
-            byte_val = 0
-            for bit in range(8):
-                x = x_byte * 8 + bit
-                if x < width:
-                    if pixels[x, y] == 0:  # Pixel noir
-                        byte_val |= (1 << (7 - bit))
-            raster_data.append(byte_val)
+    # Découpage par tranches horizontales (slice chunking de 24 dots)
+    # Empêche la saturation du buffer matériel de l'imprimante (micro-buffer <= 2048 octets : 64*24+8 = 1544 <= 2048)
+    chunk_h = 24
+    payload = bytearray()
 
-    return bytes(header + raster_data)
+    for y_start in range(0, height, chunk_h):
+        cur_h = min(chunk_h, height - y_start)
+        header = bytearray([
+            0x1D, 0x76, 0x30, 0x00,
+            byte_width & 0xFF, (byte_width >> 8) & 0xFF,
+            cur_h & 0xFF, (cur_h >> 8) & 0xFF
+        ])
+        slice_data = bytearray()
+        for y in range(y_start, y_start + cur_h):
+            for x_byte in range(byte_width):
+                byte_val = 0
+                for bit in range(8):
+                    x = x_byte * 8 + bit
+                    if x < width:
+                        if pixels[x, y] == 0:  # Pixel noir
+                            byte_val |= (1 << (7 - bit))
+                slice_data.append(byte_val)
+        payload.extend(header + slice_data)
+
+    return bytes(payload)
 
 
-def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, allow_gui_preview=False):
+def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, allow_gui_preview=False, return_status=False):
     """
     Sauvegarde le ticket et tente l'impression thermique ESC/POS.
     1. Direct Hardware python-escpos / Socket si hôte spécifié.
@@ -981,7 +1008,7 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, al
     if logo_path and os.path.exists(logo_path):
         try:
             img_logo = Image.open(logo_path)
-            raw_payload.extend(pil_to_escpos_raster(img_logo))
+            raw_payload.extend(pil_to_escpos_raster(img_logo, max_width=384, max_height=180))
             raw_payload.extend(b"\n")
         except Exception as e:
             print(f"[WARN] Logo raster error: {e}")
@@ -1059,12 +1086,15 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, al
         except Exception as e:
             print(f"Erreur ouverture aperçu ticket : {e}")
 
+    if return_status:
+        return bool(printed_successfully)
     return nom_fichier_txt
 
 
-def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
+def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100) -> bool:
     """
     Récupère un ticket depuis la base de données SQLite et lance son impression.
+    Retourne True si l'impression physique a réussi, False sinon.
     """
     try:
         from database_manager import get_connection
@@ -1078,7 +1108,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
         ticket_row = c.fetchone()
         if not ticket_row:
             print(f"[WARN] Ticket {num_ticket} introuvable en base de données.")
-            return None
+            return False
 
         t_id, d_h, total_tvac, remise, methode, id_client, rendu, vendeur, ecart_arrondi = ticket_row
 
@@ -1156,11 +1186,11 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100):
             ecart_arrondi_cash=Decimal(str(ecart_arrondi or 0))
         )
 
-        return imprimer_ticket(contenu, num_ticket, printer_name=printer_name, host=host, port=port)
+        return bool(imprimer_ticket(contenu, num_ticket, printer_name=printer_name, host=host, port=port, return_status=True))
 
     except Exception as e:
         print(f"[ERROR imprimer_ticket_caisse] {e}")
-        return None
+        return False
 
 
 def ouvrir_tiroir_caisse(printer_name=None, host=None, port=9100):
@@ -1174,6 +1204,7 @@ def ouvrir_tiroir_caisse(printer_name=None, host=None, port=9100):
         return True
 
     # Fallback générique via lp -o raw
+    temp_path = None
     try:
         drawer_cmd = ESC_INIT + ESC_DRAWER_PIN2 + DLE_DRAWER_PULSE
         fd, temp_path = tempfile.mkstemp(prefix="drawer_", suffix=".bin")
@@ -1181,11 +1212,18 @@ def ouvrir_tiroir_caisse(printer_name=None, host=None, port=9100):
             f.write(drawer_cmd)
 
         if sys.platform in ["darwin", "linux"]:
-            subprocess.run(["lp", "-o", "raw", temp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            print("[SUCCESS] Tiroir ouvert via lp raw.")
-            return True
+            res = subprocess.run(["lp", "-o", "raw", temp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
+            if res.returncode == 0:
+                print("[SUCCESS] Tiroir ouvert via lp raw.")
+                return True
     except Exception as e:
         print(f"[ERROR ouvrir_tiroir_caisse] {e}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
     return False
 
@@ -1232,10 +1270,15 @@ def generer_ticket_test(shop_name="KŌDO POS",
     lines.append(_separator("="))
     lines.append(_center("TEST MATERIEL & COMMUNICATION"))
     lines.append(_center("Vitesse : OK | Decoupe : OK"))
-    lines.append(_center("Kōdo POS v1.0.45"))
+    try:
+        import kodo_base
+        version_pos = kodo_base.BASE_VERSION
+    except Exception:
+        version_pos = "2.0.4"
+    lines.append(_center(f"Kōdo POS v{version_pos}"))
     lines.append(_separator("-"))
     lines.append(_center("Merci pour votre confiance !"))
-    lines.append(_center("https://kodopos.com"))
+    lines.append(_center("https://kōdo-solutions.com"))
     lines.append(_separator("="))
     lines.append("\n\n")
 

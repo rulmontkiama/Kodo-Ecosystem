@@ -128,7 +128,7 @@ def run_tests():
     
     # Mocking self._make_request of ShopifySyncThread
     calls = []
-    def mock_make_request(endpoint, method="GET", data=None):
+    def mock_make_request(endpoint, method="GET", data=None, *args, **kwargs):
         calls.append((endpoint, method, data))
         if "locations.json" in endpoint:
             return {"locations": [{"id": 112233, "name": "Boutique Test", "active": True}]}

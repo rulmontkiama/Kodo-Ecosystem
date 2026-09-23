@@ -107,21 +107,25 @@ def creer_backup_local() -> Optional[str]:
         backup_dir = get_backup_directory()
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         temp_copy = os.path.join(backup_dir, f"temp_{timestamp}.db")
-
-        # Sauvegarde à chaud avec l'API SQLite
-        source_conn = sqlite3.connect(DB_NAME)
-        dest_conn = sqlite3.connect(temp_copy)
-        with source_conn:
+        source_conn = None
+        dest_conn = None
+        try:
+            source_conn = sqlite3.connect(DB_NAME)
+            dest_conn = sqlite3.connect(temp_copy)
             source_conn.backup(dest_conn)
-        dest_conn.close()
-        source_conn.close()
+        finally:
+            if dest_conn:
+                dest_conn.close()
+            if source_conn:
+                source_conn.close()
 
-        zip_filename = os.path.join(backup_dir, f"kodo_backup_{timestamp}.zip")
-        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(temp_copy, arcname=os.path.basename(DB_NAME))
-
-        if os.path.exists(temp_copy):
-            os.remove(temp_copy)
+        try:
+            zip_filename = os.path.join(backup_dir, f"kodo_backup_{timestamp}.zip")
+            with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.write(temp_copy, arcname=os.path.basename(DB_NAME))
+        finally:
+            if os.path.exists(temp_copy):
+                os.remove(temp_copy)
 
         _nettoyer_anciennes_sauvegardes(backup_dir, limit=30)
         return zip_filename
@@ -186,12 +190,17 @@ def creer_pack_migration_machine() -> Tuple[bool, str, bytes, Dict[str, Any]]:
 
         # 1. Cloner la base à chaud dans un fichier temporaire
         temp_db_path = os.path.join(backup_dir, f"temp_migration_{timestamp}.db")
-        source_conn = sqlite3.connect(DB_NAME)
-        dest_conn = sqlite3.connect(temp_db_path)
-        with source_conn:
+        source_conn = None
+        dest_conn = None
+        try:
+            source_conn = sqlite3.connect(DB_NAME)
+            dest_conn = sqlite3.connect(temp_db_path)
             source_conn.backup(dest_conn)
-        dest_conn.close()
-        source_conn.close()
+        finally:
+            if dest_conn:
+                dest_conn.close()
+            if source_conn:
+                source_conn.close()
 
         # 2. Vérifier l'intégrité de la copie et calculer son SHA-256
         if not verifier_integrite_db(temp_db_path):

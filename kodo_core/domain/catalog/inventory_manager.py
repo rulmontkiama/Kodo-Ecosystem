@@ -581,6 +581,9 @@ class InventoryManager:
                     "name": r[2],
                     "category": r[3] or "Général",
                     "purchase_price_htva": float(r[4]) if r[4] is not None else 0.0,
+                    "prix_achat_htva": float(r[4]) if r[4] is not None else 0.0,
+                    "costPrice": float(r[4]) if r[4] is not None else 0.0,
+                    "cost_price": float(r[4]) if r[4] is not None else 0.0,
                     "price": px_tvac,
                     "price_tvac": px_tvac,
                     "vat_rate": float(r[6]) if r[6] is not None else 0.21,
@@ -681,7 +684,7 @@ class InventoryManager:
             barcode_provided = ("barcode" in data) or ("code_barre" in data)
             barcode = cls.clean_barcode(data.get("barcode") or data.get("code_barre"))
             price = Decimal(str(data.get("price") or data.get("prix_vente_tvac") or 0.0))
-            purchase_price = Decimal(str(data.get("purchase_price_htva") or data.get("prix_achat_htva") or 0.0))
+            purchase_price = Decimal(str(data.get("purchase_price_htva") or data.get("prix_achat_htva") or data.get("costPrice") or data.get("cost_price") or 0.0))
             vat_rate = Decimal(str(data.get("vat_rate") or data.get("taux_tva") or 0.21))
             sizes_str = data.get("sizes") or ""
             stock_default = int(data.get("stock") or 0)

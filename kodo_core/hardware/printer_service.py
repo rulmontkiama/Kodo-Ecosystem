@@ -140,6 +140,13 @@ def _quantize(amount) -> str:
     return f"{quantize_money(amount):.2f}"
 
 
+def _clean_str(text: str) -> str:
+    """Purge les caractères de contrôle pour prévenir toute injection de commandes ESC/POS."""
+    if not text:
+        return ""
+    return "".join(c for c in str(text) if c in ("\n", "\t") or (32 <= ord(c) < 127))
+
+
 def generate_esc_pos_receipt(ticket_data: dict, fiscal_hash: str) -> bytes:
     """
     Génère le flux binaire ESC/POS complet d'un ticket de caisse :
@@ -154,19 +161,19 @@ def generate_esc_pos_receipt(ticket_data: dict, fiscal_hash: str) -> bytes:
     payload += ESC_INIT
     payload += ESC_ALIGN_CENTER
 
-    shop_name = ticket_data.get("shop_name", "Kōdo POS")
+    shop_name = _clean_str(ticket_data.get("shop_name", "Kōdo POS"))
     payload += ESC_BOLD_ON
     payload += (_center(shop_name) + "\n").encode("ascii", errors="replace")
     payload += ESC_BOLD_OFF
 
-    numero = ticket_data.get("numero", "")
+    numero = _clean_str(ticket_data.get("numero", ""))
     payload += (f"Ticket #{numero}\n".encode("ascii", errors="replace"))
     payload += ("-" * COL + "\n").encode("ascii")
 
     payload += ESC_ALIGN_LEFT
     for item in ticket_data.get("items", []):
         qty = item.get("qty", 1)
-        label = str(item.get("label", ""))[:30]
+        label = _clean_str(str(item.get("label", "")))[:30]
         total = _quantize(Decimal(str(item.get("total", "0"))))
         line = f"{qty:<4}{label:<28}{total:>10}"
         payload += (line[:COL] + "\n").encode("ascii", errors="replace")
@@ -187,7 +194,8 @@ def generate_esc_pos_receipt(ticket_data: dict, fiscal_hash: str) -> bytes:
 
     payload += ("-" * COL + "\n").encode("ascii")
     payload += ESC_ALIGN_CENTER
-    payload += (f"Hash: {fiscal_hash}\n").encode("ascii", errors="replace")
+    safe_hash = _clean_str(fiscal_hash)
+    payload += (f"Hash: {safe_hash}\n").encode("ascii", errors="replace")
 
     payload += _generate_barcode(str(numero))
 
@@ -198,12 +206,13 @@ def generate_esc_pos_receipt(ticket_data: dict, fiscal_hash: str) -> bytes:
 
 
 def _generate_barcode(data: str) -> bytes:
-    """Code-barres CODE128 (GS k 73) du numéro de ticket."""
+    """Code-barres CODE128 (GS k 73) du numéro de ticket avec sous-ensemble {B."""
     if not data:
         return b""
-    encoded = data.encode("ascii", errors="ignore")[:255]
-    header = GS + b'k' + bytes([73]) + bytes([len(encoded)])
-    return header + encoded
+    encoded = data.encode("ascii", errors="ignore")[:250]
+    payload = b"{B" + encoded
+    header = GS + b'k' + bytes([73, len(payload)])
+    return header + payload
 
 
 def open_cash_drawer_sequence() -> bytes:

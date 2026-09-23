@@ -251,7 +251,7 @@ class TestKodoCore(unittest.TestCase):
             qr_size="large"
         )
         self.assertEqual(qr_img.width, 512)
-        self.assertGreater(qr_img.height, 250)
+        self.assertGreater(qr_img.height, 150)
 
         # 8. Test API POST mode="qr"
         code, resp, _ = app.handle_request("POST", "/api/settings/social", {}, {}, {

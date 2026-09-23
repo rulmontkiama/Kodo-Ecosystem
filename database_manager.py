@@ -206,7 +206,7 @@ def hash_pin_sha256(pin_plain, salt=None):
     if not pin_plain:
         return ""
     import hashlib
-    s = salt or "KODO_POS_SECURE_SALT_2026"
+    s = salt or os.environ.get("KODO_SALT", "KODO_POS_SECURE_SALT_2026")
     return hashlib.sha256((str(pin_plain) + s).encode('utf-8')).hexdigest()
 
 
@@ -218,7 +218,7 @@ def hash_pin(pin_plain, salt=None):
     if not pin_plain:
         return ""
     import hashlib
-    s = salt or "KODO_POS_SECURE_SALT_2026"
+    s = salt or os.environ.get("KODO_SALT", "KODO_POS_SECURE_SALT_2026")
     return hashlib.pbkdf2_hmac('sha256', (str(pin_plain) + s).encode('utf-8'), s.encode('utf-8'), 100_000).hex()
 
 
@@ -231,7 +231,7 @@ def verify_pin_hash(pin_plain, stored_hash, salt=None):
     if not pin_plain or not stored_hash:
         return False, False
     import hmac
-    s = salt or "KODO_POS_SECURE_SALT_2026"
+    s = salt or os.environ.get("KODO_SALT", "KODO_POS_SECURE_SALT_2026")
     # 1. Vérification PBKDF2 (courant)
     pbkdf2_h = hash_pin(pin_plain, s)
     if hmac.compare_digest(pbkdf2_h, stored_hash):
@@ -967,9 +967,9 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
     current_hash, previous_hash = signer_ticket(cursor, numero_ticket, total_tvac, date_heure, caisse_id=caisse_id, details_articles=details_articles)
 
     cursor.execute("""
-        INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, total_tva, remise, methode_paiement, id_client, rendu_monnaie, caisse_id, details_articles, signature, hash_precedent, previous_hash, current_hash, sync_status, offline_uuid, created_at_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (numero_ticket, date_heure, total_tvac, total_htva, total_tva, remise, methode_paiement, id_client, rendu_monnaie, caisse_id, details_articles, current_hash, previous_hash, previous_hash, current_hash, sync_status, offline_uuid, created_at_utc))
+        INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, total_tva, remise, methode_paiement, id_client, vendeur_nom, rendu_monnaie, caisse_id, details_articles, signature, hash_precedent, previous_hash, current_hash, sync_status, offline_uuid, created_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (numero_ticket, date_heure, total_tvac, total_htva, total_tva, remise, methode_paiement, id_client, vendeur_nom, rendu_monnaie, caisse_id, details_articles, current_hash, previous_hash, previous_hash, current_hash, sync_status, offline_uuid, created_at_utc))
 
     ticket_id = cursor.lastrowid
 
@@ -1137,13 +1137,14 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
     # libre suffit — pas de boucle de retry, et le ticket n'est signé qu'une seule fois.
     # La contrainte UNIQUE reste le garde-fou ultime contre tout doublon.
     new_tk = base_tk
-    discriminant = 1
-    while True:
+    for discriminant in range(1, 1000):
         cursor.execute("SELECT 1 FROM Tickets WHERE numero_ticket = ?", (new_tk,))
         if cursor.fetchone() is None:
             break
-        discriminant += 1
         new_tk = f"{base_tk}-{discriminant}"
+    else:
+        import uuid
+        new_tk = f"{base_tk}-{uuid.uuid4().hex[:6]}"
 
     signature, hash_prec = signer_ticket(cursor, new_tk, total_tvac, date_heure, caisse_id=caisse_id)
 

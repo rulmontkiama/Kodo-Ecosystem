@@ -164,12 +164,21 @@ class ShopConfig:
     @classmethod
     def get_firebase_credentials_path(cls) -> str:
         """Charge le chemin du fichier d'identifiants Firebase Admin SDK."""
+        import glob
         env_path = os.environ.get("KODO_FIREBASE_CREDENTIALS")
         if env_path and os.path.exists(env_path):
             return env_path
         
         base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-        local_secret = os.path.join(base_path, "kodo-pos-firebase-adminsdk-fbsvc-c56ff45f8c.json")
-        if os.path.exists(local_secret):
-            return local_secret
+        std_secret = os.path.join(base_path, "firebase-adminsdk.json")
+        if os.path.exists(std_secret):
+            return std_secret
+        
+        matches = glob.glob(os.path.join(base_path, "kodo-pos-firebase-adminsdk-*.json"))
+        if matches and os.path.exists(matches[0]):
+            return matches[0]
+
+        data_secret = os.path.join(cls.get_data_dir(), "firebase-adminsdk.json")
+        if os.path.exists(data_secret):
+            return data_secret
         return ""

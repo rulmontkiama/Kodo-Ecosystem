@@ -32,11 +32,12 @@ class FirebaseSync:
     """Gestionnaire de connexion et synchronisation miroir Firestore & Realtime DB."""
 
     def __init__(self, key_path: str = None, database_url: str = None):
-        self.key_path = key_path or data_path("firebase-adminsdk.json")
-        if not os.path.exists(self.key_path):
-            alt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "kodo-pos-firebase-adminsdk-fbsvc-c56ff45f8c.json")
-            if os.path.exists(alt_path):
-                self.key_path = alt_path
+        try:
+            from kodo_core.config import ShopConfig
+            cfg_path = ShopConfig.get_firebase_credentials_path()
+        except Exception:
+            cfg_path = ""
+        self.key_path = key_path or cfg_path or data_path("firebase-adminsdk.json")
 
         self.database_url = database_url
         self.firestore_db = None

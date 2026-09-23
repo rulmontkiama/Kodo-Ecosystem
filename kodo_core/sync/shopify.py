@@ -845,11 +845,19 @@ class ShopifySync:
                     conn.commit()
 
                 if tout_pousse:
-                    c3 = _ouvrir_ecriture(conn)
-                    c3.execute("UPDATE Tickets SET synced_shopify = 1 WHERE id = ?", (t_id,))
-                    conn.commit()
-                    synced_count += 1
-                    logger.info(f"Ticket {num} marqué comme synchronisé Shopify.")
+                    c_verif = _ouvrir_ecriture(conn)
+                    c_verif.execute("""
+                        SELECT 1 FROM Shopify_Sync_Lignes
+                        WHERE id_ticket = ? AND statut = ?
+                    """, (t_id, STATUT_INDETERMINE))
+                    if c_verif.fetchone() is None:
+                        c3 = _ouvrir_ecriture(conn)
+                        c3.execute("UPDATE Tickets SET synced_shopify = 1 WHERE id = ?", (t_id,))
+                        conn.commit()
+                        synced_count += 1
+                        logger.info(f"Ticket {num} marqué comme synchronisé Shopify.")
+                    else:
+                        logger.warning(f"Ticket {num} non marqué synchronisé : contient des lignes à statut indéterminé.")
         except Exception as e:
             if conn:
                 try:

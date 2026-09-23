@@ -306,8 +306,32 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
         products = InventoryManager.get_all_products(category=cat, brand=brand, search=search)
         return 200, products
 
+    # 1b. Export du catalogue au format CSV officiel Shopify
+    elif method == "GET" and path in ("/api/products/export/shopify", "/api/export/shopify"):
+        status_param = (query.get("status") or ["active"])[0]
+        if status_param not in ("active", "draft"):
+            status_param = "active"
+        try:
+            import export_manager
+            csv_path = export_manager.export_shopify_catalog_csv(status=status_param)
+            with open(csv_path, 'rb') as f:
+                csv_bytes = f.read()
+
+            import datetime
+            ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"Shopify_Produits_Kodo_POS_{status_param}_{ts_str}.csv"
+            headers_out = {
+                'Content-Type': 'text/csv; charset=utf-8',
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Length': str(len(csv_bytes))
+            }
+            return 200, csv_bytes, headers_out
+        except Exception as e:
+            print(f"[SHOPIFY EXPORT ERROR] {e}")
+            return 500, {"success": False, "error": f"Erreur lors de l'exportation Shopify : {e}"}
+
     # 2. Ajout / Édition Produit
-    elif method == "POST" and path == "/api/products":
+    elif method in ("POST", "PUT") and path == "/api/products":
         res = InventoryManager.save_product(data)
         return 200, {"success": True, "productId": res["product_id"]}
 

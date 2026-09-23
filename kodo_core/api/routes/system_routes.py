@@ -858,8 +858,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             candidate_paths = [
                 database_manager.data_path("logo_ticket.png"),
                 os.path.expanduser("~/Documents/Kodo_POS/logo_ticket.png"),
-                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png"),
-                os.path.join(os.path.abspath("."), "logo_ticket.png")
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png")
             ]
             for target_path in candidate_paths:
                 if os.path.exists(target_path) and os.path.getsize(target_path) > 100:
@@ -889,8 +888,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             candidate_paths = [
                 database_manager.data_path("logo_ticket.png"),
                 os.path.expanduser("~/Documents/Kodo_POS/logo_ticket.png"),
-                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png"),
-                os.path.join(os.path.abspath("."), "logo_ticket.png")
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/logo_ticket.png")
             ]
             from kodo_core.hardware.printer import get_resource_path
             default_logo = get_resource_path("logo_ticket.png")
@@ -944,12 +942,13 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
             # Cas 2 : Générateur QR Code dynamique et personnalisable (Réseaux / Web / Avis / etc.)
             elif mode == "qr" or ("url" in data or "title" in data):
+                header = (data.get("header") or "").strip()
                 title = (data.get("title") or "REJOIGNEZ-NOUS !").strip()
-                url = (data.get("url") or data.get("qr_data") or "https://instagram.com").strip()
+                url = (data.get("url") or data.get("qr_data") or "https://kōdo-solutions.com").strip()
                 subtitle = (data.get("subtitle") or "").strip()
                 qr_size = data.get("qr_size") or "large"
 
-                img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, width=512, qr_size=qr_size)
+                img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, header=header, width=512, qr_size=qr_size)
 
                 buffer = BytesIO()
                 img.save(buffer, format="PNG")
@@ -965,6 +964,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 conn = get_connection()
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_mode', 'qr')")
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_header', ?)", (header,))
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_title', ?)", (title,))
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_url', ?)", (url,))
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_subtitle', ?)", (subtitle,))
@@ -981,6 +981,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     "height": img.height,
                     "social_url": stored_b64,
                     "mode": "qr",
+                    "header": header,
                     "title": title,
                     "url": url,
                     "subtitle": subtitle,
@@ -1056,16 +1057,18 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             conn.close()
 
             mode = params.get("receipt_social_mode")
-            title = params.get("receipt_social_title", "SUIVEZ-NOUS SUR NOS RÉSEAUX !")
-            url = params.get("receipt_social_url", "https://instagram.com")
+            header = params.get("receipt_social_header", "")
+            title = params.get("receipt_social_title", "")
+            url = params.get("receipt_social_url", "")
             subtitle = params.get("receipt_social_subtitle", "")
             qr_size = params.get("receipt_social_size", "large")
             stored_b64 = params.get("receipt_social_b64")
 
-            if mode == "none":
+            if not mode or mode == "none":
                 return 200, {
                     "has_social": False,
                     "mode": "none",
+                    "header": header,
                     "title": title,
                     "url": url,
                     "subtitle": subtitle,
@@ -1077,6 +1080,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     "has_social": True,
                     "mode": mode or "custom_image",
                     "social_url": stored_b64,
+                    "header": header,
                     "title": title,
                     "url": url,
                     "subtitle": subtitle,
@@ -1086,8 +1090,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             candidate_paths = [
                 database_manager.data_path("social_ticket.png"),
                 os.path.expanduser("~/Documents/Kodo_POS/social_ticket.png"),
-                os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png"),
-                os.path.join(os.path.abspath("."), "social_ticket.png")
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png")
             ]
             for target_path in candidate_paths:
                 if os.path.exists(target_path) and os.path.getsize(target_path) > 100:
@@ -1097,32 +1100,26 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                         "has_social": True,
                         "mode": mode or "custom_image",
                         "social_url": f"data:image/png;base64,{b64}",
+                        "header": header,
                         "title": title,
                         "url": url,
                         "subtitle": subtitle,
                         "qr_size": qr_size
                     }
 
-            from kodo_core.hardware.printer import get_resource_path
-            default_p = get_resource_path("instagram_block.png")
-            if os.path.exists(default_p) and os.path.getsize(default_p) > 100:
-                with open(default_p, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                return 200, {
-                    "has_social": False,
-                    "mode": "default",
-                    "social_url": f"data:image/png;base64,{b64}",
-                    "title": "SUIVEZ-NOUS SUR NOS RÉSEAUX !",
-                    "url": "https://instagram.com",
-                    "subtitle": "",
-                    "qr_size": "large"
-                }
-
-            return 200, {"has_social": False, "mode": "none"}
+            return 200, {
+                "has_social": False,
+                "mode": "none",
+                "header": header,
+                "title": title,
+                "url": url,
+                "subtitle": subtitle,
+                "qr_size": qr_size
+            }
         except Exception as e:
             return 500, {"has_social": False, "error": str(e)}
 
-    # 18c. Supprimer le bloc personnalisé (retour au bloc par défaut)
+    # 18c. Supprimer le bloc personnalisé (désactivation complète)
     elif method == "DELETE" and path in ("/api/settings/social", "/settings/social"):
         try:
             import os
@@ -1130,6 +1127,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 conn = get_connection()
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM Parametres WHERE cle LIKE 'receipt_social_%'")
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_mode', 'none')")
                 conn.commit()
                 conn.close()
             except Exception:
@@ -1138,21 +1136,16 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             candidate_paths = [
                 database_manager.data_path("social_ticket.png"),
                 os.path.expanduser("~/Documents/Kodo_POS/social_ticket.png"),
-                os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png"),
-                os.path.join(os.path.abspath("."), "social_ticket.png")
+                os.path.expanduser("~/Library/Application Support/Kodo_POS/social_ticket.png")
             ]
-            from kodo_core.hardware.printer import get_resource_path
-            default_social = get_resource_path("instagram_block.png")
             for p in candidate_paths:
                 try:
-                    if default_social and os.path.abspath(p) == os.path.abspath(default_social):
-                        continue
                     if os.path.exists(p):
                         os.remove(p)
                 except Exception:
                     pass
 
-            return 200, {"success": True, "message": "Bloc de communication réinitialisé au bloc par défaut"}
+            return 200, {"success": True, "message": "Bloc réseaux sociaux désactivé avec succès", "has_social": False, "mode": "none"}
         except Exception as e:
             return 500, {"success": False, "error": str(e)}
 

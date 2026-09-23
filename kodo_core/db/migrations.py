@@ -377,6 +377,7 @@ class MigrationManager:
                        AND NEW.hash_precedent IS OLD.hash_precedent
                        AND NEW.previous_hash IS OLD.previous_hash
                        AND NEW.current_hash IS OLD.current_hash
+                       AND NEW.details_articles IS OLD.details_articles
                    )
                    BEGIN
                        SELECT RAISE(ABORT, 'Modification interdite : ticket scelle (piste audit). Utiliser une contre-passation.');
@@ -1243,6 +1244,7 @@ def initialiser_db(db_path: str = None, conn=None):
                 AND NEW.hash_precedent IS OLD.hash_precedent
                 AND NEW.previous_hash IS OLD.previous_hash
                 AND NEW.current_hash IS OLD.current_hash
+                AND NEW.details_articles IS OLD.details_articles
             )
             BEGIN
                 SELECT RAISE(ABORT, 'Modification interdite : ticket scellé (piste d''audit). Utiliser une contre-passation.');

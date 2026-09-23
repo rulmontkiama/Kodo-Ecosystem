@@ -252,7 +252,7 @@ def _get_backup_cache_path() -> str:
 
 
 def _write_cache_file(path: str, cache_data: dict) -> bool:
-    tmp_path = f"{path}.tmp.{os.getpid()}"
+    tmp_path = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
     try:
         parent = os.path.dirname(path)
         if parent:
