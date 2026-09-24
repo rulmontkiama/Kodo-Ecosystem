@@ -247,6 +247,44 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         res = update_checker.apply_remote_update_sync(patch_url, target_ver)
         return 200, res
 
+    # 4bis. Révéler un fichier dans le Finder macOS / Explorateur Windows
+    elif method == "POST" and path == "/api/system/reveal-in-finder":
+        import os, sys, subprocess
+        target = (data.get("path") or "").strip()
+
+        if not target:
+            return 400, {"success": False, "error": "Chemin de fichier manquant."}
+        target_abs = os.path.abspath(os.path.expanduser(target))
+        if not os.path.exists(target_abs):
+            return 404, {"success": False, "error": "Fichier introuvable sur le disque."}
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(
+                    ["open", "-R", target_abs],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            elif sys.platform == "win32":
+                subprocess.Popen(
+                    ["explorer", "/select,", target_abs],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            elif sys.platform.startswith("linux"):
+                subprocess.Popen(
+                    ["xdg-open", os.path.dirname(target_abs)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            return 200, {"success": True, "path": target_abs}
+        except Exception as e:
+            return 500, {"success": False, "error": str(e)}
+
+
+
     # 5. Statut de la licence
     elif method == "GET" and path == "/api/license/status":
         info = license_manager.get_license_info()

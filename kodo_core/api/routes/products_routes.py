@@ -307,23 +307,84 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
         return 200, products
 
     # 1b. Export du catalogue au format CSV officiel Shopify
-    elif method == "GET" and path in ("/api/products/export/shopify", "/api/export/shopify"):
-        status_param = (query.get("status") or ["active"])[0]
+    elif method in ("GET", "POST") and path in ("/api/products/export/shopify", "/api/export/shopify"):
+        status_param = "active"
+        if isinstance(data, dict) and data.get("status"):
+            status_param = str(data["status"])
+        elif query.get("status"):
+            status_param = str(query.get("status")[0])
         if status_param not in ("active", "draft"):
             status_param = "active"
+
+        save_action = (
+            query.get("action") == ["save"]
+            or query.get("save") in (["1"], ["true"])
+            or (isinstance(data, dict) and (data.get("action") == "save" or data.get("save") is True))
+            or method == "POST"
+        )
         try:
             import export_manager
             import tempfile
             import datetime
+            import shutil
+            import subprocess
+            import sys
+
             ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"Shopify_Produits_Kodo_POS_{status_param}_{ts_str}.csv"
 
             fd, temp_csv = tempfile.mkstemp(prefix="shopify_export_", suffix=".csv")
             os.close(fd)
+            saved_path = None
             try:
                 export_manager.export_shopify_catalog_csv(status=status_param, output_path=temp_csv)
                 with open(temp_csv, 'rb') as f:
                     csv_bytes = f.read()
+
+                # Copie prioritaire dans ~/Downloads
+                downloads_dir = os.path.expanduser("~/Downloads")
+                if os.path.exists(downloads_dir) and os.access(downloads_dir, os.W_OK):
+                    target_file = os.path.join(downloads_dir, filename)
+                    try:
+                        shutil.copyfile(temp_csv, target_file)
+                        saved_path = target_file
+                    except Exception as ex_d:
+                        logger.warning(f"[SHOPIFY EXPORT] Échec copie Downloads: {ex_d}")
+
+                # Copie de repli dans le répertoire Kodo_POS Exports
+                if not saved_path:
+                    try:
+                        export_dir = export_manager.get_export_dir()
+                        target_file = os.path.join(export_dir, filename)
+                        shutil.copyfile(temp_csv, target_file)
+                        saved_path = target_file
+                    except Exception as ex_exp:
+                        logger.warning(f"[SHOPIFY EXPORT] Échec copie Exports: {ex_exp}")
+
+                # Révéler le fichier dans Finder / Explorateur (uniquement si demandé ou save_action explicite)
+                should_reveal = (
+                    query.get("reveal") in (["1"], ["true"])
+                    or (isinstance(data, dict) and data.get("reveal") is True)
+                )
+                if should_reveal and saved_path and os.path.exists(saved_path):
+                    try:
+                        if sys.platform == "darwin":
+                            subprocess.Popen(
+                                ["open", "-R", saved_path],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True
+                            )
+                        elif sys.platform == "win32":
+                            subprocess.Popen(
+                                ["explorer", "/select,", saved_path],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True
+                            )
+                    except Exception as ex_rev:
+                        logger.warning(f"[SHOPIFY EXPORT] Impossible de révéler dans le Finder: {ex_rev}")
+
             finally:
                 if os.path.exists(temp_csv):
                     try:
@@ -331,10 +392,20 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
                     except Exception:
                         pass
 
+            if save_action:
+                return 200, {
+                    "success": True,
+                    "filename": filename,
+                    "filePath": saved_path,
+                    "savedToDownloads": bool(saved_path and "Downloads" in saved_path),
+                    "totalBytes": len(csv_bytes)
+                }
+
             headers_out = {
-                'Content-Type': 'text/csv; charset=utf-8',
+                'Content-Type': 'application/octet-stream',
                 'Content-Disposition': f'attachment; filename="{filename}"',
-                'Content-Length': str(len(csv_bytes))
+                'Content-Length': str(len(csv_bytes)),
+                'X-Saved-Path': saved_path or ''
             }
             return 200, csv_bytes, headers_out
         except Exception as e:

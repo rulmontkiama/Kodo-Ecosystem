@@ -289,7 +289,7 @@ class TestShopifyCatalogExport(unittest.TestCase):
         self.assertEqual(len(res), 3)
         status_code, content, headers = res
         self.assertEqual(status_code, 200)
-        self.assertIn("text/csv", headers["Content-Type"])
+        self.assertEqual(headers["Content-Type"], "application/octet-stream")
         self.assertIn("Shopify_Produits_Kodo_POS_draft_", headers["Content-Disposition"])
         
         # Décodage et vérification du contenu
@@ -298,6 +298,30 @@ class TestShopifyCatalogExport(unittest.TestCase):
         self.assertGreaterEqual(len(reader), 1)
         self.assertEqual(reader[0]["Status"], "draft")
         self.assertEqual(reader[0]["Published"], "FALSE")
+
+    def test_12_api_route_save_action_json(self):
+        """Vérifie l'exportation par action directe save (mode natif desktop avec sauvegarde locale)."""
+        pid = self._insert_product("555444", "Tunique Soie", "Tuniques", "Kodo", 60.0)
+        self._insert_stock(pid, "M", 2)
+        self.conn.commit()
+
+        res = handle_products_request(
+            "POST",
+            "/api/products/export/shopify",
+            {},
+            {"action": "save", "status": "active", "reveal": False}
+        )
+        self.assertEqual(len(res), 2)
+        status_code, body = res
+        self.assertEqual(status_code, 200)
+        self.assertTrue(body["success"])
+        self.assertTrue(os.path.exists(body["filePath"]))
+        self.assertIn("Shopify_Produits_Kodo_POS_active_", body["filename"])
+        
+        # Nettoyage
+        if os.path.exists(body["filePath"]):
+            os.remove(body["filePath"])
+
 
     def test_09_adversarial_dirty_data_resilience(self):
         """Résilience aux données sales ou corrompues : prix nuls, textes dans les champs numériques, TVA 0%."""
