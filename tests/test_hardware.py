@@ -235,3 +235,43 @@ def test_l_expression_de_detection_est_bien_celle_du_serveur():
         "l'expression de détection des imprimantes a changé : le test ne la couvre plus")
     assert "riph" not in source.split("lpstat")[2][:600], (
         "la détection des imprimantes est de nouveau écrite en français")
+
+
+def test_imprimer_ticket_caisse_with_mock_driver(monkeypatch, tmp_path):
+    """Vérifie que imprimer_ticket_caisse requêtes correctement la BDD et appelle send_raw sans erreur SQL."""
+    import database_manager
+    from kodo_core.hardware.printer import imprimer_ticket_caisse, ESCPOSThermalPrinter
+
+    db_file = str(tmp_path / "test_kodo_printer.db")
+    monkeypatch.setattr(database_manager, "DB_NAME", db_file)
+    database_manager.initialiser_db()
+
+    conn = database_manager.get_connection()
+    c = conn.cursor()
+    c.execute("INSERT INTO Produits (id, nom, prix_vente_tvac, taux_tva) VALUES (999, 'Robe Ete', 50.0, 21.0)")
+    c.execute("INSERT INTO Stocks (id, id_produit, taille, quantite_actuelle) VALUES (888, 999, 'M', 10)")
+    c.execute("""
+        INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, remise, methode_paiement, rendu_monnaie, vendeur_nom)
+        VALUES ('TCK-TEST-001', '2026-09-24 12:00:00', 50.0, 0, 'CB', 0, 'Alice')
+    """)
+    t_id = c.lastrowid
+    c.execute("""
+        INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac)
+        VALUES (?, 888, 1, 50.0)
+    """, (t_id,))
+    conn.commit()
+    conn.close()
+
+    sent_raw = []
+    def fake_send_raw(self, raw_bytes):
+        sent_raw.append(raw_bytes)
+        return True
+
+    monkeypatch.setattr(ESCPOSThermalPrinter, "send_raw", fake_send_raw)
+
+    success = imprimer_ticket_caisse("TCK-TEST-001")
+    assert success is True
+    assert len(sent_raw) == 1
+    assert b"TCK-TEST-001" in sent_raw[0]
+    assert b"Robe Ete" in sent_raw[0]
+

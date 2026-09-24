@@ -1124,7 +1124,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100) 
 
         # Articles
         c.execute("""
-            SELECT p.nom, s.taille, vd.quantite, vd.prix_unitaire_tvac, vd.taux_tva
+            SELECT p.nom, s.taille, vd.quantite, vd.prix_unitaire_tvac, COALESCE(p.taux_tva, 21.0)
             FROM Ventes_Details vd
             LEFT JOIN Stocks s ON vd.id_stock = s.id
             LEFT JOIN Produits p ON s.id_produit = p.id
@@ -1163,18 +1163,26 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100) 
             mt_base = Decimal(str(total_tvac)) + (ecart_dec if is_cash else Decimal("0.00"))
             paiements = [(methode or "Espèces", mt_base)]
 
-        # Infos Boutique
+        # Infos Boutique & Imprimante
         shop_name = "Mon Commerce"
         shop_sub = "Boutique"
         shop_addr = ""
         shop_vat = TVA_NON_RENSEIGNEE
         try:
-            c.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'shop_%'")
+            c.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'shop_%' OR cle IN ('printer_ip', 'printer_name')")
             params = dict(c.fetchall())
             shop_name = params.get("shop_name", shop_name)
             shop_sub = params.get("shop_subtitle", shop_sub)
             shop_addr = params.get("shop_address", shop_addr)
             shop_vat = params.get("shop_vat", shop_vat)
+            if not host:
+                cfg_ip = (params.get("printer_ip") or "").strip()
+                if cfg_ip and cfg_ip != "192.168.1.150":
+                    host = cfg_ip
+            if not printer_name:
+                cfg_name = (params.get("printer_name") or "").strip()
+                if cfg_name:
+                    printer_name = cfg_name
         except Exception:
             pass
 
@@ -1314,7 +1322,9 @@ def imprimer_ticket_test(printer_name=None, host=None, port=9100):
     shop_addr = params.get("shop_address", "")
     shop_vat = params.get("shop_tva", params.get("shop_bce", TVA_NON_RENSEIGNEE))
     shop_iban = params.get("shop_iban", "")
-    printer_ip = host or params.get("printer_ip", "192.168.1.150")
+    printer_ip = (host or params.get("printer_ip", "") or "").strip()
+    if printer_ip == "192.168.1.150":
+        printer_ip = ""
 
     txt = generer_ticket_test(
         shop_name=shop_name,
@@ -1325,7 +1335,7 @@ def imprimer_ticket_test(printer_name=None, host=None, port=9100):
     )
 
     num_test = datetime.datetime.now().strftime("TEST-%H%M%S")
-    path_or_success = imprimer_ticket(txt, numero=num_test, printer_name=printer_name, host=printer_ip, port=port)
+    path_or_success = imprimer_ticket(txt, numero=num_test, printer_name=printer_name, host=printer_ip or None, port=port)
     return {
         "success": True,
         "receiptNumber": num_test,
