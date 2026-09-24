@@ -201,12 +201,36 @@ sqlite3.register_adapter(Decimal, adapt_decimal)
 sqlite3.register_converter("DECIMAL", convert_decimal)
 
 
+def _get_security_salt(salt=None) -> str:
+    """
+    Dérive un sel cryptographique robuste.
+    Priorité :
+    1. Sel explicite passé en argument.
+    2. Variable d'environnement KODO_SALT.
+    3. Empreinte matérielle HWID liée à l'hôte physique (anti-clonage de base de données).
+    4. Fallback statique sécurisé (rétrocompatibilité).
+    """
+    if salt:
+        return salt
+    env_salt = os.environ.get("KODO_SALT")
+    if env_salt:
+        return env_salt
+    try:
+        from kodo_core.services.license import get_machine_fingerprint
+        hw_fp = get_machine_fingerprint()
+        if hw_fp and hw_fp != "DEFAULT_HWID_000":
+            return f"KODO_POS_{hw_fp}_2026"
+    except Exception:
+        pass
+    return "KODO_POS_SECURE_SALT_2026"
+
+
 def hash_pin_sha256(pin_plain, salt=None):
-    """Ancien hachage SHA-256 avec sel statique (conservé pour rétrocompatibilité)."""
+    """Ancien hachage SHA-256 avec sel (conservé pour rétrocompatibilité)."""
     if not pin_plain:
         return ""
     import hashlib
-    s = salt or os.environ.get("KODO_SALT", "KODO_POS_SECURE_SALT_2026")
+    s = _get_security_salt(salt)
     return hashlib.sha256((str(pin_plain) + s).encode('utf-8')).hexdigest()
 
 
@@ -218,28 +242,41 @@ def hash_pin(pin_plain, salt=None):
     if not pin_plain:
         return ""
     import hashlib
-    s = salt or os.environ.get("KODO_SALT", "KODO_POS_SECURE_SALT_2026")
+    s = _get_security_salt(salt)
     return hashlib.pbkdf2_hmac('sha256', (str(pin_plain) + s).encode('utf-8'), s.encode('utf-8'), 100_000).hex()
 
 
 def verify_pin_hash(pin_plain, stored_hash, salt=None):
     """
     Vérifie un code PIN contre une empreinte stockée en BDD.
-    Supporte PBKDF2 (format courant) et SHA-256 (format historique).
+    Supporte PBKDF2 (format courant avec sel machine) et formats historiques.
     Retourne (is_valid: bool, needs_rehash: bool).
     """
     if not pin_plain or not stored_hash:
         return False, False
     import hmac
-    s = salt or os.environ.get("KODO_SALT", "KODO_POS_SECURE_SALT_2026")
-    # 1. Vérification PBKDF2 (courant)
-    pbkdf2_h = hash_pin(pin_plain, s)
+
+    # 1. Vérification avec le sel courant (machine-bound ou KODO_SALT)
+    current_salt = _get_security_salt(salt)
+    pbkdf2_h = hash_pin(pin_plain, current_salt)
     if hmac.compare_digest(pbkdf2_h, stored_hash):
         return True, False
-    # 2. Vérification SHA-256 (hérité)
-    legacy_h = hash_pin_sha256(pin_plain, s)
+
+    legacy_h = hash_pin_sha256(pin_plain, current_salt)
     if hmac.compare_digest(legacy_h, stored_hash):
         return True, True
+
+    # 2. Repli avec sel statique historique (pour migration transparente)
+    legacy_static = "KODO_POS_SECURE_SALT_2026"
+    if current_salt != legacy_static:
+        pbkdf2_static = hash_pin(pin_plain, legacy_static)
+        if hmac.compare_digest(pbkdf2_static, stored_hash):
+            return True, True
+
+        sha_static = hash_pin_sha256(pin_plain, legacy_static)
+        if hmac.compare_digest(sha_static, stored_hash):
+            return True, True
+
     return False, False
 
 

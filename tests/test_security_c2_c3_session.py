@@ -139,6 +139,14 @@ class TestSecurityC2C3Session(unittest.TestCase):
         is_val, needs_reh = verify_pin_hash("0000", pbkdf2_hash)
         self.assertFalse(is_val)
 
+    def test_pin_verify_machine_bound_and_legacy_rehash(self):
+        legacy_salt_hash = hash_pin("4321", salt="KODO_POS_SECURE_SALT_2026")
+        is_val, needs_reh = verify_pin_hash("4321", legacy_salt_hash)
+        self.assertTrue(is_val)
+        from database_manager import _get_security_salt
+        if _get_security_salt() != "KODO_POS_SECURE_SALT_2026":
+            self.assertTrue(needs_reh)
+
     def test_pin_verify_rate_limiting_anti_bruteforce(self):
         headers = {"remote-addr": "127.0.0.1"}
 

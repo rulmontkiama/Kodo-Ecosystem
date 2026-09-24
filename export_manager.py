@@ -8,14 +8,53 @@ import os
 import json
 import re
 import unicodedata
+import tempfile
 from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection
 
-EXPORT_DIR = "Exports_Kodo_POS"
+def get_export_dir() -> str:
+    """
+    Retourne le chemin absolu du dossier d'exportation garanti inscriptible
+    (support macOS App Bundle .app, Finder, Windows %APPDATA%, et Linux).
+    """
+    candidates = []
+    try:
+        from database_manager import data_path
+        candidates.append(data_path("Exports"))
+    except Exception:
+        pass
+    try:
+        from kodo_core.config import ShopConfig
+        candidates.append(os.path.join(ShopConfig.get_base_data_dir(), "Exports"))
+    except Exception:
+        pass
+    candidates.append(os.path.expanduser("~/Documents/Kodo_POS/Exports"))
+    candidates.append(os.path.expanduser("~/Library/Application Support/Kodo_POS/Exports"))
+    candidates.append(os.path.join(tempfile.gettempdir(), "Kodo_POS_Exports"))
+    candidates.append(tempfile.gettempdir())
+
+    for path in candidates:
+        try:
+            os.makedirs(path, exist_ok=True)
+            test_probe = os.path.join(path, f".write_test_{os.getpid()}")
+            with open(test_probe, "wb") as f:
+                f.write(b"1")
+            if os.path.exists(test_probe):
+                os.remove(test_probe)
+            return path
+        except Exception:
+            continue
+
+    return tempfile.gettempdir()
+
+
+EXPORT_DIR = get_export_dir()
 
 def _ensure_dir():
-    if not os.path.exists(EXPORT_DIR):
-        os.makedirs(EXPORT_DIR)
+    global EXPORT_DIR
+    EXPORT_DIR = get_export_dir()
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    return EXPORT_DIR
 
 def export_comptable_belge():
     """
@@ -784,19 +823,29 @@ def export_shopify_catalog_csv(status: str = "active", output_path: str = None, 
 
     try:
         c = conn.cursor()
-        c.execute("""
+        c.execute("PRAGMA table_info(Produits)")
+        cols_produits = {r[1].lower(): True for r in c.fetchall()}
+
+        col_marque = "p.marque" if "marque" in cols_produits else "NULL as marque"
+        col_achat = "p.prix_achat_htva" if "prix_achat_htva" in cols_produits else "NULL as prix_achat_htva"
+        col_img = "p.image_path" if "image_path" in cols_produits else "NULL as image_path"
+        col_solde = "p.en_solde" if "en_solde" in cols_produits else "0 as en_solde"
+        col_prix_solde = "p.prix_solde_tvac" if "prix_solde_tvac" in cols_produits else "NULL as prix_solde_tvac"
+        col_taux_tva = "p.taux_tva" if "taux_tva" in cols_produits else "0.21 as taux_tva"
+
+        c.execute(f"""
             SELECT 
                 p.id, 
                 p.code_barre, 
                 p.nom, 
                 p.categorie, 
-                p.marque,
+                {col_marque},
                 p.prix_vente_tvac, 
-                p.prix_achat_htva, 
-                p.taux_tva, 
-                p.en_solde, 
-                p.prix_solde_tvac,
-                p.image_path
+                {col_achat}, 
+                {col_taux_tva}, 
+                {col_solde}, 
+                {col_prix_solde},
+                {col_img}
             FROM Produits p
             ORDER BY p.id ASC
         """)
@@ -944,11 +993,11 @@ def export_shopify_catalog_csv(status: str = "active", output_path: str = None, 
                 rows.append(row)
 
         if output_path is None:
-            _ensure_dir()
+            export_directory = _ensure_dir()
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = os.path.join(EXPORT_DIR, f"export_shopify_produits_{ts}.csv")
+            output_path = os.path.join(export_directory, f"export_shopify_produits_{ts}.csv")
         else:
-            out_dir = os.path.dirname(output_path)
+            out_dir = os.path.dirname(os.path.abspath(output_path))
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
 

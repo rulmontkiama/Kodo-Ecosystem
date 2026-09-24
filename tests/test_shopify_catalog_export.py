@@ -385,11 +385,40 @@ class TestShopifyCatalogExport(unittest.TestCase):
         self.assertTrue(os.path.exists(custom_path))
 
         # Nettoyage
-        if os.path.exists(custom_path):
-            os.remove(custom_path)
-        if os.path.exists(custom_dir):
-            os.removedirs(custom_dir)
+    def test_11_default_export_dir_and_readonly_cwd(self):
+        """Vérifie que l'export sans output_path fonctionne même si CWD est en lecture seule (ex: '/' sous macOS .app)."""
+        pid = self._insert_product("888999", "Produit CWD Test", "Test", "Marque", 25.0)
+        self._insert_stock(pid, "TU", 3)
+        self.conn.commit()
+
+        orig_cwd = os.getcwd()
+        try:
+            # Tente de passer dans '/' si permis (simulation macOS .app bundle)
+            try:
+                os.chdir('/')
+            except OSError:
+                pass
+
+            export_dir = export_manager.get_export_dir()
+            self.assertTrue(os.path.isabs(export_dir))
+            self.assertTrue(os.path.exists(export_dir))
+
+            # Test export direct avec output_path=None
+            csv_path = export_shopify_catalog_csv(status="active", output_path=None, conn=self.conn)
+            self.assertTrue(os.path.exists(csv_path))
+            self.assertTrue(os.path.isabs(csv_path))
+            
+            with open(csv_path, "r", encoding="utf-8-sig") as f:
+                content = f.read()
+                self.assertIn("Handle", content)
+                self.assertIn("Produit CWD Test", content)
+
+            if os.path.exists(csv_path):
+                os.remove(csv_path)
+        finally:
+            os.chdir(orig_cwd)
 
 
 if __name__ == "__main__":
     unittest.main()
+

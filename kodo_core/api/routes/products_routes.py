@@ -313,13 +313,24 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
             status_param = "active"
         try:
             import export_manager
-            csv_path = export_manager.export_shopify_catalog_csv(status=status_param)
-            with open(csv_path, 'rb') as f:
-                csv_bytes = f.read()
-
+            import tempfile
             import datetime
             ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"Shopify_Produits_Kodo_POS_{status_param}_{ts_str}.csv"
+
+            fd, temp_csv = tempfile.mkstemp(prefix="shopify_export_", suffix=".csv")
+            os.close(fd)
+            try:
+                export_manager.export_shopify_catalog_csv(status=status_param, output_path=temp_csv)
+                with open(temp_csv, 'rb') as f:
+                    csv_bytes = f.read()
+            finally:
+                if os.path.exists(temp_csv):
+                    try:
+                        os.remove(temp_csv)
+                    except Exception:
+                        pass
+
             headers_out = {
                 'Content-Type': 'text/csv; charset=utf-8',
                 'Content-Disposition': f'attachment; filename="{filename}"',
@@ -327,7 +338,7 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
             }
             return 200, csv_bytes, headers_out
         except Exception as e:
-            print(f"[SHOPIFY EXPORT ERROR] {e}")
+            logger.exception(f"[SHOPIFY EXPORT ERROR] {e}")
             return 500, {"success": False, "error": f"Erreur lors de l'exportation Shopify : {e}"}
 
     # 2. Ajout / Édition Produit

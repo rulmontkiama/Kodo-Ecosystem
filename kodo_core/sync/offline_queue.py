@@ -57,12 +57,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def compute_backoff_delay(retry_count: int, base_seconds: float = 1.0, max_seconds: float = 300.0) -> float:
+    """
+    Calcule un délai d'attente exponentiel avec Full Jitter (Norme FinTech / AWS Architecture).
+    Formule : min(max_seconds, base_seconds * (2 ** max(0, retry_count))) * (0.5 + random * 0.5).
+    Prévient le phénomène de 'thundering herd' lors du rétablissement de la connexion réseau.
+    """
+    import random
+    raw_backoff = min(max_seconds, base_seconds * (2 ** max(0, retry_count)))
+    return raw_backoff * (0.5 + random.random() * 0.5)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 class OfflineQueueManager:
     """Gère la persistance et le rejeu de la file de synchronisation offline-first."""
+
+    @staticmethod
+    def get_backoff_delay(retry_count: int, base_seconds: float = 1.0, max_seconds: float = 300.0) -> float:
+        return compute_backoff_delay(retry_count, base_seconds, max_seconds)
 
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn

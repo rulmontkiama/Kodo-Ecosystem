@@ -45,16 +45,27 @@ def hash_pin(pin_plain: str, salt: str = None) -> str:
 
 
 def verify_pin_hash(pin_plain: str, stored_hash: str, salt: str = None) -> Tuple[bool, bool]:
-    """Vérifie un code PIN contre une empreinte (PBKDF2 ou SHA-256 legacy)."""
+    """Vérifie un code PIN contre une empreinte (PBKDF2 ou SHA-256 legacy, avec support rehash)."""
     if not pin_plain or not stored_hash:
         return False, False
-    s = salt or ShopConfig.get_salt()
-    pbkdf2_h = hash_pin(pin_plain, s)
+    current_salt = salt or ShopConfig.get_salt()
+    # 1. PBKDF2 avec le sel courant
+    pbkdf2_h = hash_pin(pin_plain, current_salt)
     if hmac.compare_digest(pbkdf2_h, stored_hash):
         return True, False
-    legacy_h = hash_pin_sha256(pin_plain, s)
+    # 2. SHA-256 legacy avec le sel courant
+    legacy_h = hash_pin_sha256(pin_plain, current_salt)
     if hmac.compare_digest(legacy_h, stored_hash):
         return True, True
+    # 3. Repli PBKDF2 / SHA-256 avec sel statique historique (pour migration transparente)
+    legacy_static = "KODO_POS_SECURE_SALT_2026"
+    if current_salt != legacy_static:
+        pbkdf2_static = hash_pin(pin_plain, legacy_static)
+        if hmac.compare_digest(pbkdf2_static, stored_hash):
+            return True, True
+        sha_static = hash_pin_sha256(pin_plain, legacy_static)
+        if hmac.compare_digest(sha_static, stored_hash):
+            return True, True
     return False, False
 
 class SafeConnection:

@@ -178,3 +178,22 @@ def test_stock_ajuste_delta_resolution_allows_additive_merge_semantics(manager):
     # La résolution de conflit "delta relatif" attend que la somme des deltas soit
     # appliquée, contrairement à un écrasement par la dernière valeur absolue.
     assert sum(applied_deltas) == 3
+
+
+def test_compute_backoff_delay_exponential_with_jitter():
+    from kodo_core.sync.offline_queue import compute_backoff_delay
+    for r in range(5):
+        delay = compute_backoff_delay(r, base_seconds=1.0, max_seconds=300.0)
+        max_bound = min(300.0, 1.0 * (2 ** r))
+        min_bound = max_bound * 0.5
+        assert min_bound <= delay <= max_bound
+
+    # Vérification du plafond max_seconds
+    capped_delay = compute_backoff_delay(20, base_seconds=1.0, max_seconds=60.0)
+    assert 30.0 <= capped_delay <= 60.0
+
+
+def test_offline_queue_manager_get_backoff_delay():
+    delay = OfflineQueueManager.get_backoff_delay(1, base_seconds=2.0)
+    assert 1.0 <= delay <= 4.0
+

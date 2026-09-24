@@ -216,6 +216,7 @@ class ESCPOSThermalPrinter:
                 print(f"[ERROR win32print] {e}")
 
             # Fallback spooler Windows via fichier temporaire
+            temp_path = None
             try:
                 fd, temp_path = tempfile.mkstemp(prefix="kodo_win_", suffix=".bin")
                 with os.fdopen(fd, 'wb') as f:
@@ -223,53 +224,62 @@ class ESCPOSThermalPrinter:
                 
                 cmd = f'copy /b "{temp_path}" "{self.printer_name or "PRN"}"'
                 res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
                 if res.returncode == 0:
                     print("[SUCCESS] Ticket imprimé sous Windows via spooler CMD.")
                     return True
             except Exception as e:
                 print(f"[ERROR Spooler Windows] {e}")
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
 
         # 3. Impression sous macOS & Linux (CUPS / lp / lpr)
         if sys.platform in ['darwin', 'linux']:
-            fd, temp_path = tempfile.mkstemp(prefix="kodo_pos_", suffix=".bin")
-            with os.fdopen(fd, 'wb') as f:
-                f.write(raw_bytes)
-
-            printed = False
-            # Tentative via lp -o raw (timeout strict 2.0s pour éviter de figer le thread)
+            temp_path = None
             try:
-                cmd = ["lp", "-o", "raw"]
-                if self.printer_name:
-                    cmd.extend(["-d", self.printer_name])
-                cmd.append(temp_path)
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
-                if res.returncode == 0:
-                    printed = True
-                    print("[SUCCESS] Ticket ESC/POS envoyé via CUPS (lp -o raw).")
-            except Exception as e:
-                print(f"[INFO] Échec lp ({e}), tentative via lpr...")
+                fd, temp_path = tempfile.mkstemp(prefix="kodo_pos_", suffix=".bin")
+                with os.fdopen(fd, 'wb') as f:
+                    f.write(raw_bytes)
 
-            # Fallback via lpr (timeout strict 2.0s)
-            if not printed:
+                printed = False
+                # Tentative via lp -o raw (timeout strict 2.0s pour éviter de figer le thread)
                 try:
-                    cmd = ["lpr", "-o", "raw"]
+                    cmd = ["lp", "-o", "raw"]
                     if self.printer_name:
-                        cmd.extend(["-P", self.printer_name])
+                        cmd.extend(["-d", self.printer_name])
                     cmd.append(temp_path)
                     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
                     if res.returncode == 0:
                         printed = True
-                        print("[SUCCESS] Ticket ESC/POS envoyé via lpr.")
+                        print("[SUCCESS] Ticket ESC/POS envoyé via CUPS (lp -o raw).")
                 except Exception as e:
-                    print(f"[ERROR lpr] {e}")
+                    print(f"[INFO] Échec lp ({e}), tentative via lpr...")
 
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+                # Fallback via lpr (timeout strict 2.0s)
+                if not printed:
+                    try:
+                        cmd = ["lpr", "-o", "raw"]
+                        if self.printer_name:
+                            cmd.extend(["-P", self.printer_name])
+                        cmd.append(temp_path)
+                        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.0)
+                        if res.returncode == 0:
+                            printed = True
+                            print("[SUCCESS] Ticket ESC/POS envoyé via lpr.")
+                    except Exception as e:
+                        print(f"[ERROR lpr] {e}")
 
-            if printed:
-                return True
+                if printed:
+                    return True
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
 
         return False
 

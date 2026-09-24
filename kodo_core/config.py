@@ -55,8 +55,18 @@ class ShopConfig:
 
     @classmethod
     def get_salt(cls) -> str:
-        """Retourne le sel cryptographique pour le hachage des PINs."""
-        return os.environ.get("KODO_SALT", "KODO_POS_SECURE_SALT_2026")
+        """Retourne le sel cryptographique pour le hachage des PINs (dérivé de la machine hôte ou d'environnement)."""
+        env_salt = os.environ.get("KODO_SALT")
+        if env_salt:
+            return env_salt
+        try:
+            from kodo_core.services.license import get_machine_fingerprint
+            hw_fp = get_machine_fingerprint()
+            if hw_fp and hw_fp != "DEFAULT_HWID_000":
+                return f"KODO_POS_{hw_fp}_2026"
+        except Exception:
+            pass
+        return "KODO_POS_SECURE_SALT_2026"
 
     @staticmethod
     def get_base_data_dir() -> str:

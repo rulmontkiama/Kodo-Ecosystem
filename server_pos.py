@@ -202,6 +202,7 @@ class POSRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', origin)
             self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
             self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            self.send_header('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length')
         self.send_header('Vary', 'Origin')
 
     def _requete_refusee(self, method: str) -> bool:
