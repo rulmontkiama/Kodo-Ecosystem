@@ -16,6 +16,7 @@ import urllib.parse
 import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection, signer_ticket, signer_ledger
+from kodo_core.sync.shopify_sku import prefixes_possibles, skus_produit
 
 logger = logging.getLogger("kodo_core.sync.shopify")
 if not logger.handlers:
@@ -313,17 +314,87 @@ def _assurer_tables_sync(cursor):
     )
 
 
+# --- Point de départ de la poussée des ventes ------------------------------------------------
+#
+# Tout ticket naît avec `synced_shopify = 0`. Sans point de départ, la première passe poussait
+# TOUT l'historique de la caisse vers une boutique dont le stock (importé du CSV de Kōdo, ou copié
+# depuis Shopify) en tenait déjà compte : chaque vente passée était décomptée une seconde fois.
+PARAM_SEUIL_TICKETS = "shopify_seuil_ticket"          # on ne pousse que les tickets d'id > seuil
+PARAM_ALIGNEMENT_TICKETS = "shopify_ticket_alignement"  # dernier ticket au dernier alignement des stocks
+
+
+def noter_alignement_stock(conn):
+    """
+    Retient le dernier ticket au moment où les deux stocks sont alignés : export du CSV Shopify
+    (le fichier fige le stock de Kōdo) ou import du catalogue Shopify (Kōdo copie le stock en ligne).
+    Le commit revient à l'appelant.
+    """
+    c = conn.cursor()
+    c.execute("SELECT COALESCE(MAX(id), 0) FROM Tickets")
+    dernier = int(c.fetchone()[0] or 0)
+    c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)",
+              (PARAM_ALIGNEMENT_TICKETS, str(dernier)))
+
+
+def fixer_seuil_tickets(conn=None) -> int:
+    """
+    Fixe, une fois pour toutes, le premier ticket à pousser vers Shopify. Retourne le seuil.
+
+    - Déjà fixé : on n'y touche plus (un redémarrage ne doit pas sauter les ventes en attente).
+    - La synchro a déjà poussé des lignes (installation antérieure) : seuil 0, rien ne change.
+    - Sinon : le dernier ticket au dernier export/import du catalogue, à défaut le dernier ticket
+      existant. Les ventes faites entre l'export et l'activation restent donc poussées.
+    """
+    propre = conn is None
+    if propre:
+        conn = get_connection()
+    try:
+        c = _ouvrir_ecriture(conn)
+        _assurer_tables_sync(c)
+        c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (PARAM_SEUIL_TICKETS,))
+        ligne = c.fetchone()
+        if ligne is not None:
+            conn.rollback()
+            try:
+                return int(ligne[0])
+            except (TypeError, ValueError):
+                return 0
+        c.execute("SELECT 1 FROM Shopify_Sync_Lignes LIMIT 1")
+        if c.fetchone() is not None:
+            seuil = 0
+        else:
+            c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (PARAM_ALIGNEMENT_TICKETS,))
+            alignement = c.fetchone()
+            if alignement is not None and str(alignement[0]).strip().isdigit():
+                seuil = int(alignement[0])
+            else:
+                c.execute("SELECT COALESCE(MAX(id), 0) FROM Tickets")
+                seuil = int(c.fetchone()[0] or 0)
+        c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)",
+                  (PARAM_SEUIL_TICKETS, str(seuil)))
+        conn.commit()
+        logger.info(f"Synchro Shopify : seules les ventes après le ticket n°{seuil} (id) seront poussées.")
+        return seuil
+    finally:
+        if propre:
+            conn.close()
+
+
 class ShopifySync:
     """Moteur principal de synchronisation REST & GraphQL pour Shopify."""
 
     PAGE_SIZE = 250
     MAX_PAGES = 200  # garde-fou : 50 000 produits
 
+    # `sku` et `barcode` sont demandés pour VÉRIFIER la réponse : la recherche Shopify n'est pas
+    # une égalité stricte et peut renvoyer une variante voisine (une autre taille du même produit).
     REQUETE_VARIANTE = """
     query($query: String!) {
-      productVariants(first: 1, query: $query) {
+      productVariants(first: 10, query: $query) {
         edges {
           node {
+            sku
+            barcode
             inventoryItem {
               id
             }
@@ -447,8 +518,18 @@ class ShopifySync:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 if e.code == 429:
-                    retry_after = int(e.headers.get("Retry-After", 2))
+                    # Shopify annonce le délai en décimal (« 2.0 ») : `int()` levait ici, hors
+                    # de toute reprise, et l'ajustement finissait classé coupure réseau.
+                    try:
+                        retry_after = min(max(float((e.headers or {}).get("Retry-After", 2)), 0.0), 60.0)
+                    except (TypeError, ValueError):
+                        retry_after = 2.0
                     logger.warning(f"Rate limited (429). Attente de {retry_after}s (essai {attempt}/{max_retries})...")
+                    if attempt == max_retries:
+                        # Essais épuisés sur un refus de débit : Shopify n'a rien appliqué. C'est
+                        # un échec « http » (à retenter), pas une coupure au résultat inconnu.
+                        self.dernier_echec = "http"
+                        return None
                     time.sleep(retry_after)
                     continue
                 else:
@@ -674,15 +755,27 @@ class ShopifySync:
 
         if res and not res.get("errors") and isinstance(res.get("data"), dict):
             edges = (res["data"].get("productVariants") or {}).get("edges") or []
+            par_sku = par_code_barres = None
             for edge in edges:
-                gid = ((edge.get("node") or {}).get("inventoryItem") or {}).get("id", "")
+                node = edge.get("node") or {}
+                gid = (node.get("inventoryItem") or {}).get("id", "")
                 try:
                     item_id = int(str(gid).split("/")[-1])
                 except (TypeError, ValueError):
                     continue
+                if "sku" not in node and "barcode" not in node:
+                    # Réponse sans les champs de contrôle : rien à vérifier, on la prend telle quelle.
+                    par_sku = par_sku or item_id
+                    continue
+                if str(node.get("sku") or "").strip() == str(sku):
+                    par_sku = par_sku or item_id
+                elif str(node.get("barcode") or "").strip() == str(sku):
+                    par_code_barres = par_code_barres or item_id
+            item_id = par_sku or par_code_barres
+            if item_id:
                 self._cache_inventaire[sku] = item_id
                 return item_id, False
-            # Réponse valide et vide : la variante n'existe vraiment pas chez Shopify.
+            # Réponse valide sans variante EXACTEMENT égale : elle n'existe pas chez Shopify.
             return None, False
 
         # GraphQL indisponible (jeton sans portée GraphQL, panne) → balayage REST complet.
@@ -729,6 +822,30 @@ class ShopifySync:
         return res is not None
 
     # --- Poussée des ventes locales vers Shopify --------------------------------------------
+
+    @staticmethod
+    def _skus_candidats(c, produit_id, code_barre, stock_id) -> list:
+        """
+        SKU Shopify sous lesquels chercher la ligne de stock vendue, du plus sûr au moins sûr.
+
+        Produit décliné : UNIQUEMENT le SKU de sa taille (`BI038-32`), celui qu'écrit l'export
+        CSV. Le code-barres du produit n'est jamais essayé : l'export ne le pose que sur la
+        première taille, il désignerait donc le 30 pour une vente de 32.
+        Produit à une seule ligne de stock : son code-barres d'abord (bases importées depuis
+        Shopify, où chaque variante est un produit dont le code EST le SKU), puis le SKU exporté.
+        """
+        c.execute("SELECT id, taille FROM Stocks WHERE id_produit = ? ORDER BY id", (produit_id,))
+        lignes = c.fetchall()
+        ids = [r[0] for r in lignes]
+        skus = skus_produit(code_barre, produit_id, [r[1] for r in lignes])
+        attendu = skus[ids.index(stock_id)] if stock_id in ids else None
+        candidats = []
+        code = str(code_barre).strip() if code_barre else ""
+        if len(lignes) == 1 and code:
+            candidats.append(code)
+        if attendu and attendu not in candidats:
+            candidats.append(attendu)
+        return candidats
 
     def _journaliser(self, conn, vd_id, t_id, code_barre, inv_item_id, quantite, statut):
         """Inscrit (ou laisse en place) la ligne de vente au journal de synchronisation."""
@@ -780,31 +897,47 @@ class ShopifySync:
                     f"statut {STATUT_INDETERMINE}, à vérifier dans le journal Shopify_Sync_Lignes."
                 )
 
-            c.execute("SELECT id, numero_ticket FROM Tickets WHERE synced_shopify = 0 ORDER BY id")
+            # Point de départ fixé à l'activation (`fixer_seuil_tickets`) : absent, rien n'est filtré.
+            c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (PARAM_SEUIL_TICKETS,))
+            ligne_seuil = c.fetchone()
+            try:
+                seuil = int(ligne_seuil[0]) if ligne_seuil else 0
+            except (TypeError, ValueError):
+                seuil = 0
+            c.execute("SELECT id, numero_ticket FROM Tickets WHERE synced_shopify = 0 AND id > ? ORDER BY id",
+                      (seuil,))
             tickets = c.fetchall()
 
             for t_id, num in tickets:
+                # Les produits sans code-barres ne sont plus écartés : l'export les publie sous
+                # un SKU `KODO-<id>`, par lequel on les retrouve.
                 c.execute("""
-                    SELECT vd.id, p.code_barre, vd.quantite
+                    SELECT vd.id, p.id, p.code_barre, s.id, vd.quantite
                     FROM Ventes_Details vd
                     JOIN Stocks s ON vd.id_stock = s.id
                     JOIN Produits p ON s.id_produit = p.id
                     LEFT JOIN Shopify_Sync_Lignes j ON j.id_vente_detail = vd.id
                     WHERE vd.id_ticket = ?
                       AND j.id_vente_detail IS NULL
-                      AND p.code_barre IS NOT NULL AND p.code_barre != ''
                     ORDER BY vd.id
                 """, (t_id,))
                 lignes = c.fetchall()
 
                 tout_pousse = True
-                for vd_id, code_barre, quantite in lignes:
+                for vd_id, produit_id, code_produit, stock_id, quantite in lignes:
+                    candidats = self._skus_candidats(c, produit_id, code_produit, stock_id)
+                    code_barre = candidats[0] if candidats else code_produit
                     qte = int(quantite or 0)
                     if qte == 0:
                         self._journaliser(conn, vd_id, t_id, code_barre, None, 0, STATUT_SANS_OBJET)
                         continue
 
-                    inv_item_id, echec_reseau = self._resoudre_inventory_item(code_barre)
+                    inv_item_id, echec_reseau = None, False
+                    for candidat in candidats:
+                        inv_item_id, echec_reseau = self._resoudre_inventory_item(candidat)
+                        if inv_item_id or echec_reseau:
+                            code_barre = candidat
+                            break
                     if echec_reseau:
                         logger.error(f"Recherche Shopify impossible pour SKU {code_barre} : ligne retentée plus tard.")
                         tout_pousse = False
@@ -944,6 +1077,14 @@ class ShopifySync:
                     produit_id = row[0]
                     break
 
+        if produit_id is None:
+            # SKU de déclinaison écrit par l'export CSV (`BI038-32`) : il désigne le produit ET la
+            # taille. C'est la seule clé d'une variante exportée sans code-barres (toutes sauf la
+            # première) dès que son titre a été modifié dans l'admin Shopify.
+            ligne = self._resoudre_sku_export(c, sku)
+            if ligne:
+                return ligne[0], ligne[1], None
+
         if produit_id is None and titre_article:
             # Repli par nom accepté UNIQUEMENT s'il ne désigne qu'un seul article : avec un
             # `LIMIT 1`, deux homonymes (« Robe été » de deux marques) faisaient décrémenter
@@ -990,6 +1131,28 @@ class ShopifySync:
         if len(lignes) == 1:
             return lignes[0][0], produit_id, None
         return None, produit_id, "AMBIGU"
+
+    @staticmethod
+    def _resoudre_sku_export(c, sku):
+        """`(stock_id, produit_id)` de la ligne de stock dont l'export a produit ce SKU, ou None."""
+        sku = str(sku or "").strip()
+        if not sku:
+            return None
+        for prefixe in prefixes_possibles(sku):
+            produits = [r[0] for r in c.execute(
+                "SELECT id FROM Produits WHERE code_barre = ?", (prefixe,)).fetchall()]
+            if prefixe.startswith("KODO-") and prefixe[5:].isdigit():
+                produits.append(int(prefixe[5:]))
+            for pid in produits:
+                c.execute("SELECT id, taille FROM Stocks WHERE id_produit = ? ORDER BY id", (pid,))
+                lignes = c.fetchall()
+                code = c.execute("SELECT code_barre FROM Produits WHERE id = ?", (pid,)).fetchone()
+                if not code:
+                    continue
+                skus = skus_produit(code[0], pid, [r[1] for r in lignes])
+                if sku in skus:
+                    return lignes[skus.index(sku)][0], pid
+        return None
 
     @staticmethod
     def _marquer_audit(c, stock_id, produit_id):
@@ -1759,6 +1922,8 @@ class ShopifySync:
 
                     imported_count += 1
 
+            # Kōdo vient de copier le stock en ligne : les ventes antérieures y sont déjà comptées.
+            noter_alignement_stock(conn)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1853,6 +2018,9 @@ class ShopifySyncThread(threading.Thread):
         self.engine.dernier_echec = None
         if self.engine.auto_sync:
             try:
+                # Filet si la poussée est allumée pendant que le fil tourne déjà : jamais
+                # l'historique. Sans effet une fois le seuil fixé.
+                fixer_seuil_tickets()
                 tickets = self.engine.sync_tickets_to_shopify()
             except Exception as e:
                 logger.error(f"Poussée des ventes vers Shopify interrompue : {e}")
@@ -1947,10 +2115,19 @@ def start_auto_sync(force: bool = False):
         return None
 
     with _verrou_auto:
+        reglages = lire_reglages_shopify()
+        if reglages["store_url"] and reglages["access_token"] and reglages["auto_sync"]:
+            # Branchement de la poussée des ventes : l'historique déjà vendu n'est pas repoussé.
+            # Sans effet si le seuil est déjà fixé.
+            try:
+                fixer_seuil_tickets()
+            except Exception as e:
+                logger.error(f"Point de départ de la synchro Shopify non fixé : {e}")
+                return None
+
         if _thread_auto is not None and _thread_auto.is_alive():
             return _thread_auto
 
-        reglages = lire_reglages_shopify()
         if not reglages["store_url"] or not reglages["access_token"]:
             logger.info("Shopify non configuré (URL ou jeton absent) : synchronisation automatique non démarrée.")
             return None

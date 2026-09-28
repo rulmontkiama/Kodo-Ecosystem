@@ -11,6 +11,7 @@ import unicodedata
 import tempfile
 from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection
+from kodo_core.sync.shopify_sku import est_sans_taille as _est_sans_taille, sku_variante
 
 def get_export_dir() -> str:
     """
@@ -919,9 +920,9 @@ def export_shopify_catalog_csv(status: str = "active", output_path: str = None, 
                 tags_parts.append(str(marque).strip())
             tags_str = ", ".join(tags_parts)
 
-            est_mono_variante = (len(variantes) == 1)
-            premiere_taille_norm = (variantes[0][0] or "").strip().lower() if variantes else ""
-            est_sans_taille = est_mono_variante and (premiere_taille_norm in ("", "unique", "taille unique", "tu", "default title", "__no_size__"))
+            # Règle partagée avec la synchro : c'est par ces SKU qu'une vente en caisse retrouve
+            # SA taille sur Shopify (voir kodo_core/sync/shopify_sku.py).
+            est_sans_taille = _est_sans_taille([t for t, _ in variantes])
 
             d_tva = None
             if taux_tva is not None and str(taux_tva).strip() != "":
@@ -958,14 +959,8 @@ def export_shopify_catalog_csv(status: str = "active", output_path: str = None, 
                     row["Option1 Name"] = "Taille"
                     row["Option1 Value"] = t_label
 
-                # SKU unique et sans espace
-                if est_sans_taille:
-                    row["Variant SKU"] = barcode_clean if barcode_clean else f"KODO-{p_id}"
-                else:
-                    sku_suffix = re.sub(r'[^A-Za-z0-9_-]', '', t_label)
-                    if not sku_suffix:
-                        sku_suffix = f"V{idx + 1}"
-                    row["Variant SKU"] = f"{barcode_clean}-{sku_suffix}" if barcode_clean else f"KODO-{p_id}-{sku_suffix}"
+                # SKU unique et sans espace, un par taille
+                row["Variant SKU"] = sku_variante(barcode_clean, p_id, taille, idx, est_sans_taille)
 
                 # Code-barres : pour éviter le rejet Shopify 'Barcode has already been taken',
                 # seul le premier variant reçoit le code-barres si le catalogue ne différencie pas par taille
@@ -1006,6 +1001,15 @@ def export_shopify_catalog_csv(status: str = "active", output_path: str = None, 
             writer = csv.DictWriter(f, fieldnames=SHOPIFY_PRODUCT_HEADERS, delimiter=",")
             writer.writeheader()
             writer.writerows(rows)
+
+        # Le fichier fige le stock de Kōdo : les ventes déjà faites y sont comptées et ne devront
+        # pas être repoussées vers Shopify quand la synchro sera branchée (seules les suivantes).
+        try:
+            from kodo_core.sync.shopify import noter_alignement_stock
+            noter_alignement_stock(conn)
+            conn.commit()
+        except Exception as e:
+            print(f"⚠️ [EXPORT SHOPIFY] Point d'alignement du stock non enregistré : {e}")
 
         return output_path
 

@@ -326,6 +326,72 @@ class TestTransport(BaseTemporaire):
         self.assertEqual(moteur.dernier_echec, "reseau",
                          "Sans `dernier_echec = 'reseau'`, la ligne n'est pas marquée INDETERMINE.")
 
+    def test_un_ajustement_refuse_par_le_plafond_de_debit_reste_a_pousser(self):
+        """
+        Trois 429 d'affilée : Shopify garantit n'avoir RIEN appliqué.
+
+        Après les essais épuisés, l'échec était pourtant rangé en « réseau » : la ligne de vente
+        passait INDETERMINE et n'était plus jamais renvoyée. Au retour d'une coupure, une rafale
+        de ventes pouvait ainsi laisser des pièces vendues en caisse encore en vente en ligne.
+        """
+        self.regler_shopify("boutique.myshopify.com", "jeton")
+        moteur = ShopifySync()
+        essais = []
+
+        def urlopen_plafonne(req, *a, **k):
+            essais.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests",
+                                         {"Retry-After": "0"}, None)
+
+        original, dormir = urllib.request.urlopen, time.sleep
+        urllib.request.urlopen = urlopen_plafonne
+        time.sleep = lambda _s: None
+        try:
+            applique = moteur.adjust_shopify_stock(777, 111, -1)
+        finally:
+            urllib.request.urlopen = original
+            time.sleep = dormir
+
+        self.assertFalse(applique)
+        self.assertEqual(len(essais), 3)
+        self.assertEqual(moteur.dernier_echec, "http",
+                         "Un 429 n'a rien appliqué : la ligne doit rester à pousser, pas INDETERMINE.")
+
+    def test_un_delai_d_attente_decimal_est_respecte(self):
+        """Shopify annonce `Retry-After: 2.0` : `int("2.0")` levait une exception hors retry."""
+        self.regler_shopify("boutique.myshopify.com", "jeton")
+        moteur = ShopifySync()
+        reponses = iter([429, 200])
+        attentes = []
+
+        class Reponse:
+            def read(self_inner):
+                return b'{"inventory_level": {"available": 0}}'
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def urlopen_une_fois_plafonne(req, *a, **k):
+            if next(reponses) == 429:
+                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests",
+                                             {"Retry-After": "2.0"}, None)
+            return Reponse()
+
+        original, dormir = urllib.request.urlopen, time.sleep
+        urllib.request.urlopen = urlopen_une_fois_plafonne
+        time.sleep = attentes.append
+        try:
+            applique = moteur.adjust_shopify_stock(777, 111, -1)
+        finally:
+            urllib.request.urlopen = original
+            time.sleep = dormir
+
+        self.assertTrue(applique, "Après l'attente demandée, l'ajustement doit passer.")
+        self.assertEqual(attentes, [2.0])
+
     def test_une_lecture_garde_ses_essais(self):
         """Le verrou ne doit pas rendre la synchro fragile : relire est sans conséquence."""
         self.regler_shopify("boutique.myshopify.com", "jeton")
