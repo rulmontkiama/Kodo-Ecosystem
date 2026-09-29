@@ -2163,6 +2163,17 @@ def auto_sync_actif() -> bool:
     return _thread_auto is not None and _thread_auto.is_alive()
 
 
+def reveiller_sync():
+    """
+    Réveille immédiatement le thread de synchronisation automatique Shopify
+    afin de pousser les nouvelles ventes ou retours en temps réel (< 2 secondes)
+    sans attendre l'échéance du cycle périodique de 60 secondes.
+    """
+    global _thread_auto
+    if _thread_auto is not None and _thread_auto.is_alive():
+        _thread_auto._reveil.set()
+
+
 def import_shopify_catalog(progress_callback=None):
     engine = ShopifySync()
     return engine.import_catalog(progress_callback=progress_callback)

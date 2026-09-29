@@ -584,6 +584,13 @@ def process_sale_transaction(
 
         conn.commit()
 
+        # Réveil immédiat de la synchronisation Shopify (temps réel < 2s pour pièces uniques)
+        try:
+            from kodo_core.sync.shopify import reveiller_sync
+            reveiller_sync()
+        except Exception:
+            pass
+
         # Scellement fiscal inaltérable (Conformité Loi Anti-fraude TVA)
         fiscal_totals = {
             "total_ttc": tot_tvac_dec,
@@ -676,6 +683,13 @@ def process_return_transaction(
         )
 
         conn.commit()
+
+        # Réveil immédiat de la synchronisation Shopify (temps réel < 2s pour pièces uniques)
+        try:
+            from kodo_core.sync.shopify import reveiller_sync
+            reveiller_sync()
+        except Exception:
+            pass
 
         return {
             "success": True,

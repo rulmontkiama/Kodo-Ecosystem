@@ -1,0 +1,33 @@
+#!/bin/bash
+# ==============================================================================
+# Pre-commit Hook — Kōdo POS (Mission Roi de Belgique)
+# Barrière anti-régression physique bloquant tout commit invalidant les tests
+# fiscaux, comptables, d'arrondis belges ou de typage frontend.
+# ==============================================================================
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+FRONT_DIR="/Users/kiamarulmont/Desktop/kōdo-pos-3"
+
+echo "🛡️ [PRE-COMMIT] Contrôle des Golden Contracts Kōdo POS..."
+
+# 1. Vérification des Golden Contracts fiscaux et d'intégrité
+cd "$REPO_ROOT"
+python3 -m pytest tests/test_golden_contracts.py -q || {
+    echo "❌ [PRE-COMMIT ÉCHEC] Violation d'un Golden Contract financier ou d'audit !"
+    echo "   Corrigez la régression avant de committer."
+    exit 1
+}
+
+# 2. Vérification TypeScript si le dossier frontend existe
+if [ -d "$FRONT_DIR" ]; then
+    echo "🔍 [PRE-COMMIT] Validation TypeScript frontend..."
+    (cd "$FRONT_DIR" && npm run lint >/dev/null 2>&1) || {
+        echo "❌ [PRE-COMMIT ÉCHEC] Erreur TypeScript ou ESLint dans le frontend !"
+        exit 1
+    }
+fi
+
+echo "✅ [PRE-COMMIT] Tous les garde-fous sont au vert. Commit autorisé."
+exit 0

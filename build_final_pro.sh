@@ -86,9 +86,9 @@ database_manager.initialiser_db()
 
 conn = sqlite3.connect(os.path.join('$SRC_DIR', 'kodo_pos.db'))
 c = conn.cursor()
-user_tables = ['produits', 'clients', 'ventes', 'ligne_ventes', 'stocks', 'sessions_caisse', 'depenses_caisse', 'ledger_caisse', 'rapports_z', 'clotures_z', 'tickets_en_attente']
-existing = [row[0] for row in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall()]
-total_user_rows = sum(c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in user_tables if t in existing)
+user_tables = ['tickets', 'ventes_details', 'produits', 'clients', 'ventes', 'ligne_ventes', 'stocks', 'sessions_caisse', 'depenses_caisse', 'ledger_caisse', 'rapports_z', 'clotures_caisse', 'clotures_z', 'tickets_en_attente', 'live_claims', 'live_buyers', 'live_sessions']
+existing_map = {row[0].lower(): row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+total_user_rows = sum(c.execute(f'SELECT COUNT(*) FROM {existing_map[t]}').fetchone()[0] for t in user_tables if t in existing_map)
 conn.close()
 if total_user_rows > 0:
     print(f'❌ ERREUR: La BDD usine kodo_pos.db contient {total_user_rows} donnees utilisateur !')

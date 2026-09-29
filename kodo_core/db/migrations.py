@@ -1307,6 +1307,15 @@ def initialiser_db(db_path: str = None, conn=None):
             END;
         ''')
 
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS prevent_clotures_caisse_tamper_delete
+            BEFORE DELETE ON Clotures_Caisse
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'Suppression interdite : clôture de caisse Z scellée (piste d''audit).');
+            END;
+        ''')
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_date ON Tickets(date_heure)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventes_details_ticket ON Ventes_Details(id_ticket)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_stocks_produit ON Stocks(id_produit)")

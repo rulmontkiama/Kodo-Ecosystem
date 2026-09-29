@@ -185,6 +185,37 @@ class TestRedTeamTicketAndCostPrice(unittest.TestCase):
         # Nettoyage
         InventoryManager.delete_product(pid)
 
+    def test_07_social_qr_long_text_and_top_ticket_no_glitch(self):
+        """7. Vérifie que les textes longs (ex: REJOIGNEZ-NOUS SUR INSTAGRAM) sont auto-adaptés sans coupure et que le flux ESC/POS initialise proprement."""
+        from kodo_core.hardware.printer import (
+            generate_social_qr_image,
+            pil_to_escpos_raster,
+            ESC_INIT,
+            ESC_ALIGN_LEFT
+        )
+        # Test long texts (Charessia case)
+        img = generate_social_qr_image(
+            header="SUIVEZ-NOUS SUR",
+            title="REJOIGNEZ-NOUS SUR INSTAGRAM",
+            subtitle="@charessia_signature_elegance",
+            url="https://instagram.com/charessia_signature_elegance",
+            width=512,
+            qr_size="large"
+        )
+        self.assertEqual(img.width, 512)
+        self.assertGreaterEqual(img.height, 120)
+
+        # Test raster slicing at full 512 dots width (64 bytes)
+        raster = pil_to_escpos_raster(img, target_width=512, center=True)
+        GS_V_0 = b"\x1d\x76\x30\x00"
+        slices = raster.split(GS_V_0)[1:]
+        self.assertGreater(len(slices), 0)
+        for s in slices:
+            bw = s[0] | (s[1] << 8)
+            self.assertEqual(bw, 64, "Chaque tranche doit être calibrée à 64 octets (512 dots)")
+            self.assertLessEqual(8 + len(s), 2048, "Chaque tranche doit respecter le micro-buffer de 2048 octets")
+
 
 if __name__ == "__main__":
     unittest.main()
+

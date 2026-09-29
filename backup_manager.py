@@ -16,7 +16,24 @@ import datetime
 import zipfile
 from typing import Dict, Any, Tuple, Optional, List
 
-from database_manager import DB_NAME
+import database_manager
+
+def _get_active_db_path() -> str:
+    """Retourne dynamiquement le chemin de la base de données active."""
+    global DB_NAME
+    if DB_NAME and os.path.exists(DB_NAME):
+        return DB_NAME
+    dm_path = getattr(database_manager, "DB_NAME", None)
+    if dm_path and os.path.exists(dm_path):
+        DB_NAME = dm_path
+        return dm_path
+    env_path = os.environ.get("KODO_DB_PATH")
+    if env_path and os.path.exists(env_path):
+        DB_NAME = env_path
+        return env_path
+    return DB_NAME or dm_path or "kodo_pos.db"
+
+DB_NAME = getattr(database_manager, "DB_NAME", "kodo_pos.db")
 
 
 def get_backup_directory() -> str:
@@ -27,6 +44,11 @@ def get_backup_directory() -> str:
     doc_dir = os.path.expanduser("~/Documents/Kodo_Backups")
     os.makedirs(doc_dir, exist_ok=True)
     return doc_dir
+
+
+def _get_audit_key_path() -> str:
+    """Retourne le chemin de la clé secrète HMAC locale d'audit."""
+    return os.path.expanduser("~/.kodo_signing/audit_hmac.key")
 
 
 def verifier_integrite_db(db_path: str) -> bool:
@@ -101,7 +123,8 @@ def creer_backup_local() -> Optional[str]:
     Crée une copie compressée de la base de données actuelle.
     """
     try:
-        if not os.path.exists(DB_NAME):
+        active_db = _get_active_db_path()
+        if not os.path.exists(active_db):
             return None
 
         backup_dir = get_backup_directory()
@@ -110,7 +133,7 @@ def creer_backup_local() -> Optional[str]:
         source_conn = None
         dest_conn = None
         try:
-            source_conn = sqlite3.connect(DB_NAME)
+            source_conn = sqlite3.connect(active_db)
             dest_conn = sqlite3.connect(temp_copy)
             source_conn.backup(dest_conn)
         finally:
@@ -122,7 +145,10 @@ def creer_backup_local() -> Optional[str]:
         try:
             zip_filename = os.path.join(backup_dir, f"kodo_backup_{timestamp}.zip")
             with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                zipf.write(temp_copy, arcname=os.path.basename(DB_NAME))
+                zipf.write(temp_copy, arcname=os.path.basename(active_db))
+                hmac_key_path = _get_audit_key_path()
+                if os.path.exists(hmac_key_path):
+                    zipf.write(hmac_key_path, arcname="audit_hmac.key")
         finally:
             if os.path.exists(temp_copy):
                 os.remove(temp_copy)
@@ -180,8 +206,9 @@ def creer_pack_migration_machine() -> Tuple[bool, str, bytes, Dict[str, Any]]:
     Retourne (success, filename, zip_bytes, manifest_data).
     """
     try:
-        if not os.path.exists(DB_NAME):
-            raise FileNotFoundError(f"La base de données {DB_NAME} est introuvable.")
+        active_db = _get_active_db_path()
+        if not os.path.exists(active_db):
+            raise FileNotFoundError(f"La base de données {active_db} est introuvable.")
 
         backup_dir = get_backup_directory()
         now = datetime.datetime.now()
@@ -193,7 +220,7 @@ def creer_pack_migration_machine() -> Tuple[bool, str, bytes, Dict[str, Any]]:
         source_conn = None
         dest_conn = None
         try:
-            source_conn = sqlite3.connect(DB_NAME)
+            source_conn = sqlite3.connect(active_db)
             dest_conn = sqlite3.connect(temp_db_path)
             source_conn.backup(dest_conn)
         finally:
@@ -231,6 +258,9 @@ def creer_pack_migration_machine() -> Tuple[bool, str, bytes, Dict[str, Any]]:
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(temp_db_path, arcname="kodo_pos.db")
             zipf.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+            hmac_key_path = _get_audit_key_path()
+            if os.path.exists(hmac_key_path):
+                zipf.write(hmac_key_path, arcname="audit_hmac.key")
 
         zip_bytes = zip_buffer.getvalue()
 
@@ -376,10 +406,11 @@ def restaurer_pack_migration(zip_input: Any) -> Dict[str, Any]:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # 2. Snapshot de sécurité préventif (au cas où l'utilisateur souhaite annuler)
-        if os.path.exists(DB_NAME):
+        active_db = _get_active_db_path()
+        if os.path.exists(active_db):
             safety_backup_path = os.path.join(backup_dir, f"kodo_safety_pre_restore_{timestamp}.db")
             from kodo_core.db.sanctuary_shield import copier_base_sqlite
-            copier_base_sqlite(DB_NAME, safety_backup_path)
+            copier_base_sqlite(active_db, safety_backup_path)
             print(f"[BackupManager] Snapshot de sécurité préventif créé : {safety_backup_path}")
 
         # 3. Extraction de la nouvelle base de données
@@ -402,7 +433,7 @@ def restaurer_pack_migration(zip_input: Any) -> Dict[str, Any]:
 
         # 5. Remplacement atomique de la base active
         from kodo_core.db.sanctuary_shield import restaurer_base_sqlite
-        restaurer_base_sqlite(temp_extracted_path, DB_NAME)
+        restaurer_base_sqlite(temp_extracted_path, active_db)
 
         # Nettoyage temporaire
         if os.path.exists(temp_extracted_path):
@@ -411,11 +442,27 @@ def restaurer_pack_migration(zip_input: Any) -> Dict[str, Any]:
         # 6. Exécution des migrations pour s'assurer de la compatibilité de version
         try:
             from kodo_core.db.migrations import initialiser_db
-            initialiser_db(DB_NAME)
+            initialiser_db(active_db)
         except Exception as mig_err:
             print(f"[BackupManager] Note post-migration : {mig_err}")
 
-        stats = _get_db_stats(DB_NAME)
+        stats = _get_db_stats(active_db)
+
+        # Restauration de la clé HMAC d'audit machine si présente dans l'archive
+        if "audit_hmac.key" in zipf.namelist():
+            try:
+                key_bytes = zipf.read("audit_hmac.key")
+                hmac_key_path = _get_audit_key_path()
+                os.makedirs(os.path.dirname(hmac_key_path), exist_ok=True)
+                with open(hmac_key_path, "wb") as kf:
+                    kf.write(key_bytes)
+                try:
+                    os.chmod(hmac_key_path, 0o600)
+                except Exception:
+                    pass
+                print("[BackupManager] Clé secrète d'audit HMAC restaurée avec succès.")
+            except Exception as e:
+                print(f"[BackupManager] Erreur restauration audit_hmac.key: {e}")
 
         print(f"[BackupManager] Restauration terminée avec succès sur {DB_NAME}.")
         return {

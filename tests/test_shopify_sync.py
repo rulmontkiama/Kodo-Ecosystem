@@ -729,6 +729,16 @@ class TestDemarrageAutomatique(BaseTemporaire):
         self.assertTrue(stop_auto_sync())
         self.assertFalse(thread.is_alive(), "le thread n'est pas sorti : l'arrêt de l'app bloquerait")
 
+    def test_reveiller_sync_active_le_reveil(self):
+        """Un encaissement en caisse doit réveiller immédiatement le thread sans attendre 60s."""
+        thread = ShopifySyncThread()
+        self.assertFalse(thread._reveil.is_set())
+        from unittest.mock import patch
+        with patch.object(shopify_sync, "_thread_auto", thread):
+            with patch.object(thread, "is_alive", return_value=True):
+                shopify_sync.reveiller_sync()
+                self.assertTrue(thread._reveil.is_set(), "reveiller_sync n'a pas déclenché l'événement de réveil immédiat")
+
     def test_chaque_interrupteur_commande_son_sens_de_synchronisation(self):
         self.regler_shopify("boutique.myshopify.com", "jeton", auto_sync="1", sync_orders="0")
         thread = ShopifySyncThread()

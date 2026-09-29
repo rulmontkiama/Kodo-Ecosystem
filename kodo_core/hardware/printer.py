@@ -650,24 +650,147 @@ def get_ticket_logo_path():
     return None
 
 
+def _resolve_printer_fonts():
+    """Résout les polices standard pour l'impression thermique avec fallback robuste."""
+    possible_regular_fonts = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttf",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    possible_bold_fonts = [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "C:\\Windows\\Fonts\\arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    reg = next((p for p in possible_regular_fonts if os.path.exists(p)), None)
+    bold = next((p for p in possible_bold_fonts if os.path.exists(p)), None)
+    return reg, bold
+
+
+def _fit_text_lines(draw, text, max_size, min_size, is_bold, max_w, prefer_wrap_over_tiny=True):
+    """
+    Adapte dynamiquement un texte pour qu'il tienne strictement dans max_w pixels.
+    Si le texte dépasse en taille confortable et contient des espaces, le scinde
+    harmonieusement sur 2 lignes avec une police plus grande et lisible.
+    Sinon, réduit la taille de police (auto-fit) pour préserver la marge de sécurité.
+    """
+    from PIL import ImageFont
+    reg_p, bold_p = _resolve_printer_fonts()
+    f_path = bold_p if is_bold else reg_p
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    def get_font(sz):
+        if f_path:
+            try:
+                return ImageFont.truetype(f_path, sz)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+
+    # 1. Tester une seule ligne avec une taille confortable
+    threshold = 18 if (is_bold and max_size >= 20) else 14
+    for sz in range(max_size, threshold - 1, -1):
+        f = get_font(sz)
+        bb = draw.textbbox((0, 0), text, font=f)
+        if (bb[2] - bb[0]) <= max_w:
+            return [(text, f, bb[2] - bb[0], bb[3] - bb[1])]
+
+    # 2. Si le texte contient des espaces, tenter de le couper sur 2 lignes
+    words = text.split()
+    if prefer_wrap_over_tiny and len(words) > 1:
+        for sz in range(max_size - 2, 13, -1):
+            f = get_font(sz)
+            best_split = None
+            best_diff = 9999
+            for i in range(1, len(words)):
+                l1 = " ".join(words[:i])
+                l2 = " ".join(words[i:])
+                bb1 = draw.textbbox((0, 0), l1, font=f)
+                bb2 = draw.textbbox((0, 0), l2, font=f)
+                w1 = bb1[2] - bb1[0]
+                w2 = bb2[2] - bb2[0]
+                if w1 <= max_w and w2 <= max_w:
+                    diff = abs(w1 - w2)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_split = (l1, l2, bb1, bb2, w1, w2, f)
+            if best_split:
+                l1, l2, bb1, bb2, w1, w2, f = best_split
+                return [
+                    (l1, f, w1, bb1[3] - bb1[1]),
+                    (l2, f, w2, bb2[3] - bb2[1])
+                ]
+
+    # 3. Réduire la taille de police sur 1 ligne jusqu'au minimum autorisé
+    for sz in range(threshold - 1, min_size - 1, -1):
+        f = get_font(sz)
+        bb = draw.textbbox((0, 0), text, font=f)
+        if (bb[2] - bb[0]) <= max_w:
+            return [(text, f, bb[2] - bb[0], bb[3] - bb[1])]
+
+    # 4. Pour un identifiant continu avec séparateurs (_ ou -), tester une césure sur 2 lignes
+    for sep in ["_", "-"]:
+        if sep in text:
+            parts = text.split(sep)
+            if len(parts) >= 2:
+                for sz in range(min_size, 10, -1):
+                    f = get_font(sz)
+                    mid = len(parts) // 2
+                    l1 = sep.join(parts[:mid]) + sep
+                    l2 = sep.join(parts[mid:])
+                    bb1 = draw.textbbox((0, 0), l1, font=f)
+                    bb2 = draw.textbbox((0, 0), l2, font=f)
+                    w1 = bb1[2] - bb1[0]
+                    w2 = bb2[2] - bb2[0]
+                    if w1 <= max_w and w2 <= max_w:
+                        return [
+                            (l1, f, w1, bb1[3] - bb1[1]),
+                            (l2, f, w2, bb2[3] - bb2[1])
+                        ]
+
+    # 5. Dernier recours : troncature sécurisée avec points de suspension
+    for sz in range(min_size, 9, -1):
+        f = get_font(sz)
+        for l in range(len(text) - 1, 3, -1):
+            cand = text[:l] + "..."
+            bb = draw.textbbox((0, 0), cand, font=f)
+            if (bb[2] - bb[0]) <= max_w:
+                return [(cand, f, bb[2] - bb[0], bb[3] - bb[1])]
+
+    f = get_font(9)
+    bb = draw.textbbox((0, 0), text[:12] + "...", font=f)
+    return [(text[:12] + "...", f, bb[2] - bb[0], bb[3] - bb[1])]
+
+
 def generate_social_qr_image(title=None, url=None, subtitle=None, header=None, width=512, qr_size="large"):
     """
     Génère un bloc visuel de communication avec disposition horizontale élégante :
     QR Code à gauche, ligne séparatrice verticale, et textes hiérarchisés à droite
     (chapeau, titre réseau en gras, et identifiant/@compte/message).
+    Intègre un auto-scaling et word-wrap multi-lignes strict pour garantir qu'aucun
+    texte ne soit jamais tronqué ni ne dépasse les marges de sécurité du papier 80mm.
     """
     import qrcode
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     url_str = (url or "https://kōdo-solutions.com").strip()
 
-    # Taille du QR Code
+    # Taille du QR Code adaptée au ticket 80mm
     if qr_size == "extra_large":
-        box_size = 6
-    elif qr_size == "normal":
-        box_size = 4
-    else:  # "large" par défaut (environ 120-130px de côté)
         box_size = 5
+    elif qr_size == "normal":
+        box_size = 3
+    else:  # "large" par défaut (environ 115-130px de côté)
+        box_size = 4
 
     qr = qrcode.QRCode(
         version=None,
@@ -679,48 +802,6 @@ def generate_social_qr_image(title=None, url=None, subtitle=None, header=None, w
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     qr_w, qr_h = qr_img.size
-
-    # Polices de caractères optimisées pour l'impression thermique
-    possible_regular_fonts = [
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Helvetica.ttf",
-        "/System/Library/Fonts/Monaco.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ]
-    possible_bold_fonts = [
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Helvetica-Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
-        "/System/Library/Fonts/Monaco.ttf",
-        "C:\\Windows\\Fonts\\arialbd.ttf",
-    ]
-
-    font_header = None
-    font_title = None
-    font_sub = None
-
-    for p in possible_regular_fonts:
-        if os.path.exists(p):
-            try:
-                font_header = ImageFont.truetype(p, 14)
-                break
-            except Exception:
-                pass
-    for p in possible_bold_fonts:
-        if os.path.exists(p):
-            try:
-                font_title = ImageFont.truetype(p, 22)
-                font_sub = ImageFont.truetype(p, 20)
-                break
-            except Exception:
-                pass
-
-    if not font_header:
-        font_header = ImageFont.load_default()
-    if not font_title:
-        font_title = ImageFont.load_default()
-    if not font_sub:
-        font_sub = ImageFont.load_default()
 
     header_text = (header or "").strip()
     title_text = (title or "").strip()
@@ -736,25 +817,35 @@ def generate_social_qr_image(title=None, url=None, subtitle=None, header=None, w
         elif any(k in upper_title for k in ("AVIS", "GOOGLE", "ETOILE")):
             header_text = "VOTRE AVIS COMPTE"
 
+    sep_spacing = 14
+    margin_right = 16
+    margin_left = 12
+
+    # Largeur maximale utile allouée à la colonne de texte à droite du QR code
+    max_text_w = width - (margin_left + qr_w + sep_spacing * 2 + 1 + margin_right)
+
     dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1), "white"))
-    gap_lines = 4
 
-    b_hdr = dummy_draw.textbbox((0, 0), header_text, font=font_header) if header_text else (0, 0, 0, 0)
-    b_ttl = dummy_draw.textbbox((0, 0), title_text, font=font_title) if title_text else (0, 0, 0, 0)
-    b_sub = dummy_draw.textbbox((0, 0), sub_text, font=font_sub) if sub_text else (0, 0, 0, 0)
+    # Découpage et dimensionnement automatique de chaque niveau de texte
+    lines_header = _fit_text_lines(dummy_draw, header_text, 13, 10, False, max_text_w, prefer_wrap_over_tiny=False)
+    lines_title = _fit_text_lines(dummy_draw, title_text, 22, 14, True, max_text_w, prefer_wrap_over_tiny=True)
+    lines_sub = _fit_text_lines(dummy_draw, sub_text, 18, 11, False, max_text_w, prefer_wrap_over_tiny=False)
 
-    h_hdr = (b_hdr[3] - b_hdr[1]) if header_text else 0
-    h_ttl = (b_ttl[3] - b_ttl[1]) if title_text else 0
-    h_sub = (b_sub[3] - b_sub[1]) if sub_text else 0
+    all_lines = []
+    for item in lines_header:
+        all_lines.append((item[0], item[1], item[2], item[3], 3))
+    for item in lines_title:
+        all_lines.append((item[0], item[1], item[2], item[3], 4))
+    for item in lines_sub:
+        all_lines.append((item[0], item[1], item[2], item[3], 2))
 
-    text_lines_count = sum(1 for h in [h_hdr, h_ttl, h_sub] if h > 0)
-    text_total_h = h_hdr + h_ttl + h_sub + max(0, text_lines_count - 1) * gap_lines
+    text_w = max((it[2] for it in all_lines), default=0)
+    text_total_h = sum(it[3] for it in all_lines) + sum(it[4] for it in all_lines[:-1]) if all_lines else 0
 
-    sep_spacing = 20
-    text_w = max(b_hdr[2] - b_hdr[0], b_ttl[2] - b_ttl[0], b_sub[2] - b_sub[0], 0)
-    content_w = qr_w + (sep_spacing * 2 + 1 + text_w if text_total_h > 0 else 0)
+    content_w = qr_w + (sep_spacing * 2 + 1 + text_w if all_lines else 0)
+    start_x = max(margin_left, (width - content_w) // 2)
 
-    pad_y = 14
+    pad_y = 12
     max_h = max(qr_h, text_total_h)
     total_h = max_h + 2 * pad_y
 
@@ -762,27 +853,21 @@ def generate_social_qr_image(title=None, url=None, subtitle=None, header=None, w
     draw = ImageDraw.Draw(img)
 
     # Position horizontale centrée sur la largeur du ticket (512 dots)
-    start_x = max(10, (width - content_w) // 2)
     qr_y = (total_h - qr_h) // 2
     img.paste(qr_img, (start_x, qr_y))
 
-    if text_total_h > 0:
+    if all_lines:
         sep_x = start_x + qr_w + sep_spacing
-        line_y1 = max(pad_y, (total_h - max(qr_h, text_total_h)) // 2 + 4)
-        line_y2 = min(total_h - pad_y, line_y1 + max(qr_h, text_total_h) - 8)
+        line_y1 = max(pad_y, (total_h - max_h) // 2 + 4)
+        line_y2 = min(total_h - pad_y, line_y1 + max_h - 8)
         draw.line([(sep_x, line_y1), (sep_x, line_y2)], fill=(180, 180, 180), width=1)
 
         text_x = sep_x + sep_spacing
         cur_text_y = (total_h - text_total_h) // 2
 
-        if header_text:
-            draw.text((text_x, cur_text_y), header_text, fill="black", font=font_header)
-            cur_text_y += h_hdr + gap_lines
-        if title_text:
-            draw.text((text_x, cur_text_y), title_text, fill="black", font=font_title)
-            cur_text_y += h_ttl + gap_lines
-        if sub_text:
-            draw.text((text_x, cur_text_y), sub_text, fill="black", font=font_sub)
+        for line_txt, f, w, h, gap in all_lines:
+            draw.text((text_x, cur_text_y), line_txt, fill="black", font=f)
+            cur_text_y += h + gap
 
     return img
 
@@ -792,7 +877,8 @@ def get_ticket_social_path():
     Retourne le chemin d'accès au bloc réseaux sociaux / communication du ticket de caisse.
     Cherche en priorité le bloc personnalisé configuré par l'utilisateur (QR Code ou image personnalisée).
     Si le bloc est désactivé ('none') ou non configuré, retourne None.
-    Si le bloc n'existe pas sur disque mais est présent en base SQLite (Parametres), le régénère.
+    Pour le mode QR Code, régénère toujours à la volée avec l'algorithme auto-fit pour
+    garantir qu'aucun texte ne soit tronqué sur le ticket physique.
     """
     try:
         import database_manager
@@ -806,28 +892,30 @@ def get_ticket_social_path():
         if not mode or mode == "none":
             return None
 
-        raw_b64 = params.get("receipt_social_b64")
+        target_p = database_manager.data_path("social_ticket.png")
 
-        # Régénération automatique si mode QR sans image stockée
-        if not raw_b64 and mode == "qr":
+        # Mode QR Code dynamique : toujours régénérer à la volée avec auto-fit
+        if mode == "qr":
             header = params.get("receipt_social_header", "")
             title = params.get("receipt_social_title", "INSTAGRAM")
             url = params.get("receipt_social_url", "https://kōdo-solutions.com")
             subtitle = params.get("receipt_social_subtitle", "")
             qr_size = params.get("receipt_social_size", "large")
             img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, header=header, width=512, qr_size=qr_size)
-            from io import BytesIO
-            import base64
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            raw_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+            try:
+                os.makedirs(os.path.dirname(target_p), exist_ok=True)
+                img.save(target_p, format="PNG")
+                return target_p
+            except Exception:
+                pass
 
+        # Mode Image personnalisée
+        raw_b64 = params.get("receipt_social_b64")
         if raw_b64:
             if "," in raw_b64:
                 raw_b64 = raw_b64.split(",", 1)[1]
             import base64
             img_bytes = base64.b64decode(raw_b64)
-            target_p = database_manager.data_path("social_ticket.png")
             try:
                 os.makedirs(os.path.dirname(target_p), exist_ok=True)
                 with open(target_p, "wb") as f:
@@ -856,6 +944,13 @@ def generer_image_ticket(contenu, numero):
     if logo_path and os.path.exists(logo_path):
         try:
             img_logo = Image.open(logo_path).convert("RGBA")
+            max_w, max_h = 384, 180
+            if img_logo.width > max_w:
+                ratio = max_w / float(img_logo.width)
+                img_logo = img_logo.resize((max_w, int(img_logo.height * ratio)), Image.Resampling.LANCZOS)
+            if img_logo.height > max_h:
+                ratio = max_h / float(img_logo.height)
+                img_logo = img_logo.resize((int(img_logo.width * ratio), max_h), Image.Resampling.LANCZOS)
         except Exception:
             pass
     if insta_path and os.path.exists(insta_path):
@@ -928,11 +1023,16 @@ def generer_image_ticket(contenu, numero):
     return nom_fichier_img
 
 
-def pil_to_escpos_raster(image, max_width=512, max_height=None):
+def pil_to_escpos_raster(image, max_width=512, max_height=None, target_width=None, center=False):
     """
     Convertit une image PIL en bytes d'impression ESC/POS (Commande GS v 0).
-    Ajusté pour une largeur d'impression 80mm nette et découpé par tranches de 48 dots
+    Ajusté pour une largeur d'impression 80mm nette et découpé par tranches de 24 dots
     pour éviter tout débordement de buffer sur les imprimantes thermiques sensibles.
+
+    Si target_width est spécifié et center=True, l'image redimensionnée est centrée
+    sur un canevas blanc de largeur fixe (ex: 512 dots = 64 octets), garantissant
+    un centrage parfait matériel sans dépendre de ESC a (qui provoque des glitches
+    sur de nombreux microcontrôleurs POS-80).
     """
     from PIL import Image
     if image.width > max_width:
@@ -952,6 +1052,19 @@ def pil_to_escpos_raster(image, max_width=512, max_height=None):
         else:
             bg.paste(image)
         image = bg
+    elif image.mode != 'RGB':
+        image = image.convert('RGB')
+
+    # Centrage sur canevas blanc de largeur fixe target_width si demandé
+    if target_width and image.width < target_width and center:
+        canvas = Image.new("RGB", (target_width, image.height), (255, 255, 255))
+        offset_x = (target_width - image.width) // 2
+        canvas.paste(image, (offset_x, 0))
+        image = canvas
+    elif target_width and image.width > target_width:
+        ratio = target_width / float(image.width)
+        new_height = int(float(image.height) * ratio)
+        image = image.resize((target_width, new_height), Image.Resampling.LANCZOS)
 
     if image.mode != '1':
         image = image.convert('L').point(lambda p: 255 if p > 160 else 0, mode='1')
@@ -1013,25 +1126,28 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, al
     nom_fichier_img = generer_image_ticket(contenu, numero)
 
     # 3. Payload ESC/POS
-    raw_payload = bytearray(ESC_INIT + ESC_ALIGN_CENTER)
+    # Initialisation nette : ESC @ (Reset) + ESC 2 (interligne par défaut) + ESC a 0 (Alignement gauche)
+    # Le logo et le bloc réseaux sont centrés directement sur un canevas 512 dots (64 octets)
+    # pour éviter tout décalage ou glitch d'alignement firmware sur POS-80.
+    raw_payload = bytearray(ESC_INIT + b"\x1b2" + ESC_ALIGN_LEFT)
     logo_path = get_ticket_logo_path()
     if logo_path and os.path.exists(logo_path):
         try:
             img_logo = Image.open(logo_path)
-            raw_payload.extend(pil_to_escpos_raster(img_logo, max_width=384, max_height=180))
+            raw_payload.extend(pil_to_escpos_raster(img_logo, max_width=384, max_height=180, target_width=512, center=True))
             raw_payload.extend(b"\n")
         except Exception as e:
             print(f"[WARN] Logo raster error: {e}")
 
     raw_payload.extend(ESC_ALIGN_LEFT)
     raw_payload.extend(contenu_clean.encode('ascii', errors='replace'))
-    raw_payload.extend(b"\n" + ESC_ALIGN_CENTER)
+    raw_payload.extend(b"\n")
 
     insta_path = get_ticket_social_path()
     if insta_path and os.path.exists(insta_path):
         try:
             img_insta = Image.open(insta_path)
-            raw_payload.extend(pil_to_escpos_raster(img_insta))
+            raw_payload.extend(pil_to_escpos_raster(img_insta, max_width=512, target_width=512, center=True))
             raw_payload.extend(b"\n")
         except Exception as e:
             print(f"[WARN] Insta raster error: {e}")
@@ -1335,13 +1451,13 @@ def imprimer_ticket_test(printer_name=None, host=None, port=9100):
     )
 
     num_test = datetime.datetime.now().strftime("TEST-%H%M%S")
-    path_or_success = imprimer_ticket(txt, numero=num_test, printer_name=printer_name, host=printer_ip or None, port=port)
+    is_success = bool(imprimer_ticket(txt, numero=num_test, printer_name=printer_name, host=printer_ip or None, port=port, return_status=True))
     return {
-        "success": True,
+        "success": is_success,
         "receiptNumber": num_test,
-        "file": str(path_or_success),
         "printerIP": printer_ip,
-        "content": txt
+        "content": txt,
+        "error": None if is_success else "Échec d'impression : l'imprimante thermique ne répond pas."
     }
 
 

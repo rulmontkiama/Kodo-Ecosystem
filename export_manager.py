@@ -73,8 +73,9 @@ def export_comptable_belge():
             t.numero_ticket,
             p.code_barre,
             p.nom,
+            COALESCE(vd.quantite, 1),
             vd.prix_unitaire_tvac,
-            p.taux_tva,
+            COALESCE(p.taux_tva, 0.21),
             t.methode_paiement
         FROM Tickets t
         JOIN Ventes_Details vd ON vd.id_ticket = t.id
@@ -86,16 +87,20 @@ def export_comptable_belge():
     conn.close()
 
     records = []
-    for date_heure, ticket, code, nom, tvac, taux, methode in rows:
-        tvac_d = Decimal(str(tvac))
-        taux_d = Decimal(str(taux))
-        htva   = (tvac_d / (Decimal("1") + taux_d)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-        tva    = (tvac_d - htva).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    for date_heure, ticket, code, nom, qte, pu_tvac, taux, methode in rows:
+        qte_d  = Decimal(str(qte or 1))
+        pu_d   = Decimal(str(pu_tvac or 0))
+        tvac_d = (pu_d * qte_d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        taux_d = Decimal(str(taux or 0.21))
+        htva   = (tvac_d / (Decimal("1") + taux_d)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        tva    = (tvac_d - htva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         records.append({
             "Date":              date_heure,
             "Numéro Ticket":     ticket,
             "Code Article":      code,
             "Nom Article":       nom,
+            "Quantité":          str(int(qte_d)),
+            "Prix Unitaire TVAC (€)": str(pu_d.quantize(Decimal("0.01"))).replace(".", ","),
             "Montant TVAC (€)":  str(tvac_d).replace(".", ","),
             "Base HTVA (€)":     str(htva).replace(".", ","),
             "Montant TVA (€)":   str(tva).replace(".", ","),
@@ -107,8 +112,8 @@ def export_comptable_belge():
     ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(EXPORT_DIR, f"export_comptable_{ts}.csv")
     fieldnames = [
-        "Date", "Numéro Ticket", "Code Article", "Nom Article",
-        "Montant TVAC (€)", "Base HTVA (€)", "Montant TVA (€)", "Taux TVA", "Moyen de Paiement"
+        "Date", "Numéro Ticket", "Code Article", "Nom Article", "Quantité",
+        "Prix Unitaire TVAC (€)", "Montant TVAC (€)", "Base HTVA (€)", "Montant TVA (€)", "Taux TVA", "Moyen de Paiement"
     ]
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")

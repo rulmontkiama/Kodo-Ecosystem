@@ -6,10 +6,12 @@ from kodo_core.sync.shopify import (
     ShopifySyncThread,
     ShopifySync,
     import_shopify_catalog,
+    reveiller_sync,
 )
 
 __all__ = [
     "ShopifySyncThread",
     "ShopifySync",
     "import_shopify_catalog",
+    "reveiller_sync",
 ]

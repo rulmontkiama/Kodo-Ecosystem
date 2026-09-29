@@ -114,6 +114,12 @@ def verifier_chainage(table: str, id_col="id", sig_col="signature", hash_prec_co
     """
     Vérifie l'intégrité de la chaîne séquentielle cryptographique pour une table donnée.
     """
+    # Liste blanche stricte des tables et colonnes d'audit (CWE-89)
+    ALLOWED_TABLES = {"Tickets", "Ledger_Caisse", "Clotures_Caisse", "tickets", "ledger_caisse", "clotures_caisse"}
+    ALLOWED_COLS = {"id", "id_ticket", "rowid"}
+    if table not in ALLOWED_TABLES or id_col not in ALLOWED_COLS:
+        raise ValueError(f"Table ou colonne non autorisée pour verifier_chainage : {table}.{id_col}")
+
     safe_conn = get_connection(conn=conn)
     close_at_end = (conn is None)
     try:
@@ -141,6 +147,11 @@ def verifier_chainage(table: str, id_col="id", sig_col="signature", hash_prec_co
             signature_enregistree = row_dict.get(sig_col) or row_dict.get("current_hash")
 
             if last_sig is None:
+                # Ancrage obligatoire sur le bloc de genèse officiel (NF525 / Audit Trail)
+                expected_genesis = "GENESIS_LEDGER_KODO_POS" if "ledger" in table.lower() else "GENESIS_BLOCK_KODO_POS"
+                if actuel_hash_prec != expected_genesis:
+                    print(f"[ALERTE] Faille de genèse dans {table} à l'ID {row_dict[id_col]}! Hash initial non conforme: {actuel_hash_prec}")
+                    erreurs += 1
                 expected_hash_prec = actuel_hash_prec
             else:
                 expected_hash_prec = last_sig

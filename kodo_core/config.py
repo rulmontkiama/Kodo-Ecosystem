@@ -108,6 +108,11 @@ class ShopConfig:
                 return fallback_dir
 
     @classmethod
+    def get_data_dir(cls) -> str:
+        """Alias pour get_base_data_dir()."""
+        return cls.get_base_data_dir()
+
+    @classmethod
     def get_db_dir(cls) -> str:
         """Chemin dédié à la base de données de production SQLite."""
         path = os.path.join(cls.get_base_data_dir(), "db")
