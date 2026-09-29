@@ -77,25 +77,25 @@ fi
 echo "🧹 Réinitialisation usine de la base de données..."
 rm -f "$SRC_DIR/kodo_pos.db" "$SRC_DIR/kodo_pos.db-shm" "$SRC_DIR/kodo_pos.db-wal"
 
-PYTHONPATH="$SRC_DIR" python3.12 -c "
+python3.12 << 'EOF'
 import sys, os, sqlite3
-sys.path.insert(0, '$SRC_DIR')
+sys.path.insert(0, os.getcwd())
 import database_manager
-database_manager.DB_NAME='kodo_pos.db'
+database_manager.DB_NAME = 'kodo_pos.db'
 database_manager.initialiser_db()
 
-conn = sqlite3.connect(os.path.join('$SRC_DIR', 'kodo_pos.db'))
+conn = sqlite3.connect('kodo_pos.db')
 c = conn.cursor()
 user_tables = ['tickets', 'ventes_details', 'produits', 'clients', 'ventes', 'ligne_ventes', 'stocks', 'sessions_caisse', 'depenses_caisse', 'ledger_caisse', 'rapports_z', 'clotures_caisse', 'clotures_z', 'tickets_en_attente', 'live_claims', 'live_buyers', 'live_sessions']
 existing_map = {row[0].lower(): row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-total_user_rows = sum(c.execute(f'SELECT COUNT(*) FROM {existing_map[t]}').fetchone()[0] for t in user_tables if t in existing_map)
+total_user_rows = sum(c.execute(f"SELECT COUNT(*) FROM {existing_map[t]}").fetchone()[0] for t in user_tables if t in existing_map)
 conn.close()
 if total_user_rows > 0:
-    print(f'❌ ERREUR: La BDD usine kodo_pos.db contient {total_user_rows} donnees utilisateur !')
+    print(f"❌ ERREUR: La BDD usine kodo_pos.db contient {total_user_rows} donnees utilisateur !")
     sys.exit(1)
 else:
-    print(f'✅ BDD usine kodo_pos.db verifiee : 0 donnee utilisateur.')
-"
+    print("✅ BDD usine kodo_pos.db verifiee : 0 donnee utilisateur.")
+EOF
 
 if [ $? -ne 0 ]; then
     echo "❌ Erreur de réinitialisation BDD usine."
