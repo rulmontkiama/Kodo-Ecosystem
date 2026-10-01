@@ -762,7 +762,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         # saisi) ne remonte nulle part : l'interrupteur reste allumé et rien ne circule.
         from kodo_core.sync.shopify import (
             lire_reglages_shopify, lire_etat_sync, normaliser_domaine_boutique,
-            domaine_boutique_valide, auto_sync_actif,
+            domaine_boutique_valide, auto_sync_actif, compter_file_attente, etat_rafraichissement,
         )
         reglages = lire_reglages_shopify()
         domaine = normaliser_domaine_boutique(reglages["store_url"])
@@ -781,7 +781,20 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "locationId": reglages["location_id"],
             # Pourquoi le dépôt utilisé peut ne pas être le bon. Vide quand il n'y a rien à dire.
             "depotAvertissement": etat["avertissement_depot"],
+            # File d'attente locale : mouvements de stock pas encore partis vers Shopify.
+            "pendingCount": compter_file_attente()["pending"],
+            "indeterminateCount": compter_file_attente()["indeterminate"],
+            "refresh": etat_rafraichissement(),
         }
+
+    # 14 ter. Rafraîchissement manuel (asynchrone) : l'avancement se lit via /api/shopify/status
+    elif method == "POST" and path == "/api/shopify/refresh":
+        from kodo_core.sync.shopify import lancer_rafraichissement
+        res = lancer_rafraichissement()
+        if res.get("erreur"):
+            return 400, {"success": False, "error": res["erreur"]}
+        return 200, {"success": True, "started": bool(res.get("demarre")),
+                     "alreadyRunning": bool(res.get("deja_en_cours"))}
 
     # 15. Lancer l'importation du catalogue Shopify
     elif method == "POST" and path == "/api/shopify/import":

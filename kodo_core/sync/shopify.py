@@ -14,6 +14,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import datetime
+import io
 from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection, signer_ticket, signer_ledger
 from kodo_core.sync.shopify_sku import prefixes_possibles, skus_produit
@@ -244,6 +245,24 @@ STATUT_ABSENT = "ABSENT_SHOPIFY"        # article inconnu de la boutique : rien 
 STATUT_SANS_OBJET = "SANS_OBJET"        # quantité nulle : rien à ajuster
 STATUT_INDETERMINE = "INDETERMINE"      # réponse jamais reçue : à vérifier à la main
 
+# --- File d'attente locale `sync_queue` -----------------------------------------------------
+#
+# Chaque mouvement de stock de la caisse y est inscrit PENDING AVANT tout envoi, puis passe à
+# DONE (confirmé par Shopify), INDETERMINE (réponse jamais reçue : jamais rejoué) ou IGNORE
+# (rien à ajuster). Un échec réseau/429/5xx laisse la ligne PENDING : elle est rejouée à la passe
+# suivante, au rythme (recul exponentiel jusqu'à 15 min) de la boucle de synchronisation.
+# Cette table ÉCLAIRE la file (compteur « en attente », prochaine tentative) ; la garantie de
+# non-double-décompte reste tenue par la clé primaire de `Shopify_Sync_Lignes`, inchangée.
+FILE_PENDING = "PENDING"
+FILE_DONE = "DONE"
+FILE_INDETERMINE = "INDETERMINE"
+FILE_IGNORE = "IGNORE"
+FILE_CONSERVATION_JOURS = 14  # les lignes terminées sont purgées au-delà
+
+# `urlopen` d'origine : tant qu'il n'est pas substitué (tests, outils), les appels passent par
+# la session HTTP persistante ; s'il l'est, le substitut garde la main sur le transport.
+_URLOPEN_ORIGINE = urllib.request.urlopen
+
 
 def _ouvrir_ecriture(conn):
     """
@@ -312,6 +331,23 @@ def _assurer_tables_sync(cursor):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_shopify_remboursements_order ON Shopify_Remboursements(order_id)"
     )
+    # File d'attente locale des mouvements de stock (voir FILE_PENDING). Même définition que la
+    # migration 2.0.9 : toute évolution doit être portée aux DEUX endroits.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_vente_detail INTEGER NOT NULL UNIQUE,
+            id_ticket INTEGER NOT NULL,
+            code_barre TEXT,
+            delta INTEGER NOT NULL,
+            statut TEXT NOT NULL DEFAULT 'PENDING',
+            tentatives INTEGER NOT NULL DEFAULT 0,
+            derniere_erreur TEXT,
+            date_creation TEXT NOT NULL,
+            date_maj TEXT NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_statut ON sync_queue(statut)")
 
 
 # --- Point de départ de la poussée des ventes ------------------------------------------------
@@ -425,6 +461,9 @@ class ShopifySync:
         # Nature du dernier échec définitif : None, "http" (le serveur a répondu, rien n'a été
         # appliqué) ou "reseau" (aucune réponse reçue, on ne sait pas si l'appel a porté).
         self.dernier_echec = None
+        # Session HTTP persistante (keep-alive) : évite une négociation TLS par requête.
+        self._session = None
+        self._verrou_session = threading.Lock()
         # Identifiants imposés par l'appelant : uniquement quand les DEUX sont fournis. Un jeton
         # passé en argument avec une URL vide donnait un état bâtard (moitié appelant, moitié
         # base) ; dans ce cas la base fait autorité sur les deux champs.
@@ -512,11 +551,20 @@ class ShopifySync:
             if data:
                 req.data = json.dumps(data).encode("utf-8")
 
+            t0 = time.perf_counter()
             try:
+                if self._transport_persistant():
+                    resultat = self._requete_persistante(method, url, headers, data, ssl_ctx)
+                    self.dernier_echec = None
+                    self._tracer_requete(method, endpoint, 200, t0)
+                    return resultat
                 with urllib.request.urlopen(req, timeout=12, context=ssl_ctx) as response:
                     self.dernier_echec = None
-                    return json.loads(response.read().decode("utf-8"))
+                    resultat = json.loads(response.read().decode("utf-8"))
+                    self._tracer_requete(method, endpoint, getattr(response, "status", 200), t0)
+                    return resultat
             except urllib.error.HTTPError as e:
+                self._tracer_requete(method, endpoint, e.code, t0)
                 if e.code == 429:
                     # Shopify annonce le délai en décimal (« 2.0 ») : `int()` levait ici, hors
                     # de toute reprise, et l'ajustement finissait classé coupure réseau.
@@ -541,6 +589,9 @@ class ShopifySync:
                     self.dernier_echec = "http"
                     return None
             except Exception as e:
+                self._tracer_requete(method, endpoint, "ERR", t0)
+                # Connexion peut-être périmée : la prochaine requête repart d'une session neuve.
+                self._reinitialiser_session()
                 logger.error(f"Erreur réseau/API sur {method} {endpoint} (essai {attempt}/{max_retries}): {e}")
                 if rejouable and attempt < max_retries:
                     time.sleep(1.5 * attempt)
@@ -549,6 +600,68 @@ class ShopifySync:
                     return None
         self.dernier_echec = "reseau"
         return None
+
+    # --- Transport : session HTTP persistante --------------------------------------------------
+
+    @staticmethod
+    def _transport_persistant() -> bool:
+        return urllib.request.urlopen is _URLOPEN_ORIGINE
+
+    def _obtenir_session(self):
+        with self._verrou_session:
+            if self._session is None:
+                import requests
+                from requests.adapters import HTTPAdapter
+                from urllib3.util.retry import Retry
+
+                contexte = get_ssl_context()
+
+                class _Adaptateur(HTTPAdapter):
+                    # Même contexte TLS vérifié que l'ancien transport (certifi embarqué).
+                    def init_poolmanager(self, *args, **kwargs):
+                        kwargs["ssl_context"] = contexte
+                        super().init_poolmanager(*args, **kwargs)
+
+                # Seuls les échecs de CONNEXION sont rejoués par la couche HTTP (rien n'a été
+                # envoyé, donc sans risque pour un ajustement relatif) ; jamais une lecture/réponse.
+                reprise = Retry(total=None, connect=2, read=0, status=0, other=0, redirect=0,
+                                allowed_methods=None, backoff_factor=0.2)
+                session = requests.Session()
+                adaptateur = _Adaptateur(pool_connections=2, pool_maxsize=4, max_retries=reprise)
+                session.mount("https://", adaptateur)
+                session.mount("http://", adaptateur)
+                self._session = session
+            return self._session
+
+    def _reinitialiser_session(self):
+        with self._verrou_session:
+            session, self._session = self._session, None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def _requete_persistante(self, method, url, headers, data, ssl_ctx):
+        """
+        Même contrat que le transport urllib : renvoie le JSON, lève `urllib.error.HTTPError`
+        pour un statut >= 400 (les branches 429 / erreur HTTP de `make_request` s'appliquent
+        donc telles quelles) et toute autre exception pour une coupure.
+        """
+        corps = json.dumps(data).encode("utf-8") if data else None
+        reponse = self._obtenir_session().request(method, url, headers=headers, data=corps, timeout=12)
+        if reponse.status_code >= 400:
+            raise urllib.error.HTTPError(url, reponse.status_code, reponse.reason or "",
+                                         reponse.headers, io.BytesIO(reponse.content or b""))
+        return json.loads(reponse.content.decode("utf-8"))
+
+    def _tracer_requete(self, method, endpoint, statut, t0):
+        """Journal discret : méthode, point d'accès, statut et durée en ms (jamais d'en-tête)."""
+        try:
+            ms = int((time.perf_counter() - t0) * 1000)
+            logger.info(f"[HTTP] {method} {str(endpoint).split('?')[0]} -> {statut} en {ms} ms")
+        except Exception:
+            pass
 
     def execute_graphql(self, query: str, variables: dict = None):
         """Exécute une requête GraphQL vers l'API Admin Shopify."""
@@ -847,6 +960,61 @@ class ShopifySync:
             candidats.append(attendu)
         return candidats
 
+    # --- File d'attente `sync_queue` (jamais bloquante : un défaut ici n'arrête aucune vente) ---
+
+    def _file_inscrire(self, conn, vd_id, t_id, code_barre, delta):
+        try:
+            c = _ouvrir_ecriture(conn)
+            maintenant = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            c.execute("""
+                INSERT OR IGNORE INTO sync_queue
+                    (id_vente_detail, id_ticket, code_barre, delta, statut, tentatives, date_creation, date_maj)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+            """, (vd_id, t_id, code_barre, int(delta), FILE_PENDING, maintenant, maintenant))
+            conn.commit()
+        except Exception as e:
+            self._file_abandon(conn, e)
+
+    def _file_marquer(self, conn, vd_id, statut, erreur=None):
+        try:
+            c = _ouvrir_ecriture(conn)
+            c.execute("UPDATE sync_queue SET statut = ?, derniere_erreur = ?, "
+                      "date_maj = ? WHERE id_vente_detail = ?",
+                      (statut, erreur, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), vd_id))
+            conn.commit()
+        except Exception as e:
+            self._file_abandon(conn, e)
+
+    def _file_echec(self, conn, vd_id, erreur):
+        """Reste PENDING : compte l'essai et garde la cause. Le rythme des rejeux est celui des passes."""
+        try:
+            c = _ouvrir_ecriture(conn)
+            c.execute("UPDATE sync_queue SET tentatives = tentatives + 1, derniere_erreur = ?, date_maj = ? "
+                      "WHERE id_vente_detail = ?",
+                      (erreur, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), vd_id))
+            conn.commit()
+        except Exception as e:
+            self._file_abandon(conn, e)
+
+    def _file_purger(self, conn):
+        try:
+            limite = (datetime.datetime.now() - datetime.timedelta(days=FILE_CONSERVATION_JOURS)
+                      ).strftime("%Y-%m-%d %H:%M:%S")
+            c = _ouvrir_ecriture(conn)
+            c.execute("DELETE FROM sync_queue WHERE statut IN (?, ?) AND date_maj < ?",
+                      (FILE_DONE, FILE_IGNORE, limite))
+            conn.commit()
+        except Exception as e:
+            self._file_abandon(conn, e)
+
+    @staticmethod
+    def _file_abandon(conn, erreur):
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.warning(f"File d'attente locale non mise à jour (sans effet sur la vente) : {erreur}")
+
     def _journaliser(self, conn, vd_id, t_id, code_barre, inv_item_id, quantite, statut):
         """Inscrit (ou laisse en place) la ligne de vente au journal de synchronisation."""
         c = _ouvrir_ecriture(conn)
@@ -897,6 +1065,8 @@ class ShopifySync:
                     f"statut {STATUT_INDETERMINE}, à vérifier dans le journal Shopify_Sync_Lignes."
                 )
 
+            self._file_purger(conn)
+
             # Point de départ fixé à l'activation (`fixer_seuil_tickets`) : absent, rien n'est filtré.
             c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (PARAM_SEUIL_TICKETS,))
             ligne_seuil = c.fetchone()
@@ -928,8 +1098,10 @@ class ShopifySync:
                     candidats = self._skus_candidats(c, produit_id, code_produit, stock_id)
                     code_barre = candidats[0] if candidats else code_produit
                     qte = int(quantite or 0)
+                    self._file_inscrire(conn, vd_id, t_id, code_barre, -qte)
                     if qte == 0:
                         self._journaliser(conn, vd_id, t_id, code_barre, None, 0, STATUT_SANS_OBJET)
+                        self._file_marquer(conn, vd_id, FILE_IGNORE, "quantité nulle")
                         continue
 
                     inv_item_id, echec_reseau = None, False
@@ -940,10 +1112,12 @@ class ShopifySync:
                             break
                     if echec_reseau:
                         logger.error(f"Recherche Shopify impossible pour SKU {code_barre} : ligne retentée plus tard.")
+                        self._file_echec(conn, vd_id, "recherche Shopify impossible")
                         tout_pousse = False
                         continue
                     if not inv_item_id:
                         self._journaliser(conn, vd_id, t_id, code_barre, None, 0, STATUT_ABSENT)
+                        self._file_marquer(conn, vd_id, FILE_IGNORE, "SKU introuvable sur Shopify")
                         logger.warning(f"SKU {code_barre} introuvable sur Shopify : ligne tracée, plus retentée.")
                         continue
 
@@ -962,18 +1136,24 @@ class ShopifySync:
                     if applique:
                         c2.execute("UPDATE Shopify_Sync_Lignes SET statut = ? WHERE id_vente_detail = ?",
                                    (STATUT_POUSSE, vd_id))
+                        conn.commit()
+                        self._file_marquer(conn, vd_id, FILE_DONE)
                     elif self.dernier_echec == "reseau":
                         # Aucune réponse : on ne sait pas si l'ajustement a porté. On garde la trace
                         # et on ne rejoue pas — sous-décompter se corrige, sur-décompter non.
                         c2.execute("UPDATE Shopify_Sync_Lignes SET statut = ? WHERE id_vente_detail = ?",
                                    (STATUT_INDETERMINE, vd_id))
                         logger.error(f"[SYNC AUDIT] Ligne {vd_id} (SKU {code_barre}) sans réponse Shopify : à vérifier.")
+                        conn.commit()
+                        self._file_marquer(conn, vd_id, FILE_INDETERMINE, "aucune réponse de Shopify")
                         tout_pousse = False
                     else:
                         # Shopify a répondu en erreur : rien n'a été appliqué, la ligne reste à pousser.
                         c2.execute("DELETE FROM Shopify_Sync_Lignes WHERE id_vente_detail = ? AND statut = ?",
                                    (vd_id, STATUT_EN_VOL))
                         logger.error(f"Échec de l'ajustement du stock Shopify pour SKU {code_barre}")
+                        conn.commit()
+                        self._file_echec(conn, vd_id, "Shopify a refusé l'ajustement (429/5xx/erreur)")
                         tout_pousse = False
                     conn.commit()
 
@@ -1937,6 +2117,9 @@ class ShopifySync:
         return imported_count
 
 
+_VERROU_PASSE = threading.Lock()
+
+
 class ShopifySyncThread(threading.Thread):
     """Thread d'arrière-plan gérant la synchronisation periodique Shopify."""
 
@@ -2054,11 +2237,19 @@ class ShopifySyncThread(threading.Thread):
         enregistrer_etat_sync(tout_va_bien, message)
         return tout_va_bien
 
+    def passe_exclusive(self) -> bool:
+        """
+        Une passe, jamais en même temps qu'une autre (boucle automatique et rafraîchissement
+        manuel partagent ce verrou : deux passes simultanées pousseraient deux fois la même ligne).
+        """
+        with _VERROU_PASSE:
+            return self.executer_une_passe()
+
     def run(self):
         logger.info("Démarrage du thread Shopify en arrière-plan...")
         while self.running:
             try:
-                tout_va_bien = self.executer_une_passe()
+                tout_va_bien = self.passe_exclusive()
             except Exception as e:
                 logger.error(f"Passe de synchronisation Shopify interrompue : {e}")
                 tout_va_bien = False
@@ -2172,6 +2363,73 @@ def reveiller_sync():
     global _thread_auto
     if _thread_auto is not None and _thread_auto.is_alive():
         _thread_auto._reveil.set()
+
+
+def compter_file_attente() -> dict:
+    """Mouvements de stock encore à pousser (`pending`) ou à vérifier à la main (`indeterminate`)."""
+    resultat = {"pending": 0, "indeterminate": 0}
+    try:
+        conn = get_connection()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT statut, COUNT(*) FROM sync_queue WHERE statut IN (?, ?) GROUP BY statut",
+                      (FILE_PENDING, FILE_INDETERMINE))
+            for statut, n in c.fetchall():
+                resultat["pending" if statut == FILE_PENDING else "indeterminate"] = int(n)
+        finally:
+            conn.close()
+    except Exception:
+        pass  # table absente (base ancienne) ou illisible : rien à signaler
+    return resultat
+
+
+_etat_rafraichissement = {"en_cours": False, "debut": None, "fin": None, "ok": None, "message": ""}
+_verrou_rafraichissement = threading.Lock()
+
+
+def etat_rafraichissement() -> dict:
+    with _verrou_rafraichissement:
+        return dict(_etat_rafraichissement)
+
+
+def _executer_rafraichissement():
+    t0 = time.perf_counter()
+    ok, message = False, ""
+    try:
+        thread = _thread_auto if (_thread_auto is not None and _thread_auto.is_alive()) else ShopifySyncThread()
+        ok = bool(thread.passe_exclusive())
+        etat = lire_etat_sync()
+        message = etat.get("message") or ""
+        file_attente = compter_file_attente()
+        if file_attente["pending"]:
+            message += f" — {file_attente['pending']} mouvement(s) en attente de connexion."
+        ok = ok and etat.get("succes") is not False
+    except Exception as e:
+        logger.error(f"Rafraîchissement manuel Shopify interrompu : {e}")
+        message = f"Rafraîchissement interrompu : {e}"
+    finally:
+        logger.info(f"[REFRESH] rafraîchissement manuel terminé en {int((time.perf_counter() - t0) * 1000)} ms (ok={ok})")
+        with _verrou_rafraichissement:
+            _etat_rafraichissement.update(en_cours=False, fin=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                          ok=ok, message=message)
+
+
+def lancer_rafraichissement() -> dict:
+    """
+    Rafraîchissement manuel (bouton des Paramètres) : vide la file d'attente vers Shopify,
+    rapatrie les nouvelles commandes payées, puis rend la main. Asynchrone : retourne aussitôt,
+    l'avancement se lit via `etat_rafraichissement()` (exposé par `GET /api/shopify/status`).
+    """
+    reglages = lire_reglages_shopify()
+    if not reglages["store_url"] or not reglages["access_token"]:
+        return {"demarre": False, "erreur": "Shopify n'est pas connecté : renseignez le domaine et le jeton."}
+    with _verrou_rafraichissement:
+        if _etat_rafraichissement["en_cours"]:
+            return {"demarre": False, "deja_en_cours": True}
+        _etat_rafraichissement.update(en_cours=True, ok=None, message="", fin=None,
+                                      debut=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    threading.Thread(target=_executer_rafraichissement, daemon=True, name="KodoShopifyRefresh").start()
+    return {"demarre": True}
 
 
 def import_shopify_catalog(progress_callback=None):

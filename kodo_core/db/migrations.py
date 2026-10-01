@@ -626,6 +626,28 @@ class MigrationManager:
                 )"""
             ],
             "python": lambda conn: _executer_conversion_shpf(conn),
+        },
+        {
+            "version": "2.0.9",
+            "description": "File d'attente locale des mouvements de stock vers Shopify "
+                           "(`sync_queue`) : chaque mouvement est inscrit PENDING avant envoi, "
+                           "rejoué à chaque passe après une coupure réseau, et compté "
+                           "à l'écran Paramètres. Table nouvelle : aucune table existante n'est touchée.",
+            "sql": [
+                """CREATE TABLE IF NOT EXISTS sync_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id_vente_detail INTEGER NOT NULL UNIQUE,
+                    id_ticket INTEGER NOT NULL,
+                    code_barre TEXT,
+                    delta INTEGER NOT NULL,
+                    statut TEXT NOT NULL DEFAULT 'PENDING',
+                    tentatives INTEGER NOT NULL DEFAULT 0,
+                    derniere_erreur TEXT,
+                    date_creation TEXT NOT NULL,
+                    date_maj TEXT NOT NULL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_sync_queue_statut ON sync_queue(statut)",
+            ]
         }
     ]
 
