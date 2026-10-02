@@ -1966,6 +1966,137 @@ class ShopifySync:
                 return row[0]
         return None
 
+    @staticmethod
+    def _taille_variante(v) -> str:
+        """Libellé de taille d'une variante Shopify (« Unique » quand elle n'est pas déclinée)."""
+        opt1 = v.get("option1", "Unique")
+        opt2 = v.get("option2")
+        taille = opt1 if opt1 and opt1 != "Default Title" else "Unique"
+        if opt2 and opt2 != "Default Title":
+            taille = f"{taille} / {opt2}"
+        return taille
+
+    def _requalifier_ligne_unique(self, c, pid, tailles) -> None:
+        """
+        Article local sans déclinaison (une seule ligne « Taille Unique ») rapproché d'un produit
+        Shopify décliné : la ligne devient la première taille au lieu de rester en plus des
+        nouvelles, sinon son stock serait compté en double (et son SKU `…-Unique` n'existe pas en
+        ligne). Elle garde son id, donc son historique de ventes.
+        """
+        if not tailles or any(self._est_taille_unique(t) for t in tailles):
+            return
+        c.execute("SELECT id, taille FROM Stocks WHERE id_produit=?", (pid,))
+        lignes = c.fetchall()
+        if len(lignes) == 1 and self._est_taille_unique(lignes[0][1]):
+            c.execute("UPDATE Stocks SET taille=? WHERE id=?", (tailles[0], lignes[0][0]))
+
+    def _produits_locaux_du_produit(self, c, nom, variantes) -> list:
+        """
+        Ids des produits locaux qui correspondent à UN produit Shopify, le plus ancien d'abord
+        (c'est lui qui est conservé : il porte le code-barres imprimé, la TVA et la marque).
+
+        Plusieurs ids = l'article a été dédoublé par une version précédente (une fiche par taille) :
+        l'appelant les refond. Clés, de la plus sûre à la moins sûre : id de variante, code-barres
+        ou SKU, SKU de déclinaison exporté (`BI038-M` → `BI038`), enfin le nom, seulement s'il est
+        unique et ne désigne pas déjà un AUTRE produit Shopify.
+        """
+        trouves = []
+
+        def ajouter(pid):
+            if pid and pid not in trouves:
+                trouves.append(pid)
+
+        for v, code, code_brut, variant_id in variantes:
+            ajouter(self._retrouver_produit(c, variant_id, code, code_brut))
+            if code_brut:
+                for prefixe in prefixes_possibles(code_brut):
+                    c.execute("SELECT id FROM Produits WHERE code_barre = ?", (prefixe,))
+                    row = c.fetchone()
+                    if row:
+                        ajouter(row[0])
+                        break
+
+        if not trouves and nom:
+            c.execute("SELECT id FROM Produits WHERE nom = ? LIMIT 2", (nom,))
+            rows = c.fetchall()
+            if len(rows) == 1:
+                ids_variantes = {vid for _, _, _, vid in variantes if vid}
+                c.execute("SELECT variant_id FROM Shopify_Variantes WHERE id_produit = ?", (rows[0][0],))
+                connues = {r[0] for r in c.fetchall()}
+                if not connues or connues & ids_variantes:
+                    ajouter(rows[0][0])
+
+        trouves.sort()
+        return trouves
+
+    @staticmethod
+    def _code_du_produit(c, variantes):
+        """Code-barres du produit créé : le code commun des tailles (`BI038` pour `BI038-S`, `BI038-M`), sinon celui de la première variante libre."""
+        codes = [cb for _, cb, _, _ in variantes if cb]
+        if not codes:
+            return None
+        candidats = []
+        if len(codes) > 1:
+            communs = set(prefixes_possibles(codes[0]))
+            for autre in codes[1:]:
+                communs &= set(prefixes_possibles(autre))
+            candidats = sorted(communs, key=len, reverse=True)
+        candidats += codes
+        for cand in candidats:
+            c.execute("SELECT 1 FROM Produits WHERE code_barre = ?", (cand,))
+            if not c.fetchone():
+                return cand
+        return None
+
+    @staticmethod
+    def _ligne_de_stock_referencee(c, stock_id) -> bool:
+        """Vrai si une table (ventes, mouvements…) est accrochée à cette ligne de stock."""
+        for (table,) in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+            if table == "Stocks":
+                continue
+            cols = [r[1] for r in c.execute(f'PRAGMA table_info("{table}")').fetchall()]
+            if "id_stock" in cols and c.execute(
+                    f'SELECT 1 FROM "{table}" WHERE id_stock=? LIMIT 1', (stock_id,)).fetchone():
+                return True
+        return False
+
+    def _fusionner_produit(self, c, garder, absorbe) -> None:
+        """
+        Refond le produit `absorbe` (doublon par taille) dans `garder`, sans perdre d'historique.
+
+        Chaque ligne de stock du doublon est rattachée au produit conservé ; si celui-ci a déjà
+        la même taille, la ligne du doublon disparaît (sa quantité est une copie du stock Shopify,
+        recopiée juste après par l'import : l'additionner doublerait le stock) — sauf si des
+        ventes y sont accrochées, auquel cas elle est gardée à 0.
+        """
+        c.execute("SELECT id, taille FROM Stocks WHERE id_produit=? ORDER BY id", (garder,))
+        gardees = c.fetchall()
+        c.execute("SELECT id, taille FROM Stocks WHERE id_produit=? ORDER BY id", (absorbe,))
+        for sid, taille in c.fetchall():
+            voulue = str(taille or "").strip().casefold()
+            cible = next((g[0] for g in gardees if str(g[1] or "").strip().casefold() == voulue), None)
+            if cible is None and self._est_taille_unique(taille):
+                cible = next((g[0] for g in gardees if self._est_taille_unique(g[1])), None)
+            if cible is None:
+                c.execute("UPDATE Stocks SET id_produit=? WHERE id=?", (garder, sid))
+                gardees.append((sid, taille))
+                continue
+            # Les lignes de vente sont SCELLÉES (piste d'audit) : on ne peut pas les réattribuer à
+            # une autre ligne de stock. Une ligne déjà vendue est donc gardée, rattachée au produit
+            # conservé et ramenée à 0 (même règle que `_ecrire_lignes_de_stock`) ; une ligne
+            # jamais vendue disparaît.
+            if self._ligne_de_stock_referencee(c, sid):
+                c.execute("UPDATE Stocks SET id_produit=?, quantite_actuelle=0 WHERE id=?", (garder, sid))
+                continue
+            c.execute("DELETE FROM Stocks WHERE id=?", (sid,))
+        for (table,) in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+            if table in ("Stocks", "Produits"):
+                continue
+            cols = [r[1] for r in c.execute(f'PRAGMA table_info("{table}")').fetchall()]
+            if "id_produit" in cols:
+                c.execute(f'UPDATE "{table}" SET id_produit=? WHERE id_produit=?', (garder, absorbe))
+        c.execute("DELETE FROM Produits WHERE id=?", (absorbe,))
+
     def import_catalog(self, progress_callback=None) -> int:
         """
         Importe le catalogue complet de Shopify vers la base de données locale Kōdo POS.
@@ -2012,6 +2143,11 @@ class ShopifySync:
 
                 c.execute("INSERT OR IGNORE INTO Categories (nom) VALUES (?)", (cat,))
 
+                # UN produit Shopify = UN produit local, ses variantes devenant les lignes de stock
+                # (tailles). Avant, chaque variante créait son propre produit : « Robe » en S/M/L
+                # devenait trois produits « Robe » à une taille, à côté de l'article d'origine,
+                # et le stock comme sa valeur étaient comptés plusieurs fois.
+                variantes = []
                 for v in p.get("variants", []):
                     # Le SKU reste prioritaire sur le code-barres : c'est la clé avec laquelle les
                     # bases déjà synchronisées ont été écrites, en changer l'ordre dédoublerait tout
@@ -2024,81 +2160,84 @@ class ShopifySync:
                         variant_id = None
                     if not code and not variant_id:
                         continue
+                    variantes.append((v, code, code_brut, variant_id))
+                if not variantes:
+                    continue
 
-                    price_str = v.get("price", "0.00")
-                    compare_str = v.get("compare_at_price")
+                # Prix : ceux de la première variante portent le produit (les tailles d'un même
+                # article se vendent au même prix ; un prix par taille n'existe pas côté Kōdo).
+                v0 = variantes[0][0]
+                try:
+                    # `str()` d'abord : Shopify envoie ses prix en texte, mais rien ne le
+                    # garantit et `Decimal(3.30)` scellerait la valeur binaire du flottant
+                    # (3.2999999999999998...) au lieu du prix écrit.
+                    price_val = Decimal(str(v0.get("price", "0.00")))
+                except Exception:
+                    price_val = Decimal("0.00")
 
+                en_solde = 0
+                prix_solde_tvac = None
+                prix_vente_tvac = price_val
+                if v0.get("compare_at_price"):
                     try:
-                        # `str()` d'abord : Shopify envoie ses prix en texte, mais rien ne le
-                        # garantit et `Decimal(3.30)` scellerait la valeur binaire du flottant
-                        # (3.2999999999999998...) au lieu du prix écrit.
-                        price_val = Decimal(str(price_str))
+                        compare_val = Decimal(str(v0.get("compare_at_price")))
+                        if compare_val > price_val:
+                            en_solde = 1
+                            prix_vente_tvac = compare_val
+                            prix_solde_tvac = price_val
                     except Exception:
-                        price_val = Decimal("0.00")
+                        pass
 
-                    en_solde = 0
-                    prix_solde_tvac = None
-                    prix_vente_tvac = price_val
+                locaux = self._produits_locaux_du_produit(c, nom, variantes)
+                if locaux:
+                    pid = locaux[0]
+                    # Un article déjà dédoublé par d'anciennes versions est refondu en un seul.
+                    for doublon in locaux[1:]:
+                        self._fusionner_produit(c, pid, doublon)
+                    # Le code-barres n'est JAMAIS réécrit : une étiquette déjà imprimée et collée
+                    # en rayon doit continuer de désigner le même article.
+                    c.execute("""
+                        UPDATE Produits
+                        SET nom=?, categorie=?, prix_vente_tvac=?, en_solde=?, prix_solde_tvac=?
+                        WHERE id=?
+                    """, (nom, cat, prix_vente_tvac, en_solde, prix_solde_tvac, pid))
+                else:
+                    # `prix_achat_htva` reste NULL : le prix de vente divisé par 2,5 était une
+                    # marge INVENTÉE, qui alimentait ensuite les statistiques et les rapports
+                    # comme une donnée comptable. Shopify ne transmet pas le prix d'achat ;
+                    # tant que la commerçante ne l'a pas saisi, il n'existe pas.
+                    # Le code-barres reste NULL quand aucune variante n'en porte : fabriquer
+                    # un « SHPF-<id> » produisait une valeur non scannable et impossible à
+                    # imprimer. La correspondance de variante suffit à retrouver le produit.
+                    c.execute("""
+                        INSERT INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, en_solde, prix_solde_tvac)
+                        VALUES (?, ?, ?, NULL, ?, ?, ?)
+                    """, (self._code_du_produit(c, variantes), nom, cat, prix_vente_tvac, en_solde, prix_solde_tvac))
+                    pid = c.lastrowid
 
-                    if compare_str:
-                        try:
-                            compare_val = Decimal(str(compare_str))
-                            if compare_val > price_val:
-                                en_solde = 1
-                                prix_vente_tvac = compare_val
-                                prix_solde_tvac = price_val
-                        except Exception:
-                            pass
+                self._requalifier_ligne_unique(c, pid, [self._taille_variante(v) for v, _, _, _ in variantes])
 
-                    pid = self._retrouver_produit(c, variant_id, code, code_brut)
-                    if pid:
-                        # Le code-barres n'est JAMAIS réécrit : une étiquette déjà imprimée et collée
-                        # en rayon doit continuer de désigner le même article.
-                        c.execute("""
-                            UPDATE Produits
-                            SET nom=?, categorie=?, prix_vente_tvac=?, en_solde=?, prix_solde_tvac=?
-                            WHERE id=?
-                        """, (nom, cat, prix_vente_tvac, en_solde, prix_solde_tvac, pid))
-                    else:
-                        # `prix_achat_htva` reste NULL : le prix de vente divisé par 2,5 était une
-                        # marge INVENTÉE, qui alimentait ensuite les statistiques et les rapports
-                        # comme une donnée comptable. Shopify ne transmet pas le prix d'achat ;
-                        # tant que la commerçante ne l'a pas saisi, il n'existe pas.
-                        # Le code-barres reste NULL quand la variante n'en porte aucun : fabriquer
-                        # un « SHPF-<id> » produisait une valeur non scannable et impossible à
-                        # imprimer, présentée comme un vrai code-barres. La correspondance de
-                        # variante ci-dessous suffit à retrouver le produit au prochain import.
-                        c.execute("""
-                            INSERT INTO Produits (code_barre, nom, categorie, prix_achat_htva, prix_vente_tvac, en_solde, prix_solde_tvac)
-                            VALUES (?, ?, ?, NULL, ?, ?, ?)
-                        """, (code, nom, cat, prix_vente_tvac, en_solde, prix_solde_tvac))
-                        pid = c.lastrowid
-
-                    if pid and variant_id:
+                for v, code, code_brut, variant_id in variantes:
+                    if variant_id:
                         c.execute("""
                             INSERT INTO Shopify_Variantes (variant_id, id_produit, date_maj) VALUES (?, ?, ?)
                             ON CONFLICT(variant_id) DO UPDATE SET id_produit=excluded.id_produit, date_maj=excluded.date_maj
                         """, (variant_id, pid, maintenant))
 
-                    if pid:
-                        opt1 = v.get("option1", "Unique")
-                        opt2 = v.get("option2")
-                        taille = opt1 if opt1 and opt1 != "Default Title" else "Unique"
-                        if opt2 and opt2 != "Default Title":
-                            taille = f"{taille} / {opt2}"
+                    taille = self._taille_variante(v)
 
-                        qty = int(v.get("inventory_quantity") or 0)
+                    qty = int(v.get("inventory_quantity") or 0)
 
-                        c.execute("SELECT id, taille FROM Stocks WHERE id_produit=? ORDER BY id", (pid,))
-                        stock_rows = c.fetchall()
-                        wanted = str(taille).strip().casefold()
-                        cible = next((r[0] for r in stock_rows if str(r[1] or "").strip().casefold() == wanted), None)
-                        if cible is None and self._est_taille_unique(taille):
-                            cible = next((r[0] for r in stock_rows if self._est_taille_unique(r[1])), None)
-                        if cible is not None:
-                            c.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, cible))
-                        else:
-                            c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, NULL)", (pid, taille, qty))
+                    c.execute("SELECT id, taille FROM Stocks WHERE id_produit=? ORDER BY id", (pid,))
+                    stock_rows = c.fetchall()
+                    wanted = str(taille).strip().casefold()
+                    cible = next((r[0] for r in stock_rows if str(r[1] or "").strip().casefold() == wanted), None)
+                    if cible is None and self._est_taille_unique(taille):
+                        cible = next((r[0] for r in stock_rows if self._est_taille_unique(r[1])), None)
+                    if cible is not None:
+                        c.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, cible))
+                    else:
+                        c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, NULL)", (pid, taille, qty))
 
                     imported_count += 1
 

@@ -997,20 +997,21 @@ class TestBoutEnBoutSansBoutique(BaseTemporaire):
 
         # 2. Import du catalogue : les deux tailles arrivent avec leur stock.
         self.assertEqual(moteur.import_catalog(), 2)
-        stocks = dict(self.rows("SELECT p.code_barre, s.quantite_actuelle FROM Stocks s "
-                                "JOIN Produits p ON p.id = s.id_produit"))
-        self.assertEqual(stocks, {"ROBE-S": 4, "ROBE-M": 6})
+        # Un produit Shopify = un seul produit local, ses tailles étant ses lignes de stock.
+        stocks = self.rows("SELECT p.code_barre, s.taille, s.quantite_actuelle FROM Stocks s "
+                           "JOIN Produits p ON p.id = s.id_produit ORDER BY s.id")
+        self.assertEqual(stocks, [("ROBE", "S", 4), ("ROBE", "M", 6)])
 
         # 3. Une vente est encaissée à la caisse (vrai parcours de vente du logiciel).
         from kodo_core.api.app import kodo_app
         _, produits = kodo_app.handle_request("GET", "/api/products", {}, {}, {})[:2]
-        robe_m = next(p for p in produits if p["barcode"] == "ROBE-M")
+        robe = next(p for p in produits if p["barcode"] == "ROBE")
         statut, reponse, _ = kodo_app.handle_request("POST", "/api/sales", {}, {}, {
-            "items": [{"product": robe_m, "quantity": 1}], "totalTTC": 49.0,
+            "items": [{"product": robe, "quantity": 1, "size": "M", "selectedSize": "M"}], "totalTTC": 49.0,
             "paymentMethod": "CB", "cashierName": "Test", "printReceipt": False})
         self.assertEqual(statut, 200, reponse)
         self.assertEqual(self.rows("SELECT quantite_actuelle FROM Stocks s JOIN Produits p ON p.id = s.id_produit "
-                                   "WHERE p.code_barre = 'ROBE-M'"), [(5,)])
+                                   "WHERE s.taille = 'M'"), [(5,)])
 
         # 4. La vente est poussée : la boutique en ligne perd la même pièce.
         self.assertEqual(moteur.sync_tickets_to_shopify(), 1)
@@ -1020,10 +1021,10 @@ class TestBoutEnBoutSansBoutique(BaseTemporaire):
         # 5. La boutique en ligne vend à son tour une robe en M : le stock local suit.
         self.assertEqual(moteur.sync_orders_from_shopify(), 1)
         self.assertEqual(self.rows("SELECT quantite_actuelle FROM Stocks s JOIN Produits p ON p.id = s.id_produit "
-                                   "WHERE p.code_barre = 'ROBE-M'"), [(4,)],
+                                   "WHERE s.taille = 'M'"), [(4,)],
                          "la commande en ligne n'a pas été retirée du stock local, ou pas de la bonne taille")
         self.assertEqual(self.rows("SELECT quantite_actuelle FROM Stocks s JOIN Produits p ON p.id = s.id_produit "
-                                   "WHERE p.code_barre = 'ROBE-S'"), [(4,)],
+                                   "WHERE s.taille = 'S'"), [(4,)],
                          "c'est le stock d'une AUTRE taille qui a bougé")
 
         # 6. La cliente en ligne renvoie sa robe : la boutique la rembourse et la remet en
@@ -1033,7 +1034,7 @@ class TestBoutEnBoutSansBoutique(BaseTemporaire):
         self.assertEqual(moteur.sync_refunds_from_shopify(), 1,
                          "le remboursement fait en ligne n'est pas redescendu jusqu'à la caisse")
         self.assertEqual(self.rows("SELECT quantite_actuelle FROM Stocks s JOIN Produits p ON p.id = s.id_produit "
-                                   "WHERE p.code_barre = 'ROBE-M'"), [(5,)],
+                                   "WHERE s.taille = 'M'"), [(5,)],
                          "l'article rendu n'est pas revenu au stock de la caisse")
         remboursements = self.rows("SELECT numero_ticket, total_tvac FROM Tickets WHERE total_tvac < 0")
         self.assertEqual(len(remboursements), 1, "la vente reste comptée en entier dans le Z")

@@ -92,6 +92,8 @@ class TestPremiereActivation(BaseTemporaire):
         moteur = MoteurBouchonne({"products.json": lambda e, d: next(pages)},
                                  store_url="boutique.myshopify.com", access_token="jeton")
         self.assertEqual(moteur.import_catalog(), 2)
+        # L'import a décliné l'article local en S/M : en ligne, la ligne vendue est la taille S.
+        self.boutique = FausseBoutique([{"sku": "ROBE-S", "barcode": "ROBE-S", "item": 42}])
         self.creer_ticket("T-APRES-IMPORT", [(self.sid, 1)])
         self.activer()
 
