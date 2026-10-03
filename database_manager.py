@@ -444,7 +444,9 @@ def _initialiser_db_raw(conn):
             client_id INTEGER DEFAULT NULL,
             client_nom TEXT DEFAULT NULL,
             status TEXT DEFAULT 'active',
-            emis_par TEXT DEFAULT NULL
+            emis_par TEXT DEFAULT NULL,
+            ticket_origine TEXT DEFAULT NULL,
+            ticket_remboursement TEXT DEFAULT NULL
         )
     ''')
     cursor.execute("PRAGMA table_info(Cartes_Cadeaux)")
@@ -455,6 +457,8 @@ def _initialiser_db_raw(conn):
         ("client_nom", "ALTER TABLE Cartes_Cadeaux ADD COLUMN client_nom TEXT DEFAULT NULL"),
         ("status", "ALTER TABLE Cartes_Cadeaux ADD COLUMN status TEXT DEFAULT 'active'"),
         ("emis_par", "ALTER TABLE Cartes_Cadeaux ADD COLUMN emis_par TEXT DEFAULT NULL"),
+        ("ticket_origine", "ALTER TABLE Cartes_Cadeaux ADD COLUMN ticket_origine TEXT DEFAULT NULL"),
+        ("ticket_remboursement", "ALTER TABLE Cartes_Cadeaux ADD COLUMN ticket_remboursement TEXT DEFAULT NULL"),
     ):
         if col not in cols_cartes_cadeaux:
             try: cursor.execute(ddl)
@@ -1094,6 +1098,26 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
     return ticket_id
 
 
+def _ratio_remise_ticket(cursor, ticket_id):
+    """Part du prix de ligne réellement payée après la remise globale du ticket (1 = aucune).
+
+    `Ventes_Details.prix_unitaire_tvac` garde le prix AVANT remise globale, alors que
+    `Tickets.total_tvac` est le total remisé. Rembourser le prix de ligne brut rendait donc
+    plus que ce que la cliente avait payé (100 € vendu avec -10 % : 90 € payés, 100 € rendus).
+    Le ratio est recalculé depuis les lignes et le total, sans se fier à `Tickets.remise`,
+    qui contient un pourcentage dans les anciennes versions et des euros dans les récentes."""
+    cursor.execute("SELECT total_tvac FROM Tickets WHERE id = ?", (ticket_id,))
+    row = cursor.fetchone()
+    cursor.execute(
+        "SELECT COALESCE(SUM(prix_unitaire_tvac * quantite), 0) FROM Ventes_Details "
+        "WHERE id_ticket = ? AND quantite > 0 AND refund_of_vd_id IS NULL", (ticket_id,))
+    brut = Decimal(str(cursor.fetchone()[0] or 0))
+    total = Decimal(str(row[0] if row and row[0] is not None else 0))
+    if brut <= Decimal('0.00') or total <= Decimal('0.00') or total >= brut:
+        return Decimal('1')
+    return total / brut
+
+
 def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mode, vendeur_nom, date_heure, quantite=1, caisse_id="POS-01", recrediter_stock=True):
     """Enregistre un remboursement (NF525).
 
@@ -1114,7 +1138,7 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
     garde-fou anti-double-remboursement perdrait sa trace.
     """
     cursor.execute("""
-        SELECT vd.quantite, vd.prix_unitaire_tvac, vd.id_stock, t.numero_ticket, p.taux_tva
+        SELECT vd.quantite, vd.prix_unitaire_tvac, vd.id_stock, t.numero_ticket, p.taux_tva, t.id, t.total_tvac
         FROM Ventes_Details vd
         JOIN Tickets t ON vd.id_ticket = t.id
         LEFT JOIN Stocks s ON vd.id_stock = s.id
@@ -1125,7 +1149,7 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
     if not row:
         raise ValueError(f"Ligne de vente introuvable (vd_id={vd_id}) : remboursement refusé.")
 
-    qte_vendue, prix_unitaire_origine, id_stock_origine, numero_ticket_origine, taux_tva_row = row
+    qte_vendue, prix_unitaire_origine, id_stock_origine, numero_ticket_origine, taux_tva_row, id_ticket_origine, total_ticket_origine = row
 
     if ticket_origine and str(ticket_origine) != str(numero_ticket_origine):
         raise ValueError(
@@ -1153,7 +1177,17 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
             f"vd_id={vd_id} (vendu={qte_vendue}, déjà remboursé={deja_rembourse}, demandé={quantite})."
         )
 
-    total_tvac = -(prix_unitaire * Decimal(str(quantite))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    ratio = _ratio_remise_ticket(cursor, id_ticket_origine)
+    montant = (prix_unitaire * ratio * Decimal(str(quantite))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    if ratio < Decimal('1'):
+        # Les arrondis par ligne ne doivent jamais faire rendre plus que le ticket payé.
+        cursor.execute(
+            "SELECT COALESCE(SUM(-t.total_tvac), 0) FROM Tickets t JOIN Ventes_Details r ON r.id_ticket = t.id "
+            "WHERE r.refund_of_vd_id IN (SELECT id FROM Ventes_Details WHERE id_ticket = ?)", (id_ticket_origine,))
+        deja_rendu = Decimal(str(cursor.fetchone()[0] or 0))
+        reste = Decimal(str(total_ticket_origine)) - deja_rendu
+        montant = max(Decimal('0.00'), min(montant, reste))
+    total_tvac = -montant
     total_htva = (total_tvac / (Decimal('1.00') + taux_tva)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     total_tva = total_tvac - total_htva
 
@@ -1245,7 +1279,9 @@ def rechercher_ticket_pour_remboursement(numero_ticket, conn=None):
             ORDER BY vd.id ASC
         """, (ticket_id,))
         lignes = []
-        for vd_id, stock_id, qte_vendue, prix_unitaire, nom, taille in c.fetchall():
+        lignes_brutes = c.fetchall()
+        ratio = _ratio_remise_ticket(c, ticket_id)
+        for vd_id, stock_id, qte_vendue, prix_unitaire, nom, taille in lignes_brutes:
             c.execute("SELECT COALESCE(SUM(-quantite), 0) FROM Ventes_Details WHERE refund_of_vd_id = ?", (vd_id,))
             deja_rembourse = c.fetchone()[0] or 0
             lignes.append({
@@ -1253,7 +1289,7 @@ def rechercher_ticket_pour_remboursement(numero_ticket, conn=None):
                 "stock_id": stock_id,
                 "name": nom,
                 "size": taille or "",
-                "unitPrice": float(prix_unitaire),
+                "unitPrice": float((Decimal(str(prix_unitaire)) * ratio).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
                 "quantitySold": int(qte_vendue),
                 "quantityRefunded": int(deja_rembourse),
                 "quantityRemaining": int(qte_vendue) - int(deja_rembourse),
@@ -1329,18 +1365,29 @@ def lister_mouvements_caisse(caisse_id="POS-01", conn=None):
             conn.close()
 
 
+# Alphabet sans caractères ambigus (0/O, 1/I/L) : le code est aussi recopié à la main.
+_ALPHABET_CODE_AVOIR = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
 def _generer_code_carte_cadeau(cursor, prefix="AVOIR"):
-    """Génère un code de carte cadeau/avoir garanti unique (retry sur collision)."""
-    import random
+    """Génère un code de carte cadeau/avoir garanti unique (retry sur collision).
+
+    Un bon est un titre au porteur : quiconque saisit un code valide le dépense. L'ancien
+    format (6 chiffres tirés avec `random`, 900 000 combinaisons) se devinait par
+    essais successifs à la caisse. 10 caractères tirés avec `secrets` (~8·10^14) ne
+    s'énumèrent plus."""
+    import secrets
     for _ in range(20):
-        code = f"{prefix}-{random.randint(100000, 999999)}"
+        corps = "".join(secrets.choice(_ALPHABET_CODE_AVOIR) for _ in range(10))
+        code = f"{prefix}-{corps}"
         cursor.execute("SELECT 1 FROM Cartes_Cadeaux WHERE code = ?", (code,))
         if cursor.fetchone() is None:
             return code
     raise ValueError("Impossible de générer un code de carte cadeau unique.")
 
 
-def emettre_carte_cadeau(cursor, montant, code=None, client_id=None, client_nom=None, notes=None, emis_par=None, prefix="AVOIR"):
+def emettre_carte_cadeau(cursor, montant, code=None, client_id=None, client_nom=None, notes=None, emis_par=None, prefix="AVOIR",
+                         ticket_origine=None, ticket_remboursement=None):
     """Émet une carte cadeau / bon d'avoir réel, persisté et traçable (NF525).
 
     Sans cette persistance, un avoir « émis » n'existait qu'en mémoire côté navigateur
@@ -1357,16 +1404,15 @@ def emettre_carte_cadeau(cursor, montant, code=None, client_id=None, client_nom=
         raise ValueError(f"Le code de carte cadeau {final_code!r} existe déjà.")
 
     cursor.execute("""
-        INSERT INTO Cartes_Cadeaux (code, solde_initial, solde_actuel, notes, client_id, client_nom, status, emis_par)
-        VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
-    """, (final_code, float(montant_dec), float(montant_dec), notes, client_id, client_nom, emis_par))
+        INSERT INTO Cartes_Cadeaux (code, solde_initial, solde_actuel, notes, client_id, client_nom, status, emis_par,
+                                    ticket_origine, ticket_remboursement)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    """, (final_code, float(montant_dec), float(montant_dec), notes, client_id, client_nom, emis_par,
+          ticket_origine, ticket_remboursement))
 
-    try:
-        from kodo_core.db.audit_trail import record_audit_event
-        record_audit_event(cursor, "CARTE_CADEAU_EMISE", "Cartes_Cadeaux", final_code, emis_par or "", "EMISSION",
-                            f"Montant initial {montant_dec} EUR" + (f" - {notes}" if notes else ""))
-    except Exception:
-        pass
+    from kodo_core.db.audit_trail import record_audit_event
+    record_audit_event(cursor, "CARTE_CADEAU_EMISE", "Cartes_Cadeaux", final_code, emis_par or "", "EMISSION",
+                        f"Montant initial {montant_dec} EUR" + (f" - {notes}" if notes else ""))
 
     return {
         "code": final_code,
@@ -1384,7 +1430,8 @@ def lister_cartes_cadeaux(conn=None):
     try:
         c = conn.cursor()
         c.execute("""
-            SELECT id, code, solde_initial, solde_actuel, date_creation, notes, client_id, client_nom, status
+            SELECT id, code, solde_initial, solde_actuel, date_creation, notes, client_id, client_nom, status,
+                   ticket_origine, ticket_remboursement
             FROM Cartes_Cadeaux ORDER BY id DESC
         """)
         return [
@@ -1398,6 +1445,8 @@ def lister_cartes_cadeaux(conn=None):
                 "clientId": r[6],
                 "clientName": r[7],
                 "status": r[8] or "active",
+                "originTicket": r[9],
+                "refundTicket": r[10],
             }
             for r in c.fetchall()
         ]
@@ -1447,31 +1496,30 @@ def utiliser_carte_cadeau(cursor, code, montant_a_utiliser, user_name=None):
         # même carte) : on refuse plutôt que de risquer un double-débit silencieux.
         raise ValueError(f"Conflit de mise à jour sur la carte {code_norm}, merci de réessayer.")
 
-    try:
-        from kodo_core.db.audit_trail import record_audit_event
-        record_audit_event(cursor, "CARTE_CADEAU_UTILISEE", "Cartes_Cadeaux", code_norm, user_name or "", "DEBIT",
-                            f"Débit {montant_dec} EUR - solde restant {nouveau_solde} EUR")
-    except Exception:
-        pass
+    from kodo_core.db.audit_trail import record_audit_event
+    record_audit_event(cursor, "CARTE_CADEAU_UTILISEE", "Cartes_Cadeaux", code_norm, user_name or "", "DEBIT",
+                        f"Débit {montant_dec} EUR - solde restant {nouveau_solde} EUR")
 
     return montant_dec
 
 
-def annuler_carte_cadeau(cursor, code):
+def annuler_carte_cadeau(cursor, code, user_name=None):
     """Invalide une carte cadeau/avoir (mise à solde 0, statut 'annulee') sans jamais
     supprimer la ligne : une carte cadeau émise reste une pièce comptable, comme un
-    ticket ou un mouvement de caisse."""
+    ticket ou un mouvement de caisse.
+
+    Le solde détruit et l'auteur sont inscrits dans la chaîne d'audit : annuler un bon
+    revient à faire disparaître une dette envers la cliente, ça doit laisser une trace."""
     code_norm = str(code or "").strip().upper()
-    cursor.execute("SELECT id FROM Cartes_Cadeaux WHERE code = ?", (code_norm,))
+    cursor.execute("SELECT id, solde_actuel, status FROM Cartes_Cadeaux WHERE code = ?", (code_norm,))
     row = cursor.fetchone()
     if not row:
         raise ValueError(f"Carte cadeau/avoir introuvable : {code_norm}")
+    solde = Decimal(str(row[1] or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     cursor.execute("UPDATE Cartes_Cadeaux SET solde_actuel = 0, status = 'annulee' WHERE id = ?", (row[0],))
-    try:
-        from kodo_core.db.audit_trail import record_audit_event
-        record_audit_event(cursor, "CARTE_CADEAU_ANNULEE", "Cartes_Cadeaux", code_norm, "", "ANNULATION", "")
-    except Exception:
-        pass
+    from kodo_core.db.audit_trail import record_audit_event
+    record_audit_event(cursor, "CARTE_CADEAU_ANNULEE", "Cartes_Cadeaux", code_norm, user_name or "", "ANNULATION",
+                       f"Solde annulé {solde} EUR (statut précédent : {row[2] or 'active'})")
 
 
 def sauvegarder_panier_en_attente(panier, total_tvac, client_id=None, client_nom=None, remise=Decimal('0.00'), note="", conn=None):

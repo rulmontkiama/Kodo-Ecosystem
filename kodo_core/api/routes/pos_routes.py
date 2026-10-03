@@ -191,6 +191,20 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             )
         except ValueError as ve:
             return 400, {"error": str(ve)}
+
+        # Remboursement en avoir : le bon sort de l'imprimante tout de suite (original).
+        # Le remboursement est déjà committé : un souci d'impression ne le remet jamais en cause,
+        # il est seulement signalé pour que l'écran propose « Imprimer le bon ».
+        if res.get("gift_card"):
+            res["print_status"] = "SKIPPED"
+            if data.get("printVoucher", True):
+                try:
+                    from kodo_core.hardware.print_worker import get_print_worker
+                    job = get_print_worker().enqueue_voucher_print(res["gift_card"]["code"])
+                    res["print_status"], res["print_job_id"] = "ENQUEUED", job.job_id
+                except Exception as pe:
+                    print(f"[IMPRESSION AVOIR ENQUEUE WARNING] {pe}")
+                    res["print_status"] = "ERROR"
         return 200, res
 
     # 3ter. Réimpression d'un ticket existant (asynchrone via PrintWorker)
@@ -438,12 +452,36 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
 
         return 200, {"success": True, **carte}
 
+    # Impression / aperçu du bon d'avoir. `duplicata` marque la réimpression sur le papier.
+    elif method == "POST" and path == "/api/gift-cards/print":
+        from kodo_core.hardware import avoir_printer
+        code = data.get("code")
+        try:
+            avoir_printer.charger_avoir(code)  # refuse tout de suite un bon annulé / épuisé / inconnu
+            from kodo_core.hardware.print_worker import get_print_worker
+            job = get_print_worker().enqueue_voucher_print(code, duplicata=bool(data.get("duplicata")))
+        except ValueError as ve:
+            return 400, {"error": str(ve)}
+        except Exception as pe:
+            print(f"[IMPRESSION AVOIR WARNING] {pe}")
+            return 500, {"success": False, "error": str(pe)}
+        return 200, {"success": True, "status": "ENQUEUED", "print_job_id": job.job_id}
+
+    elif method == "GET" and path == "/api/gift-cards/preview":
+        from kodo_core.hardware import avoir_printer
+        code = (query.get("code") or [None])[0]
+        duplicata = str((query.get("duplicata") or ["0"])[0]).lower() in ("1", "true", "oui")
+        try:
+            return 200, {"image": avoir_printer.apercu_base64(code, duplicata=duplicata)}
+        except ValueError as ve:
+            return 400, {"error": str(ve)}
+
     elif method == "POST" and path == "/api/gift-cards/void":
         code = data.get("code")
         conn = database_manager.get_connection()
         try:
             cursor = conn.cursor()
-            database_manager.annuler_carte_cadeau(cursor, code)
+            database_manager.annuler_carte_cadeau(cursor, code, user_name=data.get("userName") or data.get("cashierName"))
             conn.commit()
         except ValueError as ve:
             conn.rollback()

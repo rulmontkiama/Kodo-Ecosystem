@@ -142,7 +142,7 @@ class TestRemboursementRapatrie(BaseRemboursements):
 
     def test_un_remboursement_partiel_ne_rend_que_ce_qui_a_ete_rendu(self):
         (traites,), _ = self.importer_puis_rembourser(
-            self.commande(quantite=3), [self.remboursement(quantite=1)])
+            self.commande(quantite=3, total_price="90.00"), [self.remboursement(quantite=1)])
         self.assertEqual(traites, 1)
         self.assertEqual(self.tailles()["M"], 4, "6 vendus -3, rendu +1")
         self.assertEqual(self.tickets_de_remboursement()[0][1], Decimal("-30.00"))

@@ -648,6 +648,18 @@ class MigrationManager:
                 )""",
                 "CREATE INDEX IF NOT EXISTS idx_sync_queue_statut ON sync_queue(statut)",
             ]
+        },
+        {
+            "version": "2.1.0",
+            "description": "Avoirs : lien explicite entre un bon d'avoir et le remboursement qui l'a "
+                           "généré (ticket d'origine et ticket REF). Jusqu'ici ce lien n'existait que "
+                           "dans le texte libre de `notes`, et le bon était créé par un second appel "
+                           "réseau APRÈS le remboursement : s'il échouait, la cliente était remboursée "
+                           "« en avoir » sans bon.",
+            "sql": [
+                "ALTER TABLE Cartes_Cadeaux ADD COLUMN ticket_origine TEXT DEFAULT NULL",
+                "ALTER TABLE Cartes_Cadeaux ADD COLUMN ticket_remboursement TEXT DEFAULT NULL",
+            ],
         }
     ]
 

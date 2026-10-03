@@ -117,6 +117,7 @@ class PrintJob:
     # vente est inchangé, y compris pour les appelants qui ignorent ce champ.
     TYPE_TICKET = "TICKET"
     TYPE_LABEL = "LABEL"
+    TYPE_VOUCHER = "VOUCHER"
 
     def __init__(self, ticket_number: str, printer_name: Optional[str] = None, host: Optional[str] = None, port: int = 9100,
                  job_type: str = TYPE_TICKET, payload: Optional[Dict[str, Any]] = None):
@@ -182,6 +183,21 @@ class PrintWorker:
                 old = self._recent_job_ids.pop(0)
                 self._jobs.pop(old, None)
 
+        self._queue.put(job)
+        return job
+
+    def enqueue_voucher_print(self, code: str, duplicata: bool = False,
+                              printer_name: Optional[str] = None, host: Optional[str] = None,
+                              port: int = 9100) -> PrintJob:
+        """Enfile l'impression d'un bon d'avoir (même imprimante et même disjoncteur que les tickets)."""
+        job = PrintJob(str(code), printer_name=printer_name, host=host, port=port,
+                       job_type=PrintJob.TYPE_VOUCHER, payload={"duplicata": bool(duplicata)})
+        with self._lock:
+            self._jobs[job.job_id] = job
+            self._recent_job_ids.append(job.job_id)
+            if len(self._recent_job_ids) > 100:
+                old = self._recent_job_ids.pop(0)
+                self._jobs.pop(old, None)
         self._queue.put(job)
         return job
 
@@ -265,13 +281,23 @@ class PrintWorker:
 
             try:
                 # Import paresseux pour éviter les cycles
-                from kodo_core.hardware.printer import imprimer_ticket_caisse
-                success = imprimer_ticket_caisse(
-                    num_ticket=job.ticket_number,
-                    printer_name=job.printer_name,
-                    host=job.host,
-                    port=job.port
-                )
+                if job.job_type == PrintJob.TYPE_VOUCHER:
+                    from kodo_core.hardware.avoir_printer import imprimer_avoir
+                    success = imprimer_avoir(
+                        job.ticket_number,
+                        duplicata=bool(job.payload.get("duplicata")),
+                        printer_name=job.printer_name,
+                        host=job.host,
+                        port=job.port,
+                    )
+                else:
+                    from kodo_core.hardware.printer import imprimer_ticket_caisse
+                    success = imprimer_ticket_caisse(
+                        num_ticket=job.ticket_number,
+                        printer_name=job.printer_name,
+                        host=job.host,
+                        port=job.port
+                    )
 
                 if success:
                     job.status = PrintJob.STATUS_SUCCESS

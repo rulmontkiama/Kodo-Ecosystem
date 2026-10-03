@@ -682,6 +682,22 @@ def process_return_transaction(
             quantite=quantity
         )
 
+        # Remboursement « en avoir » : le bon est créé dans la MÊME transaction que le
+        # remboursement. Créé par un second appel après le commit, un échec (réseau,
+        # onglet fermé) laissait la cliente remboursée en avoir… sans aucun bon, et la
+        # ligne n'était plus remboursable. Si l'émission échoue ici, tout est annulé.
+        # Le montant est celui relu en base, jamais celui annoncé par le client.
+        avoir = None
+        if database_manager.classer_moyen_paiement(refund_mode) == "avoir":
+            avoir = database_manager.emettre_carte_cadeau(
+                cursor=cursor,
+                montant=-montant_reel_rembourse,
+                notes=f"Avoir sur retour du ticket {original_ticket_number} ({new_ref})",
+                emis_par=cashier_name,
+                ticket_origine=str(original_ticket_number),
+                ticket_remboursement=new_ref,
+            )
+
         conn.commit()
 
         # Réveil immédiat de la synchronisation Shopify (temps réel < 2s pour pièces uniques)
@@ -691,13 +707,16 @@ def process_return_transaction(
         except Exception:
             pass
 
-        return {
+        res = {
             "success": True,
             "refund_ticket_number": new_ref,
             "amount_refunded": float(-montant_reel_rembourse),
             "refund_mode": refund_mode,
             "date_heure": now_str
         }
+        if avoir is not None:
+            res["gift_card"] = avoir
+        return res
 
     except Exception as e:
         if conn:
