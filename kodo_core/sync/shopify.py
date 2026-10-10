@@ -62,6 +62,33 @@ CLE_TOKEN = "shopify_access_token"
 CLE_AUTO_SYNC = "shopify_auto_sync"
 CLE_SYNC_ORDERS = "shopify_sync_orders"
 
+# Authentification « application récente » (Dev Dashboard). Depuis le 1er janvier 2026 Shopify ne
+# permet plus de créer d'application personnalisée depuis l'admin : les nouvelles applications
+# n'affichent AUCUN jeton, elles donnent un identifiant client et un secret, à échanger contre un
+# jeton qui n'est valable que 24 heures (« client credentials grant »). Un jeton collé à la main
+# dans l'écran Paramètres cessait donc de marcher le lendemain, sans qu'aucun réglage n'ait changé.
+# Le moteur garde l'identifiant et le secret, et renouvelle le jeton lui-même avant l'échéance.
+CLE_CLIENT_ID = "shopify_client_id"
+CLE_CLIENT_SECRET = "shopify_client_secret"
+CLE_JETON_EXPIRE = "shopify_token_expires_at"      # secondes epoch ; vide = jeton saisi à la main
+CLE_VERSION_API = "shopify_api_version"            # forçage de support ; vide = VERSION_API_DEFAUT
+CLE_VERSION_SERVIE = "shopify_api_version_servie"  # version réellement servie par Shopify
+
+# Version d'API demandée. Shopify ne garantit chaque version que douze mois (« 2025-01 » l'a été
+# jusqu'au 16 janvier 2026) ; au-delà il sert EN SILENCE la plus ancienne encore supportée, et
+# cette version glisse d'un trimestre à l'autre. La version est donc explicite, et celle que
+# Shopify SERT réellement est lue dans la réponse (`X-Shopify-API-Version`) pour que le décalage
+# soit visible à l'écran avant de devenir une panne. À relever au moins une fois par an.
+VERSION_API_DEFAUT = "2026-01"
+
+# Le jeton géré par l'application est remplacé quand il lui reste moins de dix minutes.
+MARGE_RENOUVELLEMENT_JETON_S = 600
+
+# Un seul renouvellement à la fois dans le processus : le fil de synchro et les routes de
+# l'écran Paramètres construisent chacun leur moteur, et deux demandes simultanées donnaient
+# deux jetons dont l'un invalidait l'autre.
+_VERROU_JETON = threading.RLock()
+
 # Dépôt d'inventaire visé dans la boutique. Une boutique Shopify peut en compter plusieurs
 # (le magasin, une réserve, un entrepôt de préparation, un marché temporaire) et l'ajustement
 # de stock s'applique à UN dépôt nommé : sans ce réglage, la caisse choisissait le premier
@@ -184,13 +211,15 @@ def enregistrer_etat_sync(ok: bool, message: str = ""):
 
 def lire_etat_sync() -> dict:
     """État de la dernière passe (date, succès, message, dépôt), pour l'écran Paramètres."""
-    etat = {"derniere_synchro": None, "succes": None, "message": "", "avertissement_depot": ""}
+    etat = {"derniere_synchro": None, "succes": None, "message": "", "avertissement_depot": "",
+            "version_api_servie": ""}
     try:
         conn = get_connection()
         try:
             c = conn.cursor()
-            c.execute("SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?, ?)",
-                      (CLE_ETAT_DATE, CLE_ETAT_OK, CLE_ETAT_MESSAGE, CLE_DEPOT_AVERTISSEMENT))
+            c.execute("SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?, ?, ?)",
+                      (CLE_ETAT_DATE, CLE_ETAT_OK, CLE_ETAT_MESSAGE, CLE_DEPOT_AVERTISSEMENT,
+                       CLE_VERSION_SERVIE))
             params = {row[0]: row[1] for row in c.fetchall()}
         finally:
             conn.close()
@@ -199,6 +228,7 @@ def lire_etat_sync() -> dict:
             etat["succes"] = params.get(CLE_ETAT_OK) == "1"
         etat["message"] = params.get(CLE_ETAT_MESSAGE, "") or ""
         etat["avertissement_depot"] = params.get(CLE_DEPOT_AVERTISSEMENT, "") or ""
+        etat["version_api_servie"] = params.get(CLE_VERSION_SERVIE, "") or ""
     except Exception as e:
         logger.error(f"Impossible de lire l'état de synchronisation Shopify : {e}")
     return etat
@@ -213,14 +243,16 @@ def lire_reglages_shopify(conn=None) -> dict:
     commerçante — coché dans les réglages, mais sans effet réel.
     """
     reglages = {"store_url": "", "access_token": "", "location_id": "",
-                "auto_sync": True, "sync_orders": True}
+                "auto_sync": True, "sync_orders": True,
+                "client_id": "", "client_secret": "", "token_expire_a": 0.0, "api_version": ""}
     fermer = conn is None
     try:
         conn = conn or get_connection()
         c = conn.cursor()
         c.execute(
-            "SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?, ?, ?)",
-            (CLE_URL, CLE_TOKEN, CLE_LOCATION, CLE_AUTO_SYNC, CLE_SYNC_ORDERS),
+            "SELECT cle, valeur FROM Parametres WHERE cle IN (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (CLE_URL, CLE_TOKEN, CLE_LOCATION, CLE_AUTO_SYNC, CLE_SYNC_ORDERS,
+             CLE_CLIENT_ID, CLE_CLIENT_SECRET, CLE_JETON_EXPIRE, CLE_VERSION_API),
         )
         params = {row[0]: row[1] for row in c.fetchall()}
         reglages["store_url"] = str(params.get(CLE_URL) or "").strip()
@@ -228,6 +260,13 @@ def lire_reglages_shopify(conn=None) -> dict:
         reglages["location_id"] = str(params.get(CLE_LOCATION) or "").strip()
         reglages["auto_sync"] = str(params.get(CLE_AUTO_SYNC, "1")) == "1"
         reglages["sync_orders"] = str(params.get(CLE_SYNC_ORDERS, "1")) == "1"
+        reglages["client_id"] = str(params.get(CLE_CLIENT_ID) or "").strip()
+        reglages["client_secret"] = str(params.get(CLE_CLIENT_SECRET) or "").strip()
+        try:
+            reglages["token_expire_a"] = float(params.get(CLE_JETON_EXPIRE) or 0)
+        except (TypeError, ValueError):
+            reglages["token_expire_a"] = 0.0
+        reglages["api_version"] = str(params.get(CLE_VERSION_API) or "").strip()
     except Exception as e:
         logger.error(f"Erreur lors du chargement de la configuration Shopify : {e}")
     finally:
@@ -237,6 +276,15 @@ def lire_reglages_shopify(conn=None) -> dict:
             except Exception:
                 pass
     return reglages
+
+
+def identifiants_presents(reglages: dict) -> bool:
+    """
+    Vrai si la boutique a de quoi s'authentifier : un jeton saisi à la main (ancienne application
+    personnalisée), ou un identifiant client ET un secret (application récente, jeton renouvelé).
+    """
+    return bool(reglages.get("access_token")
+                or (reglages.get("client_id") and reglages.get("client_secret")))
 
 
 # --- Journal de synchronisation (idempotence ligne à ligne) ---------------------------------
@@ -521,10 +569,23 @@ class ShopifySync:
     }
     """
 
-    def __init__(self, store_url: str = "", access_token: str = "", api_version: str = "2025-01"):
+    def __init__(self, store_url: str = "", access_token: str = "", api_version: str = None,
+                 client_id: str = "", client_secret: str = ""):
         self.store_url = store_url.strip()
         self.access_token = access_token.strip()
-        self.api_version = api_version
+        # Version imposée par l'appelant, sinon celle des réglages, sinon la version par défaut.
+        self._version_imposee = bool(api_version)
+        self.api_version = api_version or VERSION_API_DEFAUT
+        # Application récente : identifiant client + secret, échangés contre un jeton de 24 h.
+        self.client_id = (client_id or "").strip()
+        self.client_secret = (client_secret or "").strip()
+        # Échéance (secondes epoch) du jeton géré par l'application ; 0 = inconnue.
+        self.jeton_expire_a = 0.0
+        # Version d'API que Shopify a réellement servie (en-tête de réponse), '' si jamais lue.
+        self.version_api_servie = ""
+        # Jeton émis par la dernière requête, et vrai si Shopify l'a refusé par un 401.
+        self._jeton_envoye = ""
+        self._refus_401 = False
         self._location_id = None
         # Dépôt d'inventaire choisi dans les réglages (vide = « laisse la caisse décider »).
         self.location_id_configure = ""
@@ -558,7 +619,8 @@ class ShopifySync:
         # Identifiants imposés par l'appelant : uniquement quand les DEUX sont fournis. Un jeton
         # passé en argument avec une URL vide donnait un état bâtard (moitié appelant, moitié
         # base) ; dans ce cas la base fait autorité sur les deux champs.
-        self._config_injectee = bool(self.store_url and self.access_token)
+        self._config_injectee = bool(
+            self.store_url and (self.access_token or (self.client_id and self.client_secret)))
         if not self._config_injectee:
             self.load_config()
 
@@ -581,9 +643,14 @@ class ShopifySync:
         # une étagère dans la boutique, pas la boutique elle-même.
         ancien_depot, ancienne_boutique = self.location_id_configure, self.store_url
         self.location_id_configure = reglages["location_id"]
+        if not self._version_imposee:
+            self.api_version = reglages["api_version"] or VERSION_API_DEFAUT
         if not self._config_injectee:
             self.store_url = reglages["store_url"]
             self.access_token = reglages["access_token"]
+            self.client_id = reglages["client_id"]
+            self.client_secret = reglages["client_secret"]
+            self.jeton_expire_a = reglages["token_expire_a"]
         if self.location_id_configure != ancien_depot or self.store_url != ancienne_boutique:
             # `_location_id` est un identifiant PROPRE à une boutique. Le thread de synchro vit
             # des heures et relit ces réglages à chaque passe : sans cet oubli, changer de dépôt
@@ -597,11 +664,37 @@ class ShopifySync:
         return normaliser_domaine_boutique(self.store_url)
 
     def est_configure(self) -> bool:
-        """Vrai si le domaine de boutique EST exploitable ET le jeton d'accès renseigné."""
-        return bool(self.access_token and domaine_boutique_valide(self.domaine()))
+        """
+        Vrai si le domaine de boutique EST exploitable ET qu'il y a de quoi s'authentifier : un
+        jeton saisi, ou l'identifiant client + le secret (le jeton est alors obtenu à la demande).
+        """
+        return bool((self.access_token or self._a_des_identifiants_app())
+                    and domaine_boutique_valide(self.domaine()))
 
     def make_request(self, endpoint: str, method: str = "GET", data: dict = None,
                      max_retries: int = 3, rejouable: bool = True):
+        """
+        Requête vers Shopify, avec jeton géré : renouvelé AVANT son échéance, et UNE fois si
+        Shopify le refuse (401) malgré tout (révoqué, ou expiré plus tôt qu'annoncé).
+
+        Rejouer après un 401 est sans danger, y compris pour l'ajustement relatif d'inventaire :
+        un 401 est un refus d'authentification, Shopify n'a RIEN appliqué. Ce n'est pas le cas
+        d'une coupure réseau, qui reste réglée dans `_requete_shopify`.
+        """
+        if self.est_configure() and self._jeton_a_renouveler():
+            if not self.renouveler_jeton():
+                return None
+        self._refus_401 = False
+        resultat = self._requete_shopify(endpoint, method, data, max_retries, rejouable)
+        if resultat is None and self._refus_401 and self._a_des_identifiants_app():
+            refuse = self._jeton_envoye
+            self._refus_401 = False
+            if self.renouveler_jeton(jeton_refuse=refuse):
+                resultat = self._requete_shopify(endpoint, method, data, max_retries, rejouable)
+        return resultat
+
+    def _requete_shopify(self, endpoint: str, method: str = "GET", data: dict = None,
+                         max_retries: int = 3, rejouable: bool = True):
         """
         Exécute une requête HTTP REST ou GraphQL vers Shopify avec retry exponentiel (429 Rate Limit).
 
@@ -630,6 +723,8 @@ class ShopifySync:
         if _est_boucle_locale(base_url) and str(self.store_url).strip().lower().startswith("http://"):
             protocole = "http"
         url = f"{protocole}://{base_url}/admin/api/{self.api_version}/{endpoint}"
+        # Jeton réellement émis par CET appel : c'est lui qu'un 401 désigne comme refusé.
+        self._jeton_envoye = self.access_token
         headers = {
             "Content-Type": "application/json",
             "X-Shopify-Access-Token": self.access_token,
@@ -650,6 +745,7 @@ class ShopifySync:
                     self._tracer_requete(method, endpoint, 200, t0)
                     return resultat
                 with urllib.request.urlopen(req, timeout=12, context=ssl_ctx) as response:
+                    self._noter_version_servie(getattr(response, "headers", None))
                     self._effacer_echec()
                     resultat = json.loads(response.read().decode("utf-8"))
                     self._tracer_requete(method, endpoint, getattr(response, "status", 200), t0)
@@ -677,6 +773,7 @@ class ShopifySync:
                     except Exception:
                         err_detail = str(e)
                     logger.error(f"Erreur HTTP {e.code} sur {method} {endpoint}: {err_detail}")
+                    self._refus_401 = (e.code == 401)
                     self._noter_echec("http", self._resumer_erreur_http(e.code, err_detail))
                     return None
             except Exception as e:
@@ -741,10 +838,159 @@ class ShopifySync:
         """
         corps = json.dumps(data).encode("utf-8") if data else None
         reponse = self._obtenir_session().request(method, url, headers=headers, data=corps, timeout=12)
+        self._noter_version_servie(reponse.headers)
         if reponse.status_code >= 400:
             raise urllib.error.HTTPError(url, reponse.status_code, reponse.reason or "",
                                          reponse.headers, io.BytesIO(reponse.content or b""))
         return json.loads(reponse.content.decode("utf-8"))
+
+    # --- Jeton géré par l'application (client credentials) ------------------------------------
+
+    def _a_des_identifiants_app(self) -> bool:
+        """Vrai si l'application récente a donné un identifiant client ET un secret."""
+        return bool(self.client_id and self.client_secret)
+
+    def _jeton_a_renouveler(self) -> bool:
+        """Vrai si le jeton géré par l'application manque, est d'âge inconnu ou arrive à échéance."""
+        if not self._a_des_identifiants_app():
+            return False
+        if not self.access_token or not self.jeton_expire_a:
+            return True
+        return time.time() >= self.jeton_expire_a - MARGE_RENOUVELLEMENT_JETON_S
+
+    def _noter_version_servie(self, entetes) -> None:
+        """Retient la version d'API que Shopify a réellement servie (en-tête de réponse)."""
+        try:
+            valeur = entetes.get("X-Shopify-API-Version") if entetes is not None else None
+        except Exception:
+            valeur = None
+        if valeur:
+            self.version_api_servie = str(valeur).strip()
+
+    @staticmethod
+    def _resumer_refus_jeton(code, corps) -> str:
+        """Le refus de l'échange identifiant + secret, en une ligne lisible."""
+        erreur = description = ""
+        try:
+            donnees = json.loads(str(corps or "").strip())
+        except (ValueError, TypeError):
+            donnees = None
+        if isinstance(donnees, dict):
+            erreur = str(donnees.get("error") or donnees.get("errors") or "").strip()
+            description = str(donnees.get("error_description") or "").strip()
+        explications = {
+            "invalid_client": "identifiant client ou secret refusé par Shopify",
+            "shop_not_permitted": ("l'application n'est pas dans la même organisation Shopify "
+                                   "que la boutique"),
+            "invalid_request": "demande refusée par Shopify",
+            "unsupported_grant_type": "type d'autorisation non accepté par Shopify",
+            "access_denied": "accès refusé par Shopify",
+        }
+        phrase = explications.get(erreur) or description or erreur or "refus sans précision"
+        phrase = " ".join(str(phrase).split())[:120]
+        return f"{code} : {phrase} [{erreur}]" if erreur else f"{code} : {phrase}"
+
+    def _memoriser_jeton(self, jeton: str, expire_a: float) -> None:
+        """Écrit le jeton et son échéance dans `Parametres` (l'autre moteur les relit à chaque passe)."""
+        try:
+            conn = get_connection()
+            try:
+                c = _ouvrir_ecriture(conn)
+                c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)", (CLE_TOKEN, jeton))
+                c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)",
+                          (CLE_JETON_EXPIRE, str(int(expire_a))))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            # Le jeton reste valable en mémoire pour ce moteur ; un redémarrage en redemandera un.
+            logger.error(f"Jeton Shopify renouvelé mais non enregistré : {e}")
+
+    def renouveler_jeton(self, jeton_refuse: str = "") -> bool:
+        """
+        Échange l'identifiant client + le secret contre un jeton neuf (client credentials grant).
+
+        - Le secret n'est envoyé qu'à un domaine `*.myshopify.com` (ou à la boucle locale des
+          tests), en HTTPS vérifié : jamais vers un domaine qu'un appelant aurait choisi.
+        - Sous verrou : si un autre moteur vient de renouveler (la base fait foi), son jeton est
+          ADOPTÉ au lieu d'en demander un second. `jeton_refuse` est celui que Shopify vient de
+          rejeter : il ne peut pas être « adopté ».
+        - Un échec laisse le jeton précédent en place et note sa cause lisible (jamais le secret).
+        """
+        if not self._a_des_identifiants_app():
+            self._noter_echec("config", "identifiant client ou secret Shopify manquant")
+            return False
+        domaine = self.domaine()
+        if not domaine_boutique_valide(domaine):
+            self._noter_echec("config", f"domaine de boutique invalide ({self.store_url!r}) : "
+                                        "le secret n'est pas envoyé")
+            return False
+
+        with _VERROU_JETON:
+            if not self._config_injectee:
+                autres = lire_reglages_shopify()
+                neuf = autres["access_token"]
+                if (neuf and neuf != jeton_refuse
+                        and autres["client_id"] == self.client_id
+                        and autres["client_secret"] == self.client_secret
+                        and autres["token_expire_a"] - MARGE_RENOUVELLEMENT_JETON_S > time.time()):
+                    self.access_token = neuf
+                    self.jeton_expire_a = autres["token_expire_a"]
+                    return True
+
+            # HTTP n'est toléré que vers la machine elle-même (serveur d'essai des tests).
+            protocole = "https"
+            if _est_boucle_locale(domaine) and str(self.store_url).strip().lower().startswith("http://"):
+                protocole = "http"
+            url = f"{protocole}://{domaine}/admin/oauth/access_token"
+            corps = urllib.parse.urlencode({
+                "grant_type": "client_credentials",
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            }).encode("utf-8")
+            req = urllib.request.Request(url, data=corps, method="POST", headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "User-Agent": "KodoPOS-SyncEngine/1.0",
+            })
+            t0 = time.perf_counter()
+            try:
+                with urllib.request.urlopen(req, timeout=15, context=get_ssl_context()) as reponse:
+                    charge = json.loads(reponse.read().decode("utf-8"))
+                    self._tracer_requete("POST", "oauth/access_token", getattr(reponse, "status", 200), t0)
+            except urllib.error.HTTPError as e:
+                self._tracer_requete("POST", "oauth/access_token", e.code, t0)
+                try:
+                    corps_err = e.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    corps_err = str(e)
+                self._refus_401 = False
+                self._noter_echec("http", "renouvellement du jeton refusé — "
+                                  + self._resumer_refus_jeton(e.code, corps_err))
+                return False
+            except Exception as e:
+                self._tracer_requete("POST", "oauth/access_token", "ERR", t0)
+                self._noter_echec("reseau", "renouvellement du jeton impossible — "
+                                  + self._resumer_exception(e))
+                return False
+
+            jeton = str(charge.get("access_token") or "").strip() if isinstance(charge, dict) else ""
+            if not jeton:
+                self._noter_echec("http", "renouvellement du jeton : réponse de Shopify sans jeton d'accès")
+                return False
+            try:
+                duree = int(charge.get("expires_in") or 0)
+            except (TypeError, ValueError):
+                duree = 0
+            if duree <= 0:
+                duree = 3600  # durée inconnue : renouvellement dans l'heure, par prudence
+            self.access_token = jeton
+            self.jeton_expire_a = time.time() + duree
+            self._effacer_echec()
+            if not self._config_injectee:
+                self._memoriser_jeton(jeton, self.jeton_expire_a)
+            logger.info("Jeton Shopify renouvelé (valable %d min).", duree // 60)
+            return True
 
     def _effacer_echec(self):
         """Remet à zéro la nature ET la cause du dernier échec (début d'une opération, ou succès)."""
@@ -758,9 +1004,9 @@ class ShopifySync:
         """
         self.dernier_echec = nature
         texte = " ".join(str(detail or "").split())
-        jeton = getattr(self, "access_token", "")
-        if jeton:
-            texte = texte.replace(jeton, "***")
+        for secret in (getattr(self, "access_token", ""), getattr(self, "client_secret", "")):
+            if secret:
+                texte = texte.replace(secret, "***")
         self.dernier_echec_detail = texte[:200]
 
     def _suffixe_echec(self) -> str:
@@ -834,7 +1080,7 @@ class ShopifySync:
         n'arrivait nulle part (ou l'inverse).
         """
         domaine = self.domaine()
-        if not self.access_token:
+        if not (self.access_token or self._a_des_identifiants_app()):
             return {"success": False, "error": "Jeton d'accès Shopify requis pour le test."}
         if not domaine_boutique_valide(domaine):
             return {"success": False, "error": f"Domaine de boutique invalide : {self.store_url!r}."}
@@ -844,7 +1090,8 @@ class ShopifySync:
             return {
                 "success": False,
                 "domain": domaine,
-                "error": f"Aucune réponse exploitable de {domaine} (domaine ou jeton refusé).",
+                "error": (f"Aucune réponse exploitable de {domaine} (domaine ou jeton refusé)"
+                          f"{self._suffixe_echec()}."),
             }
         bruts = data.get("locations") or []
         locations = [l.get("name", "Dépôt") for l in bruts]
@@ -2710,6 +2957,25 @@ class ShopifySyncThread(threading.Thread):
             f"{tickets} ticket(s) poussé(s), {commandes} commande(s) rapatriée(s), "
             f"{remboursements} remboursement(s) repris vers {self.engine.domaine()}"
         )
+        # Version d'API : Shopify sert en silence une autre version quand celle demandée est
+        # retirée. Le dire ici, tant que tout marche, laisse le temps d'une mise à jour.
+        servie = str(getattr(self.engine, "version_api_servie", "") or "")
+        demandee = str(getattr(self.engine, "api_version", "") or "")
+        if servie and demandee and servie != demandee:
+            message += (f" Attention : Shopify sert la version d'API {servie} et non {demandee} : "
+                        "une mise à jour de Kōdo est à prévoir.")
+        if servie:
+            try:
+                conn = get_connection()
+                try:
+                    c = _ouvrir_ecriture(conn)
+                    c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)",
+                              (CLE_VERSION_SERVIE, servie))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as e:
+                logger.error(f"Version d'API servie non enregistrée : {e}")
         enregistrer_etat_sync(tout_va_bien, message)
         return tout_va_bien
 
@@ -2783,7 +3049,7 @@ def start_auto_sync(force: bool = False):
 
     with _verrou_auto:
         reglages = lire_reglages_shopify()
-        if reglages["store_url"] and reglages["access_token"] and reglages["auto_sync"]:
+        if reglages["store_url"] and identifiants_presents(reglages) and reglages["auto_sync"]:
             # Branchement de la poussée des ventes : l'historique déjà vendu n'est pas repoussé.
             # Sans effet si le seuil est déjà fixé.
             try:
@@ -2795,7 +3061,7 @@ def start_auto_sync(force: bool = False):
         if _thread_auto is not None and _thread_auto.is_alive():
             return _thread_auto
 
-        if not reglages["store_url"] or not reglages["access_token"]:
+        if not reglages["store_url"] or not identifiants_presents(reglages):
             logger.info("Shopify non configuré (URL ou jeton absent) : synchronisation automatique non démarrée.")
             return None
         if not reglages["auto_sync"] and not reglages["sync_orders"]:
@@ -2897,8 +3163,9 @@ def lancer_rafraichissement() -> dict:
     l'avancement se lit via `etat_rafraichissement()` (exposé par `GET /api/shopify/status`).
     """
     reglages = lire_reglages_shopify()
-    if not reglages["store_url"] or not reglages["access_token"]:
-        return {"demarre": False, "erreur": "Shopify n'est pas connecté : renseignez le domaine et le jeton."}
+    if not reglages["store_url"] or not identifiants_presents(reglages):
+        return {"demarre": False, "erreur": "Shopify n'est pas connecté : renseignez le domaine et le jeton "
+                                            "(ou l'identifiant client et le secret)."}
     with _verrou_rafraichissement:
         if _etat_rafraichissement["en_cours"]:
             return {"demarre": False, "deja_en_cours": True}

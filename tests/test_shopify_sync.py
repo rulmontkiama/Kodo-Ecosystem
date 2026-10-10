@@ -216,7 +216,7 @@ class TestBoutiqueCible(BaseTemporaire):
 
         self.assertEqual(len(emises), 1, "une seule requête devait partir")
         url, entetes, contexte = emises[0]
-        self.assertEqual(url, "https://boutique-de-la-cliente.myshopify.com/admin/api/2025-01/locations.json")
+        self.assertEqual(url, "https://boutique-de-la-cliente.myshopify.com/admin/api/2026-01/locations.json")
         # urllib capitalise les noms d'en-têtes.
         self.assertEqual(entetes.get("X-shopify-access-token"), "shpat_JETON_DE_LA_CLIENTE")
         self.assertIsInstance(contexte, ssl.SSLContext)
@@ -896,16 +896,16 @@ class FauxShopify(BaseHTTPRequestHandler):
         self.etat["chemins"].append(self.path)
         if not self._jeton_valide():
             return
-        if self.path.startswith("/admin/api/2025-01/locations.json"):
+        if self.path.startswith("/admin/api/2026-01/locations.json"):
             return self._repondre(200, {"locations": [{"id": 777, "name": "Dépôt principal", "active": True}]})
-        if self.path.startswith("/admin/api/2025-01/products.json"):
+        if self.path.startswith("/admin/api/2026-01/products.json"):
             if "since_id=" in self.path:            # deuxième page : plus rien
                 return self._repondre(200, {"products": []})
             produit = json.loads(json.dumps(CATALOGUE_FAUSSE_BOUTIQUE))
             for v in produit["variants"]:
                 v["inventory_quantity"] = self.etat["stock"][v["inventory_item_id"]]
             return self._repondre(200, {"products": [produit]})
-        if self.path.startswith("/admin/api/2025-01/orders.json"):
+        if self.path.startswith("/admin/api/2026-01/orders.json"):
             if "updated_at_min=" in self.path:
                 # Relecture des commandes MODIFIÉES : c'est par là que passent les
                 # remboursements, invisibles de la liste filtrée `financial_status=paid`.
@@ -938,7 +938,7 @@ class FauxShopify(BaseHTTPRequestHandler):
         taille = int(self.headers.get("Content-Length") or 0)
         charge = json.loads(self.rfile.read(taille) or b"{}")
 
-        if self.path.startswith("/admin/api/2025-01/graphql.json"):
+        if self.path.startswith("/admin/api/2026-01/graphql.json"):
             recherche = charge.get("variables", {}).get("query", "")
             for v in CATALOGUE_FAUSSE_BOUTIQUE["variants"]:
                 if f'"{v["sku"]}"' in recherche:
@@ -948,7 +948,7 @@ class FauxShopify(BaseHTTPRequestHandler):
                     ]}}})
             return self._repondre(200, {"data": {"productVariants": {"edges": []}}})
 
-        if self.path.startswith("/admin/api/2025-01/inventory_levels/adjust.json"):
+        if self.path.startswith("/admin/api/2026-01/inventory_levels/adjust.json"):
             item = charge["inventory_item_id"]
             self.etat["stock"][item] += charge["available_adjustment"]
             self.etat["ajustements"].append((item, charge["available_adjustment"]))
@@ -1049,7 +1049,7 @@ class TestBoutEnBoutSansBoutique(BaseTemporaire):
         self.assertEqual(set(self.etat["jetons_recus"]), {JETON_DE_TEST})
         self.assertTrue(self.etat["chemins"], "aucune requête n'a atteint la boutique configurée")
         for chemin in self.etat["chemins"]:
-            self.assertTrue(chemin.startswith("/admin/api/2025-01/"), chemin)
+            self.assertTrue(chemin.startswith("/admin/api/2026-01/"), chemin)
 
     def test_un_mauvais_jeton_ne_fait_pas_croire_a_une_connexion_reussie(self):
         """Le test de connexion des réglages doit refuser ce que la synchro refuserait aussi."""

@@ -578,7 +578,17 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             # remplacer. C'est exactement ce que disent les deux champs ci-dessous.
             "shopifyToken": "",
             "shopifyTokenEnregistre": bool(params.get("shopify_access_token")),
-            "shopifyConnected": bool(params.get("shopify_store_url") and params.get("shopify_access_token")),
+            # Application récente : l'identifiant client n'est pas un secret (il figure dans les
+            # adresses de l'application) ; le SECRET, lui, n'est jamais renvoyé, comme le jeton.
+            "shopifyClientId": params.get("shopify_client_id", "") or "",
+            "shopifyClientSecretEnregistre": bool(params.get("shopify_client_secret")),
+            "shopifyAuthMode": (
+                "app" if (params.get("shopify_client_id") and params.get("shopify_client_secret"))
+                else ("token" if params.get("shopify_access_token") else "")),
+            "shopifyConnected": bool(
+                params.get("shopify_store_url")
+                and (params.get("shopify_access_token")
+                     or (params.get("shopify_client_id") and params.get("shopify_client_secret")))),
             # Dépôt d'inventaire visé dans la boutique. Vide = aucun choix fait ; la caisse
             # tranche alors elle-même (cf. `ShopifySync.get_location_id`) et le dit à l'écran.
             "shopifyLocationId": params.get("shopify_location_id", ""),
@@ -615,6 +625,8 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         printer_ip = _pick("printerIP", "printer_ip")
         shopify_domain = _pick("shopifyDomain", "shopify_store_url")
         shopify_token = _pick("shopifyToken", "shopify_access_token")
+        shopify_client_id = _pick("shopifyClientId", "shopify_client_id")
+        shopify_client_secret = _pick("shopifyClientSecret", "shopify_client_secret")
         shopify_location = _pick("shopifyLocationId", "shopify_location_id")
         auto_sync = data.get("autoSyncStock")
         sync_orders = data.get("syncOrders")
@@ -628,6 +640,15 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             if shopify_location and not shopify_location.isdigit():
                 return 400, {"error": f"Dépôt Shopify invalide : {shopify_location!r} "
                                       f"n'est pas un identifiant d'emplacement."}
+
+        for _libelle, _valeur in (("Identifiant client", shopify_client_id),
+                                  ("Secret client", shopify_client_secret)):
+            if _valeur is None:
+                continue
+            _texte = str(_valeur).strip()
+            if _texte and (len(_texte) > 200 or any(ch.isspace() for ch in _texte)):
+                return 400, {"error": f"{_libelle} Shopify invalide : aucun espace ni retour à la "
+                                      f"ligne n'est admis dans cette valeur."}
 
         if fond_caisse_val is not None:
             try:
@@ -672,12 +693,53 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             except Exception:
                 clean_domain = str(shopify_domain).replace("https://", "").replace("http://", "").strip("/")
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_store_url', ?)", (clean_domain,))
-        if shopify_token is not None and not _est_un_masque(shopify_token):
+        # Deux façons de s'authentifier, JAMAIS mélangées : le jeton saisi à la main (ancienne
+        # application) ou l'identifiant client + le secret (application récente, jeton renouvelé
+        # seul). Enregistrer l'un efface l'autre : sinon un vieux jeton mort ou un vieux secret
+        # continuerait d'être utilisé en silence derrière ce que l'écran affiche.
+        _id_txt = None if shopify_client_id is None else str(shopify_client_id).strip()
+        _secret_txt = None if shopify_client_secret is None else str(shopify_client_secret).strip()
+        _secret_masque = _secret_txt is not None and _est_un_masque(_secret_txt)
+        _identifiants_saisis = bool(_id_txt) and bool(_secret_txt) and not _secret_masque
+        _jeton_vide = shopify_token is not None and str(shopify_token).strip() == ""
+        _jeton_saisi = (shopify_token is not None and not _jeton_vide
+                        and not _est_un_masque(shopify_token))
+
+        def _ecrire_param(cle, valeur):
+            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)", (cle, valeur))
+
+        if _identifiants_saisis:
+            _ecrire_param('shopify_client_id', _id_txt)
+            _ecrire_param('shopify_client_secret', _secret_txt)
+            # Le jeton enregistré n'est plus celui de l'application : le moteur en demandera un.
+            _ecrire_param('shopify_access_token', "")
+            _ecrire_param('shopify_token_expires_at', "")
+        elif _jeton_saisi:
             # Une chaîne faite uniquement de puces ou d'étoiles est un AFFICHAGE, pas un jeton :
             # un client qui renverrait le masque qu'il a à l'écran remplacerait la vraie clé par
-            # des points et débrancherait la boutique en silence. La chaîne vide, elle, reste un
-            # ordre légitime : c'est ainsi que l'écran déconnecte la boutique.
-            cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_access_token', ?)", (str(shopify_token).strip(),))
+            # des points et débrancherait la boutique en silence.
+            _ecrire_param('shopify_access_token', str(shopify_token).strip())
+            _ecrire_param('shopify_token_expires_at', "")
+            _ecrire_param('shopify_client_id', "")
+            _ecrire_param('shopify_client_secret', "")
+        elif _jeton_vide:
+            # La chaîne vide reste un ordre légitime : c'est ainsi que l'écran déconnecte la
+            # boutique, et déconnecter doit tout débrancher, identifiants compris.
+            _ecrire_param('shopify_access_token', "")
+            _ecrire_param('shopify_token_expires_at', "")
+            _ecrire_param('shopify_client_id', "")
+            _ecrire_param('shopify_client_secret', "")
+        elif _id_txt == "" or _secret_txt == "":
+            # Effacement explicite des identifiants : une moitié d'identifiant ne sert à rien.
+            _ecrire_param('shopify_client_id', "")
+            _ecrire_param('shopify_client_secret', "")
+            _ecrire_param('shopify_token_expires_at', "")
+        else:
+            # Mise à jour partielle : l'identifiant seul, ou le secret seul (jamais un masque).
+            if _id_txt:
+                _ecrire_param('shopify_client_id', _id_txt)
+            if _secret_txt and not _secret_masque:
+                _ecrire_param('shopify_client_secret', _secret_txt)
         if shopify_location is not None:
             cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('shopify_location_id', ?)",
                            (str(shopify_location).strip(),))
@@ -703,6 +765,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         # start_auto_sync() est idempotent et relit lui-même la configuration ; il ne
         # démarre rien si la boutique n'est pas configurée ou si les deux sens sont éteints.
         if any(v is not None for v in (shopify_domain, shopify_token, shopify_location,
+                                       shopify_client_id, shopify_client_secret,
                                        auto_sync, sync_orders)):
             try:
                 from kodo_core.sync.shopify import start_auto_sync
@@ -716,26 +779,35 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
     elif method == "POST" and path == "/api/shopify/test":
         raw_url = str(data.get("domain") or data.get("store_url") or "").strip()
         token = str(data.get("token") or data.get("access_token") or "").strip()
-        
+        client_id = str(data.get("clientId") or data.get("client_id") or "").strip()
+        client_secret = str(data.get("clientSecret") or data.get("client_secret") or "").strip()
+
         # Le couple domaine + jeton ne se mélange JAMAIS entre l'appelant et la base. Compléter
         # champ par champ laissait envoyer le jeton d'administration enregistré vers un domaine
         # choisi par l'appelant : une seule requête sans jeton suffisait à l'exfiltrer. L'écran
         # Paramètres envoie toujours les deux champs (il refuse le test autrement), donc seul le
         # repli complet — relire la configuration déjà enregistrée — reste utile.
-        if not raw_url and not token:
+        if not raw_url and not token and not client_id and not client_secret:
             conn = get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT cle, valeur FROM Parametres WHERE cle IN ('shopify_store_url', 'shopify_access_token')")
+            cursor.execute("SELECT cle, valeur FROM Parametres WHERE cle IN "
+                           "('shopify_store_url', 'shopify_access_token', "
+                           "'shopify_client_id', 'shopify_client_secret')")
             db_params = dict(cursor.fetchall())
             conn.close()
             raw_url = db_params.get("shopify_store_url", "") or ""
             token = db_params.get("shopify_access_token", "") or ""
-            if not raw_url or not token:
+            client_id = str(db_params.get("shopify_client_id", "") or "").strip()
+            client_secret = str(db_params.get("shopify_client_secret", "") or "").strip()
+            if not raw_url or not (token or (client_id and client_secret)):
                 return 400, {"success": False, "error": "Aucune boutique Shopify enregistrée à tester."}
-        elif not raw_url or not token:
+        elif not raw_url or not (token or (client_id and client_secret)):
             return 400, {"success": False, "error": (
-                "Indiquez le domaine ET le jeton à tester ensemble, ou aucun des deux pour "
-                "retester la boutique déjà enregistrée.")}
+                "Indiquez le domaine ET le jeton (ou l'identifiant client ET le secret) à tester "
+                "ensemble, ou rien du tout pour retester la boutique déjà enregistrée.")}
+        # Les identifiants de l'application priment : le jeton qu'ils produisent est le seul
+        # qui reste valable plus d'une journée.
+        utilise_app = bool(client_id and client_secret)
 
         # Le test passe par le MÊME moteur que la synchronisation réelle : même normalisation du
         # domaine et même transport TLS vérifié. La route réimplémentait sa propre requête avec
@@ -743,7 +815,11 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         # « Connexion réussie ! » pouvait s'afficher alors que la synchro, elle, n'aboutissait pas.
         try:
             from kodo_core.sync.shopify import ShopifySync, start_auto_sync
-            resultat = ShopifySync(store_url=raw_url, access_token=token).tester_connexion()
+            if utilise_app:
+                moteur_test = ShopifySync(store_url=raw_url, client_id=client_id, client_secret=client_secret)
+            else:
+                moteur_test = ShopifySync(store_url=raw_url, access_token=token)
+            resultat = moteur_test.tester_connexion()
             if resultat.get("success"):
                 # La boutique répond : c'est le moment où la configuration devient utilisable,
                 # donc celui où la synchronisation automatique doit prendre le relais.
@@ -763,6 +839,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         from kodo_core.sync.shopify import (
             lire_reglages_shopify, lire_etat_sync, normaliser_domaine_boutique,
             domaine_boutique_valide, auto_sync_actif, compter_file_attente, etat_rafraichissement,
+            identifiants_presents, VERSION_API_DEFAUT,
         )
         reglages = lire_reglages_shopify()
         domaine = normaliser_domaine_boutique(reglages["store_url"])
@@ -771,7 +848,14 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             "success": True,
             "domain": domaine,
             "domainValid": domaine_boutique_valide(domaine),
-            "configured": bool(domaine_boutique_valide(domaine) and reglages["access_token"]),
+            "configured": bool(domaine_boutique_valide(domaine) and identifiants_presents(reglages)),
+            # « app » : identifiant client + secret, jeton renouvelé seul ; « token » : jeton
+            # saisi à la main (ancienne application, ou jeton de 24 h à renouveler soi-même).
+            "authMode": ("app" if (reglages["client_id"] and reglages["client_secret"])
+                         else ("token" if reglages["access_token"] else "")),
+            "tokenExpiresAt": reglages["token_expire_a"] or None,
+            "apiVersion": reglages["api_version"] or VERSION_API_DEFAUT,
+            "apiVersionServed": etat["version_api_servie"],
             "autoSyncStock": reglages["auto_sync"],
             "syncOrders": reglages["sync_orders"],
             "running": auto_sync_actif(),
