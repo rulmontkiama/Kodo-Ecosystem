@@ -3,11 +3,14 @@
 Routes API Catalogue Produit & Gestion des Stocks - Kōdo POS Core
 """
 
+import logging
 import os
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Tuple, Optional
 from kodo_core.domain.catalog.inventory_manager import InventoryManager
+
+logger = logging.getLogger("kodo_core.api.routes.products_routes")
 
 
 # ---------------------------------------------------------------------------------------------
