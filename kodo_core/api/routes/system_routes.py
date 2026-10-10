@@ -798,17 +798,56 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
     # 15. Lancer l'importation du catalogue Shopify
     elif method == "POST" and path == "/api/shopify/import":
+        # L'écran n'affiche que `message` : tout refus ou toute erreur le porte donc aussi, sinon la
+        # commerçante lit « Erreur lors de l'import » sans jamais savoir pourquoi.
         try:
-            from kodo_core.sync.shopify import ShopifySync
+            from kodo_core.sync.shopify import ShopifySync, ImportShopifyBloque
             sync_engine = ShopifySync()
-            count = sync_engine.import_catalog()
-            return 200, {
-                "success": True,
-                "message": f"Importation réussie : {count} variantes de produits synchronisées.",
-                "imported_count": count
+            # `force` n'est proposé par aucun écran : il sert au support, pour importer malgré des
+            # ventes pas encore envoyées à Shopify (elles sont alors effacées du stock).
+            count = sync_engine.import_catalog(forcer=data.get("force") is True)
+        except ImportShopifyBloque as bloque:
+            return 409, {
+                "success": False,
+                "blocked": True,
+                "reason": bloque.raison,
+                "message": str(bloque),
+                "error": str(bloque),
+                "unsentLines": bloque.bilan.get("lignes", 0),
+                "unsentTickets": bloque.bilan.get("tickets", 0),
             }
         except Exception as e:
-            return 500, {"success": False, "error": f"Erreur lors de l'importation du catalogue: {str(e)}"}
+            texte = f"Erreur lors de l'importation du catalogue: {str(e)}"
+            return 500, {"success": False, "message": texte, "error": texte}
+
+        bilan = sync_engine.dernier_import or {}
+        if bilan.get("echec"):
+            # Avant, un refus du serveur (jeton révoqué, boutique suspendue…) était annoncé comme
+            # « Importation réussie : 0 variantes » : la commerçante croyait son catalogue à jour.
+            cause = bilan.get("detail") or "aucune réponse exploitable (domaine ou jeton refusé)"
+            texte = (f"Importation impossible : Shopify n'a pas fourni le catalogue ({cause}). "
+                     "Rien n'a été modifié.")
+            return 502, {"success": False, "message": texte, "error": texte, "detail": cause}
+
+        modifiees = int(bilan.get("modifiees") or 0)
+        message = f"Importation réussie : {count} variantes de produits synchronisées."
+        if modifiees:
+            message += f" {modifiees} quantité(s) de stock ont été corrigées d'après Shopify."
+        if bilan.get("ecrasees"):
+            message += (f" Attention : {bilan['ecrasees']} ligne(s) de vente non envoyées à Shopify "
+                        "n'apparaissent plus dans le stock.")
+        sauvegarde = bilan.get("sauvegarde") or ""
+        if sauvegarde:
+            message += " Une copie de sécurité de la base a été faite juste avant."
+        return 200, {
+            "success": True,
+            "message": message,
+            "imported_count": count,
+            "modified_count": modifiees,
+            "created_count": int(bilan.get("creees") or 0),
+            # Nom seul : un `import os` plus bas dans cette fonction rend `os` local à tout son corps.
+            "backup_file": sauvegarde.replace("\\", "/").rsplit("/", 1)[-1] if sauvegarde else "",
+        }
 
     # 16. Personnalisation du Ticket : Upload du Logo Boutique
     elif method == "POST" and path == "/api/settings/logo":

@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import List, Dict, Any, Optional, Tuple
 
 from kodo_core.db.connection import get_connection
+from kodo_core.db import stock_journal
 
 
 # Caractères de contrôle C0/C1 : une douchette termine presque toujours sa trame par un
@@ -832,6 +833,13 @@ class InventoryManager:
         cursor.execute("SELECT id, taille FROM Stocks WHERE id_produit=? ORDER BY id", (prod_id,))
         libres = [(r[0], r[1]) for r in cursor.fetchall()]
 
+        # Chaque quantité réécrite ci-dessous est consignée au journal de stock (avant → après) :
+        # une saisie d'écran remplace la valeur de la base, et sans trace il était impossible de
+        # savoir plus tard quand et depuis quelle valeur un stock avait changé.
+        cursor.execute("SELECT nom FROM Produits WHERE id=?", (prod_id,))
+        ligne_nom = cursor.fetchone()
+        nom_produit = ligne_nom[0] if ligne_nom else None
+
         apparies: Dict[str, int] = {}
         for cle in declarees:
             trouve = next((e for e in libres if _norm_taille(e[1]) == cle), None)
@@ -860,7 +868,14 @@ class InventoryManager:
                     "VALUES (?, ?, ?, ?, 0)",
                     (prod_id, libelle, qty, alert_threshold)
                 )
+                nouvelle_ligne = cursor.lastrowid
+                stock_journal.noter(cursor, nouvelle_ligne, None, qty, stock_journal.ORIGINE_FICHE_PRODUIT,
+                                    produit_id=prod_id, produit=nom_produit, taille=libelle,
+                                    detail="taille créée sur la fiche")
             else:
+                cursor.execute("SELECT quantite_actuelle FROM Stocks WHERE id=?", (sid,))
+                ancienne = cursor.fetchone()
+                avant = ancienne[0] if ancienne else None
                 # La quantité saisie ici EST le recomptage physique : elle solde la demande
                 # d'audit posée par une survente hors-ligne. Sans ce retour à 0, le drapeau
                 # `requires_stock_audit` ne pouvait plus jamais être éteint.
@@ -868,13 +883,25 @@ class InventoryManager:
                     "UPDATE Stocks SET taille=?, quantite_actuelle=?, seuil_alerte=?, requires_stock_audit=0 WHERE id=?",
                     (libelle, qty, alert_threshold, sid)
                 )
+                stock_journal.noter(cursor, sid, avant, qty, stock_journal.ORIGINE_FICHE_PRODUIT,
+                                    produit_id=prod_id, produit=nom_produit, taille=libelle,
+                                    detail="quantité enregistrée depuis la fiche produit")
 
-        for sid, _taille in libres:
+        for sid, taille_retiree in libres:
+            cursor.execute("SELECT quantite_actuelle FROM Stocks WHERE id=?", (sid,))
+            ancienne = cursor.fetchone()
+            avant = ancienne[0] if ancienne else None
             cursor.execute("SELECT 1 FROM Ventes_Details WHERE id_stock=? LIMIT 1", (sid,))
             if cursor.fetchone():
                 cursor.execute("UPDATE Stocks SET quantite_actuelle=0 WHERE id=?", (sid,))
+                stock_journal.noter(cursor, sid, avant, 0, stock_journal.ORIGINE_FICHE_PRODUIT,
+                                    produit_id=prod_id, produit=nom_produit, taille=taille_retiree,
+                                    detail="taille retirée de la fiche, gardée à 0 (déjà vendue)")
             else:
                 cursor.execute("DELETE FROM Stocks WHERE id=?", (sid,))
+                stock_journal.noter(cursor, sid, avant, None, stock_journal.ORIGINE_FICHE_PRODUIT,
+                                    produit_id=prod_id, produit=nom_produit, taille=taille_retiree,
+                                    detail="taille retirée de la fiche, ligne supprimée (jamais vendue)")
 
         # Le produit ne reste « à auditer » que s'il lui reste au moins une ligne non recomptée
         # (typiquement une taille retirée de la vente mais conservée pour l'historique).

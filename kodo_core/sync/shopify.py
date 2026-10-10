@@ -15,8 +15,10 @@ import urllib.error
 import urllib.parse
 import datetime
 import io
+import re
 from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection, signer_ticket, signer_ledger
+from kodo_core.db import stock_journal
 from kodo_core.sync.shopify_sku import prefixes_possibles, skus_produit
 
 logger = logging.getLogger("kodo_core.sync.shopify")
@@ -372,6 +374,95 @@ def noter_alignement_stock(conn):
               (PARAM_ALIGNEMENT_TICKETS, str(dernier)))
 
 
+def _calculer_seuil_a_fixer(c) -> int:
+    """
+    Le premier ticket à pousser, quand aucun seuil n'est encore enregistré (lecture seule).
+
+    Règle unique, partagée par `fixer_seuil_tickets` (qui l'enregistre) et par
+    `ventes_non_envoyees` (qui s'en sert avant que la première passe ne l'ait fait).
+    """
+    c.execute("SELECT 1 FROM Shopify_Sync_Lignes LIMIT 1")
+    if c.fetchone() is not None:
+        return 0
+    c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (PARAM_ALIGNEMENT_TICKETS,))
+    alignement = c.fetchone()
+    if alignement is not None and str(alignement[0]).strip().isdigit():
+        return int(alignement[0])
+    c.execute("SELECT COALESCE(MAX(id), 0) FROM Tickets")
+    return int(c.fetchone()[0] or 0)
+
+
+def _seuil_tickets_effectif(c) -> int:
+    """Le seuil de poussée en vigueur : celui qui est enregistré, sinon celui qui le serait."""
+    c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (PARAM_SEUIL_TICKETS,))
+    ligne = c.fetchone()
+    if ligne is not None:
+        try:
+            return int(ligne[0])
+        except (TypeError, ValueError):
+            return 0
+    return _calculer_seuil_a_fixer(c)
+
+
+def ventes_non_envoyees(c) -> dict:
+    """
+    Lignes de vente que la synchronisation poussera ENCORE vers Shopify (lecture seule).
+
+    C'est exactement la sélection de `ShopifySync.sync_tickets_to_shopify` : tickets non marqués
+    synchronisés, postérieurs au seuil, dont la ligne n'a aucune entrée au journal ligne à
+    ligne. Ces ventes sont déjà décomptées en caisse mais PAS en ligne : tant qu'elles n'ont pas
+    été envoyées, le stock de la boutique en ligne est plus haut que celui de la caisse, et le
+    recopier par-dessus (import du catalogue) ferait réapparaître des articles déjà vendus.
+    Les tables de synchronisation doivent exister (`_assurer_tables_sync`).
+    """
+    seuil = _seuil_tickets_effectif(c)
+    c.execute("""
+        SELECT COUNT(*), COUNT(DISTINCT t.id), MIN(t.id), MAX(t.id)
+        FROM Tickets t
+        JOIN Ventes_Details vd ON vd.id_ticket = t.id
+        JOIN Stocks s ON s.id = vd.id_stock
+        JOIN Produits p ON p.id = s.id_produit
+        LEFT JOIN Shopify_Sync_Lignes j ON j.id_vente_detail = vd.id
+        WHERE t.synced_shopify = 0 AND t.id > ? AND j.id_vente_detail IS NULL
+    """, (seuil,))
+    lignes, tickets, premier, dernier = c.fetchone()
+    bilan = {"lignes": int(lignes or 0), "tickets": int(tickets or 0), "premier": None, "dernier": None}
+    if bilan["lignes"]:
+        for cle, ident in (("premier", premier), ("dernier", dernier)):
+            c.execute("SELECT numero_ticket FROM Tickets WHERE id = ?", (ident,))
+            ligne = c.fetchone()
+            bilan[cle] = ligne[0] if ligne and ligne[0] else str(ident)
+    return bilan
+
+
+def _signature_activite(c) -> tuple:
+    """
+    Empreinte de l'activité qui rend un catalogue téléchargé périmé : dernier ticket créé, lignes
+    inscrites au journal de synchronisation, dont celles confirmées par Shopify.
+    Comparée avant le téléchargement puis dans la transaction d'écriture de l'import.
+    """
+    c.execute("SELECT COALESCE(MAX(id), 0) FROM Tickets")
+    dernier_ticket = int(c.fetchone()[0] or 0)
+    c.execute("SELECT COUNT(*), COALESCE(SUM(statut = ?), 0) FROM Shopify_Sync_Lignes", (STATUT_POUSSE,))
+    lignes, poussees = c.fetchone()
+    return dernier_ticket, int(lignes or 0), int(poussees or 0)
+
+
+class ImportShopifyBloque(ValueError):
+    """
+    L'import du catalogue est refusé par sécurité, AVANT toute modification.
+
+    `raison` : "ventes_non_envoyees" (des ventes n'ont pas encore été envoyées à Shopify) ou
+    "activite_pendant_import" (une vente ou une poussée a eu lieu pendant le téléchargement).
+    Le message est destiné à être affiché tel quel à la commerçante.
+    """
+
+    def __init__(self, message: str, raison: str, bilan: dict = None):
+        super().__init__(message)
+        self.raison = raison
+        self.bilan = bilan or {}
+
+
 def fixer_seuil_tickets(conn=None) -> int:
     """
     Fixe, une fois pour toutes, le premier ticket à pousser vers Shopify. Retourne le seuil.
@@ -395,17 +486,7 @@ def fixer_seuil_tickets(conn=None) -> int:
                 return int(ligne[0])
             except (TypeError, ValueError):
                 return 0
-        c.execute("SELECT 1 FROM Shopify_Sync_Lignes LIMIT 1")
-        if c.fetchone() is not None:
-            seuil = 0
-        else:
-            c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (PARAM_ALIGNEMENT_TICKETS,))
-            alignement = c.fetchone()
-            if alignement is not None and str(alignement[0]).strip().isdigit():
-                seuil = int(alignement[0])
-            else:
-                c.execute("SELECT COALESCE(MAX(id), 0) FROM Tickets")
-                seuil = int(c.fetchone()[0] or 0)
+        seuil = _calculer_seuil_a_fixer(c)
         c.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, ?)",
                   (PARAM_SEUIL_TICKETS, str(seuil)))
         conn.commit()
@@ -458,9 +539,19 @@ class ShopifySync:
         # appel GraphQL à chaque passe, et les plafonds de débit Shopify étaient atteints en boutique.
         self._cache_inventaire = {}
         self._rest_scan_fait = False
+        # Balayage REST en échec dans la passe en cours : (nature, cause), ou None s'il n'a pas échoué.
+        self._rest_scan_echec = None
         # Nature du dernier échec définitif : None, "http" (le serveur a répondu, rien n'a été
         # appliqué) ou "reseau" (aucune réponse reçue, on ne sait pas si l'appel a porté).
         self.dernier_echec = None
+        # Sa CAUSE, en une ligne lisible (« 401 : Invalid API key… », « SSLError : … »). Sans elle
+        # une synchro qui échoue en boucle ne disait que « http » : impossible de distinguer un
+        # jeton révoqué, une portée manquante, une boutique suspendue ou un plafond de débit.
+        self.dernier_echec_detail = ""
+        # Erreur GraphQL de la dernière recherche de variante (réponse 200 portant `errors`).
+        self._detail_graphql = ""
+        # Bilan du dernier `import_catalog` (lu par la route : variantes, quantités modifiées…).
+        self.dernier_import = {}
         # Session HTTP persistante (keep-alive) : évite une négociation TLS par requête.
         self._session = None
         self._verrou_session = threading.Lock()
@@ -528,7 +619,7 @@ class ShopifySync:
         """
         if not self.est_configure():
             logger.warning("Configuration Shopify manquante ou invalide (domaine ou jeton).")
-            self.dernier_echec = "config"
+            self._noter_echec("config", "domaine ou jeton Shopify manquant ou invalide")
             return None
 
         base_url = self.domaine()
@@ -555,11 +646,11 @@ class ShopifySync:
             try:
                 if self._transport_persistant():
                     resultat = self._requete_persistante(method, url, headers, data, ssl_ctx)
-                    self.dernier_echec = None
+                    self._effacer_echec()
                     self._tracer_requete(method, endpoint, 200, t0)
                     return resultat
                 with urllib.request.urlopen(req, timeout=12, context=ssl_ctx) as response:
-                    self.dernier_echec = None
+                    self._effacer_echec()
                     resultat = json.loads(response.read().decode("utf-8"))
                     self._tracer_requete(method, endpoint, getattr(response, "status", 200), t0)
                     return resultat
@@ -576,7 +667,7 @@ class ShopifySync:
                     if attempt == max_retries:
                         # Essais épuisés sur un refus de débit : Shopify n'a rien appliqué. C'est
                         # un échec « http » (à retenter), pas une coupure au résultat inconnu.
-                        self.dernier_echec = "http"
+                        self._noter_echec("http", "429 : plafond de débit Shopify atteint, nouvel essai plus tard")
                         return None
                     time.sleep(retry_after)
                     continue
@@ -586,7 +677,7 @@ class ShopifySync:
                     except Exception:
                         err_detail = str(e)
                     logger.error(f"Erreur HTTP {e.code} sur {method} {endpoint}: {err_detail}")
-                    self.dernier_echec = "http"
+                    self._noter_echec("http", self._resumer_erreur_http(e.code, err_detail))
                     return None
             except Exception as e:
                 self._tracer_requete(method, endpoint, "ERR", t0)
@@ -596,9 +687,9 @@ class ShopifySync:
                 if rejouable and attempt < max_retries:
                     time.sleep(1.5 * attempt)
                 else:
-                    self.dernier_echec = "reseau"
+                    self._noter_echec("reseau", self._resumer_exception(e))
                     return None
-        self.dernier_echec = "reseau"
+        self._noter_echec("reseau", "aucune réponse de Shopify")
         return None
 
     # --- Transport : session HTTP persistante --------------------------------------------------
@@ -654,6 +745,69 @@ class ShopifySync:
             raise urllib.error.HTTPError(url, reponse.status_code, reponse.reason or "",
                                          reponse.headers, io.BytesIO(reponse.content or b""))
         return json.loads(reponse.content.decode("utf-8"))
+
+    def _effacer_echec(self):
+        """Remet à zéro la nature ET la cause du dernier échec (début d'une opération, ou succès)."""
+        self.dernier_echec = None
+        self.dernier_echec_detail = ""
+
+    def _noter_echec(self, nature, detail=""):
+        """
+        Retient la nature de l'échec et sa cause. Le jeton n'est jamais conservé : Shopify ne le
+        renvoie pas, mais une cause remonte jusqu'à l'écran et à la base.
+        """
+        self.dernier_echec = nature
+        texte = " ".join(str(detail or "").split())
+        jeton = getattr(self, "access_token", "")
+        if jeton:
+            texte = texte.replace(jeton, "***")
+        self.dernier_echec_detail = texte[:200]
+
+    def _suffixe_echec(self) -> str:
+        """« — cause » à accoler au message d'une ligne en échec ('' si aucune cause connue)."""
+        detail = getattr(self, "dernier_echec_detail", "") or ""
+        return f" — {detail}" if detail else ""
+
+    @staticmethod
+    def _resumer_erreur_http(code, corps) -> str:
+        """Une réponse d'erreur Shopify réduite à « 401 : message » (JSON, HTML ou texte brut)."""
+        texte = str(corps or "").strip()
+        message = ""
+        try:
+            donnees = json.loads(texte)
+        except (ValueError, TypeError):
+            donnees = None
+        if isinstance(donnees, dict):
+            erreur = donnees.get("errors", donnees.get("error"))
+            if isinstance(erreur, str):
+                message = erreur
+            elif isinstance(erreur, dict):
+                message = "; ".join(f"{k} {v}" for k, v in erreur.items())
+            elif isinstance(erreur, list):
+                message = "; ".join(str(e) for e in erreur)
+        elif texte.startswith("<"):
+            titre = re.search(r"<title>(.*?)</title>", texte, re.IGNORECASE | re.DOTALL)
+            message = titre.group(1) if titre else "réponse HTML"
+        elif texte:
+            message = texte
+        message = " ".join(message.split())[:140]
+        return f"{code} : {message}" if message else str(code)
+
+    @staticmethod
+    def _resumer_exception(exc) -> str:
+        return f"{type(exc).__name__} : {exc}"[:200]
+
+    @staticmethod
+    def _resumer_erreurs_graphql(erreurs) -> str:
+        """Les erreurs d'une réponse GraphQL (statut 200) : « ACCESS_DENIED Access denied for … »."""
+        morceaux = []
+        for erreur in (erreurs if isinstance(erreurs, list) else [erreurs])[:2]:
+            if isinstance(erreur, dict):
+                extensions = erreur.get("extensions") if isinstance(erreur.get("extensions"), dict) else {}
+                morceaux.append(" ".join(str(x) for x in (extensions.get("code"), erreur.get("message")) if x))
+            else:
+                morceaux.append(str(erreur))
+        return " ".join("; ".join(morceaux).split())[:160]
 
     def _tracer_requete(self, method, endpoint, statut, t0):
         """Journal discret : méthode, point d'accès, statut et durée en ms (jamais d'en-tête)."""
@@ -865,6 +1019,12 @@ class ShopifySync:
         terme = json.dumps(str(sku), ensure_ascii=False)
         variables = {"query": f"sku:{terme} OR barcode:{terme}"}
         res = self.execute_graphql(self.REQUETE_VARIANTE, variables)
+        # Une réponse GraphQL en erreur (portée manquante, plafond de débit) arrive avec un statut
+        # 200 : sans cette mémoire, sa cause ne figurait nulle part quand le repli REST échouait
+        # lui aussi, et la ligne restait « recherche impossible » sans autre explication.
+        self._detail_graphql = (
+            "GraphQL : " + self._resumer_erreurs_graphql(res["errors"])
+            if isinstance(res, dict) and res.get("errors") else "")
 
         if res and not res.get("errors") and isinstance(res.get("data"), dict):
             edges = (res["data"].get("productVariants") or {}).get("edges") or []
@@ -891,9 +1051,25 @@ class ShopifySync:
             # Réponse valide sans variante EXACTEMENT égale : elle n'existe pas chez Shopify.
             return None, False
 
-        # GraphQL indisponible (jeton sans portée GraphQL, panne) → balayage REST complet.
-        if not self._rest_scan_fait and not self._charger_cache_rest():
-            return None, True
+        # GraphQL indisponible (jeton sans portée GraphQL, panne) → balayage REST complet, UNE fois
+        # par passe. Un balayage en échec n'était pas mémorisé : chaque ligne en attente le
+        # relançait (dont le téléchargement de tout le catalogue), soit des dizaines d'appels par
+        # passe pendant une panne — de quoi atteindre les plafonds de débit et la prolonger.
+        if not self._rest_scan_fait:
+            if getattr(self, "_rest_scan_echec", None) is None and not self._charger_cache_rest():
+                self._rest_scan_echec = (self.dernier_echec or "reseau",
+                                         getattr(self, "dernier_echec_detail", "") or "")
+            if getattr(self, "_rest_scan_echec", None):
+                nature, cause = self._rest_scan_echec
+                self._noter_echec(nature, cause)       # la cause du balayage, pas celle du dernier appel
+                # Un balayage interrompu a pu déjà rapporter cette variante : elle est exacte.
+                partielle = self._cache_inventaire.get(sku)
+                if partielle:
+                    return partielle, False
+                if self._detail_graphql:
+                    reste = getattr(self, "dernier_echec_detail", "") or "échec"
+                    self.dernier_echec_detail = f"{self._detail_graphql} ; REST : {reste}"[:240]
+                return None, True
         item_id = self._cache_inventaire.get(sku)
         return item_id, False
 
@@ -903,6 +1079,9 @@ class ShopifySync:
 
     def adjust_shopify_stock(self, inventory_item_id: int, location_id: str, qty_change: int) -> bool:
         """Ajuste (en relatif) le niveau d'inventaire sur Shopify pour un article donné."""
+        # Remise à zéro AVANT le refus d'office : sans appel, aucune cause d'un échec passé ne doit
+        # se coller à celui-ci.
+        self._effacer_echec()
         if not location_id or not inventory_item_id:
             return False
         data = {
@@ -910,7 +1089,6 @@ class ShopifySync:
             "inventory_item_id": inventory_item_id,
             "available_adjustment": qty_change
         }
-        self.dernier_echec = None
         # Mouvement RELATIF : jamais rejoué après une coupure (voir `make_request`).
         res = self.make_request("inventory_levels/adjust.json", method="POST", data=data,
                                 rejouable=False)
@@ -923,6 +1101,7 @@ class ShopifySync:
         L'ajustement relatif est réservé aux mouvements (vente, remboursement) ; une correction
         d'inventaire saisie en boutique doit au contraire imposer la valeur comptée.
         """
+        self._effacer_echec()
         if not location_id or not inventory_item_id:
             return False
         data = {
@@ -930,7 +1109,6 @@ class ShopifySync:
             "inventory_item_id": inventory_item_id,
             "available": int(quantite)
         }
-        self.dernier_echec = None
         res = self.make_request("inventory_levels/set.json", method="POST", data=data)
         return res is not None
 
@@ -1046,6 +1224,7 @@ class ShopifySync:
             return 0
 
         self._rest_scan_fait = False
+        self._rest_scan_echec = None
         conn = None
         synced_count = 0
         try:
@@ -1112,7 +1291,7 @@ class ShopifySync:
                             break
                     if echec_reseau:
                         logger.error(f"Recherche Shopify impossible pour SKU {code_barre} : ligne retentée plus tard.")
-                        self._file_echec(conn, vd_id, "recherche Shopify impossible")
+                        self._file_echec(conn, vd_id, "recherche Shopify impossible" + self._suffixe_echec())
                         tout_pousse = False
                         continue
                     if not inv_item_id:
@@ -1153,7 +1332,8 @@ class ShopifySync:
                                    (vd_id, STATUT_EN_VOL))
                         logger.error(f"Échec de l'ajustement du stock Shopify pour SKU {code_barre}")
                         conn.commit()
-                        self._file_echec(conn, vd_id, "Shopify a refusé l'ajustement (429/5xx/erreur)")
+                        self._file_echec(conn, vd_id, "Shopify a refusé l'ajustement (429/5xx/erreur)"
+                                         + self._suffixe_echec())
                         tout_pousse = False
                     conn.commit()
 
@@ -2097,7 +2277,111 @@ class ShopifySync:
                 c.execute(f'UPDATE "{table}" SET id_produit=? WHERE id_produit=?', (garder, absorbe))
         c.execute("DELETE FROM Produits WHERE id=?", (absorbe,))
 
-    def import_catalog(self, progress_callback=None) -> int:
+    # Sauvegardes « avant import » gardées à côté des sauvegardes de migration (les plus anciennes
+    # sont supprimées au-delà) : une copie intégrale de la base, quelques centaines de Ko chacune.
+    SAUVEGARDES_IMPORT_CONSERVEES = 10
+
+    @staticmethod
+    def _chemin_base(conn) -> str:
+        """Fichier SQLite réellement ouvert par `conn` ('' pour une base en mémoire)."""
+        chemin = getattr(conn, "db_path", "") or ""
+        if chemin:
+            return str(chemin)
+        try:
+            for ligne in conn.cursor().execute("PRAGMA database_list").fetchall():
+                if ligne[1] == "main":
+                    return str(ligne[2] or "")
+        except Exception:
+            pass
+        return ""
+
+    def _sauvegarder_avant_import(self) -> str:
+        """
+        Copie vérifiée de la base juste avant que l'import n'écrase des quantités.
+
+        Un import remplace des centaines de quantités d'un coup ; sans point de retour, la seule
+        trace de l'état d'avant était la mémoire de la commerçante. La copie passe par l'API de
+        sauvegarde SQLite (cohérente en mode WAL) et est relue avant d'être retenue. Si elle
+        échoue, l'import est annulé : on n'écrase pas sans pouvoir revenir en arrière.
+        Retourne le chemin de la copie, ou '' quand il n'y a aucun fichier à copier.
+        """
+        conn = get_connection()
+        try:
+            source = self._chemin_base(conn)
+        finally:
+            conn.close()
+        if not source or not os.path.exists(source):
+            return ""
+        try:
+            from kodo_core.config import ShopConfig
+            from kodo_core.db.sanctuary_shield import copier_base_sqlite
+            dossier = ShopConfig.get_snapshots_dir()
+            horodatage = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            cible = os.path.join(dossier, f"kodo_pos_pre_import_{horodatage}.db")
+            copier_base_sqlite(source, cible)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Sauvegarde de sécurité impossible avant l'import ({exc}). "
+                "Import annulé : aucune quantité n'a été modifiée."
+            ) from exc
+        self._purger_sauvegardes_import(dossier)
+        return cible
+
+    def _purger_sauvegardes_import(self, dossier) -> None:
+        try:
+            noms = sorted(n for n in os.listdir(dossier)
+                          if n.startswith("kodo_pos_pre_import_") and n.endswith(".db"))
+            for ancien in noms[:-self.SAUVEGARDES_IMPORT_CONSERVEES]:
+                os.remove(os.path.join(dossier, ancien))
+        except OSError as exc:
+            logger.warning(f"Purge des anciennes sauvegardes d'import impossible : {exc}")
+
+    @staticmethod
+    def _message_ventes_non_envoyees(bilan) -> str:
+        lignes, tickets = bilan["lignes"], bilan["tickets"]
+        if bilan["premier"] == bilan["dernier"]:
+            portee = f"le ticket {bilan['premier']}"
+        else:
+            portee = f"{tickets} tickets, du {bilan['premier']} au {bilan['dernier']}"
+        texte = (
+            f"Import du catalogue refusé : {lignes} ligne(s) de vente ({portee}) n'ont pas encore "
+            "été envoyées à Shopify. Shopify ne les contient pas : l'import recopierait ses anciennes "
+            "quantités par-dessus celles de la caisse et ferait réapparaître en stock des articles "
+            "déjà vendus. Cliquez sur « Rafraîchir la synchronisation », attendez qu'elle réussisse, "
+            "puis relancez l'import."
+        )
+        derniere = str(lire_etat_sync().get("message") or "").strip()
+        if derniere:
+            texte += f" Dernier message de la synchronisation : {derniere}"
+        return texte
+
+    def _etat_avant_import(self, forcer):
+        """
+        Ce qui conditionne un import sûr, lu AVANT tout appel réseau, dans une courte transaction :
+        les ventes que Shopify ne connaît pas encore, et l'empreinte d'activité (voir
+        `_signature_activite`) à comparer au moment d'écrire. Retourne (signature, non_envoyees).
+
+        Le refus ne vaut que si la poussée des ventes est allumée : poussée éteinte, ces ventes ne
+        partiront jamais et Shopify fait volontairement autorité.
+        """
+        conn = get_connection()
+        try:
+            c = _ouvrir_ecriture(conn)
+            _assurer_tables_sync(c)
+            non_envoyees = ventes_non_envoyees(c)
+            signature = _signature_activite(c)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if self.auto_sync and non_envoyees["lignes"] and not forcer:
+            raise ImportShopifyBloque(self._message_ventes_non_envoyees(non_envoyees),
+                                      "ventes_non_envoyees", non_envoyees)
+        return signature, non_envoyees
+
+    def import_catalog(self, progress_callback=None, forcer: bool = False) -> int:
         """
         Importe le catalogue complet de Shopify vers la base de données locale Kōdo POS.
 
@@ -2109,28 +2393,56 @@ class ShopifySync:
 
         Ce qui est VOLONTAIREMENT écrasé à chaque import : le nom, la catégorie et les prix de vente
         (normal et soldé). Shopify fait autorité sur la vitrine ; le reste appartient à la boutique.
+
+        Les QUANTITÉS sont recopiées depuis Shopify, ce qui efface des ventes que Shopify ne connaît
+        pas encore. Trois garde-fous, nés d'un cas client où le stock « remontait » :
+        - refus (`ImportShopifyBloque`) tant que des ventes n'ont pas été envoyées à Shopify, sauf
+          `forcer=True` (réservé au support) ;
+        - copie de sécurité de la base juste avant d'écrire, et import annulé si elle échoue ;
+        - refus si une vente ou une poussée a eu lieu PENDANT le téléchargement du catalogue : les
+          quantités reçues sont alors périmées. Rien n'est modifié dans ces trois cas.
+        Chaque quantité modifiée est consignée au journal de stock (`Stock_Journal`) ; le bilan de
+        l'import est laissé dans `self.dernier_import`. Retourne le nombre de variantes importées.
         """
         self.load_config()
         if not self.est_configure():
             raise ValueError("Configuration Shopify manquante (URL ou Token).")
 
+        self.dernier_import = {"echec": False}
         logger.info("Début de l'importation du catalogue...")
+
+        # Le refus se décide avant tout appel réseau : inutile de télécharger un catalogue qu'on
+        # n'a pas le droit d'appliquer.
+        signature, non_envoyees = self._etat_avant_import(forcer)
+
         if progress_callback:
             progress_callback("Récupération des produits Shopify...", 10)
 
         shopify_products = self._fetch_all_products(progress_callback)
         if shopify_products is None:
             logger.warning("Aucun produit trouvé sur Shopify ou erreur de connexion.")
+            # `0` reste la valeur de retour (contrat historique), mais l'échec est consigné : la
+            # route ne doit pas annoncer « importation réussie : 0 variante » sur un refus du serveur.
+            self.dernier_import = {"echec": True, "nature": self.dernier_echec,
+                                   "detail": getattr(self, "dernier_echec_detail", "") or ""}
             return 0
 
         total_p = len(shopify_products)
         logger.info(f"{total_p} produits récupérés de Shopify.")
 
+        sauvegarde = self._sauvegarder_avant_import()
+
         conn = get_connection()
-        imported_count = 0
+        imported_count = modifiees = creees = 0
         try:
             c = _ouvrir_ecriture(conn)
             _assurer_tables_sync(c)
+            # Dernier contrôle DANS la transaction d'écriture (plus aucune vente ne peut s'y glisser).
+            if _signature_activite(c) != signature:
+                raise ImportShopifyBloque(
+                    "Une vente ou une synchronisation Shopify a eu lieu pendant le téléchargement du "
+                    "catalogue : les quantités reçues sont périmées. Par sécurité, rien n'a été modifié. "
+                    "Relancez l'import.", "activite_pendant_import")
             maintenant = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             for idx, p in enumerate(shopify_products):
@@ -2235,9 +2547,21 @@ class ShopifySync:
                     if cible is None and self._est_taille_unique(taille):
                         cible = next((r[0] for r in stock_rows if self._est_taille_unique(r[1])), None)
                     if cible is not None:
+                        c.execute("SELECT quantite_actuelle FROM Stocks WHERE id=?", (cible,))
+                        ancienne = c.fetchone()
+                        avant = ancienne[0] if ancienne else None
                         c.execute("UPDATE Stocks SET quantite_actuelle=? WHERE id=?", (qty, cible))
+                        if avant != qty:
+                            modifiees += 1
+                        stock_journal.noter(c, cible, avant, qty, stock_journal.ORIGINE_IMPORT_SHOPIFY,
+                                            produit_id=pid, produit=nom, taille=taille,
+                                            detail="quantité recopiée depuis Shopify")
                     else:
                         c.execute("INSERT INTO Stocks (id_produit, taille, quantite_actuelle, seuil_alerte) VALUES (?, ?, ?, NULL)", (pid, taille, qty))
+                        creees += 1
+                        stock_journal.noter(c, c.lastrowid, None, qty, stock_journal.ORIGINE_IMPORT_SHOPIFY,
+                                            produit_id=pid, produit=nom, taille=taille,
+                                            detail="taille créée par l'import Shopify")
 
                     imported_count += 1
 
@@ -2250,9 +2574,18 @@ class ShopifySync:
         finally:
             conn.close()
 
+        self.dernier_import = {
+            "echec": False,
+            "variantes": imported_count,
+            "modifiees": modifiees,
+            "creees": creees,
+            "sauvegarde": sauvegarde,
+            # Ventes non envoyées effacées du stock parce que le support a forcé l'import.
+            "ecrasees": non_envoyees["lignes"] if (forcer and self.auto_sync) else 0,
+        }
         if progress_callback:
             progress_callback("Importation terminée !", 100)
-        logger.info(f"Importation terminée : {imported_count} variantes importées.")
+        logger.info(f"Importation terminée : {imported_count} variantes importées, {modifiees} quantité(s) modifiée(s).")
         return imported_count
 
 
@@ -2337,7 +2670,9 @@ class ShopifySyncThread(threading.Thread):
         tout_va_bien = True
         incidents = []
         tickets = commandes = remboursements = 0
+        # Deux affectations simples (et non un appel de méthode) : le moteur peut être substitué.
         self.engine.dernier_echec = None
+        self.engine.dernier_echec_detail = ""
         if self.engine.auto_sync:
             try:
                 # Filet si la poussée est allumée pendant que le fil tourne déjà : jamais
@@ -2367,7 +2702,9 @@ class ShopifySyncThread(threading.Thread):
                 tout_va_bien = False
         if self.engine.dernier_echec:
             tout_va_bien = False
-            incidents.append(f"échec de communication ({self.engine.dernier_echec}) avec {self.engine.domaine()}")
+            cause = getattr(self.engine, "dernier_echec_detail", "") or ""
+            nature = f"{self.engine.dernier_echec} — {cause}" if cause else self.engine.dernier_echec
+            incidents.append(f"échec de communication ({nature}) avec {self.engine.domaine()}")
 
         message = " ; ".join(incidents) if incidents else (
             f"{tickets} ticket(s) poussé(s), {commandes} commande(s) rapatriée(s), "
