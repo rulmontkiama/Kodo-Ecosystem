@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import List, Dict, Any, Optional, Tuple
 
 from kodo_core.db.connection import get_connection
-from kodo_core.db import stock_journal
+from kodo_core.db import stock_journal, shopify_alignement
 
 
 # Caractères de contrôle C0/C1 : une douchette termine presque toujours sa trame par un
@@ -801,7 +801,8 @@ class InventoryManager:
             else:
                 declarees = {_norm_taille("Taille Unique"): ["Taille Unique", stock_default]}
 
-            cls._ecrire_lignes_de_stock(cursor, prod_id, declarees, alert_threshold)
+            cls._ecrire_lignes_de_stock(cursor, prod_id, declarees, alert_threshold,
+                                        produit_neuf=not existing_id)
 
             conn.commit()
             return {"success": True, "product_id": str(prod_id)}
@@ -815,7 +816,8 @@ class InventoryManager:
                 conn.close()
 
     @classmethod
-    def _ecrire_lignes_de_stock(cls, cursor, prod_id, declarees: Dict[str, List[Any]], alert_threshold) -> None:
+    def _ecrire_lignes_de_stock(cls, cursor, prod_id, declarees: Dict[str, List[Any]], alert_threshold,
+                                produit_neuf: bool = False) -> None:
         """Aligne les lignes de `Stocks` d'un article sur les déclinaisons déclarées.
 
         `declarees` associe une clé de taille normalisée à [libellé retenu, quantité comptée].
@@ -829,6 +831,11 @@ class InventoryManager:
         - une ligne retirée de la déclaration n'est supprimée que si elle n'a jamais été
           vendue ; sinon elle est conservée à 0, car `Ventes_Details.id_stock` y est accroché
           (la supprimer remontait à l'écran en HTTP 500 « FOREIGN KEY constraint failed »).
+
+        `produit_neuf` : l'article vient d'être créé. Ses premières quantités ne sont PAS marquées
+        pour la boutique en ligne : il n'y est pas encore (l'export CSV en fixe le stock initial) et
+        le chercher n'aurait pour effet que des recherches vaines et un import du catalogue refusé
+        sans raison juste après la création.
         """
         cursor.execute("SELECT id, taille FROM Stocks WHERE id_produit=? ORDER BY id", (prod_id,))
         libres = [(r[0], r[1]) for r in cursor.fetchall()]
@@ -872,6 +879,11 @@ class InventoryManager:
                 stock_journal.noter(cursor, nouvelle_ligne, None, qty, stock_journal.ORIGINE_FICHE_PRODUIT,
                                     produit_id=prod_id, produit=nom_produit, taille=libelle,
                                     detail="taille créée sur la fiche")
+                # La boutique en ligne ne reçoit que les ventes : une quantité saisie ici est
+                # marquée pour que la prochaine passe la fasse rejoindre le site (jamais bloquant).
+                if not produit_neuf:
+                    shopify_alignement.marquer(cursor, nouvelle_ligne, produit_id=prod_id,
+                                               produit=nom_produit, taille=libelle)
             else:
                 cursor.execute("SELECT quantite_actuelle FROM Stocks WHERE id=?", (sid,))
                 ancienne = cursor.fetchone()
@@ -886,6 +898,9 @@ class InventoryManager:
                 stock_journal.noter(cursor, sid, avant, qty, stock_journal.ORIGINE_FICHE_PRODUIT,
                                     produit_id=prod_id, produit=nom_produit, taille=libelle,
                                     detail="quantité enregistrée depuis la fiche produit")
+                if avant != qty:
+                    shopify_alignement.marquer(cursor, sid, produit_id=prod_id,
+                                               produit=nom_produit, taille=libelle)
 
         for sid, taille_retiree in libres:
             cursor.execute("SELECT quantite_actuelle FROM Stocks WHERE id=?", (sid,))
@@ -897,11 +912,17 @@ class InventoryManager:
                 stock_journal.noter(cursor, sid, avant, 0, stock_journal.ORIGINE_FICHE_PRODUIT,
                                     produit_id=prod_id, produit=nom_produit, taille=taille_retiree,
                                     detail="taille retirée de la fiche, gardée à 0 (déjà vendue)")
+                # « Mettez son stock à 0 pour le retirer de la vente » : le site doit suivre.
+                if avant != 0:
+                    shopify_alignement.marquer(cursor, sid, produit_id=prod_id,
+                                               produit=nom_produit, taille=taille_retiree)
             else:
                 cursor.execute("DELETE FROM Stocks WHERE id=?", (sid,))
                 stock_journal.noter(cursor, sid, avant, None, stock_journal.ORIGINE_FICHE_PRODUIT,
                                     produit_id=prod_id, produit=nom_produit, taille=taille_retiree,
                                     detail="taille retirée de la fiche, ligne supprimée (jamais vendue)")
+                # La ligne n'existe plus : un marquage antérieur n'aurait plus rien à aligner.
+                shopify_alignement.retirer(cursor, sid)
 
         # Le produit ne reste « à auditer » que s'il lui reste au moins une ligne non recomptée
         # (typiquement une taille retirée de la vente mais conservée pour l'historique).

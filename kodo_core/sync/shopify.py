@@ -18,7 +18,7 @@ import io
 import re
 from decimal import Decimal, ROUND_HALF_UP
 from database_manager import get_connection, signer_ticket, signer_ledger
-from kodo_core.db import stock_journal
+from kodo_core.db import stock_journal, shopify_alignement
 from kodo_core.sync.shopify_sku import prefixes_possibles, skus_produit
 
 logger = logging.getLogger("kodo_core.sync.shopify")
@@ -398,6 +398,9 @@ def _assurer_tables_sync(cursor):
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_statut ON sync_queue(statut)")
+    # Lignes de stock saisies à la main, à aligner sur la boutique en ligne (voir
+    # `kodo_core.db.shopify_alignement` ; créée aussi à la demande, sans migration).
+    shopify_alignement.assurer_table(cursor)
 
 
 # --- Point de départ de la poussée des ventes ------------------------------------------------
@@ -493,7 +496,16 @@ def _signature_activite(c) -> tuple:
     dernier_ticket = int(c.fetchone()[0] or 0)
     c.execute("SELECT COUNT(*), COALESCE(SUM(statut = ?), 0) FROM Shopify_Sync_Lignes", (STATUT_POUSSE,))
     lignes, poussees = c.fetchone()
-    return dernier_ticket, int(lignes or 0), int(poussees or 0)
+    # Une quantité saisie à la main pendant le téléchargement, ou une ligne alignée pendant celui-ci
+    # (le site a bougé), rend le catalogue reçu périmé au même titre qu'une vente.
+    try:
+        c.execute(f"SELECT COUNT(*), COALESCE(SUM(version), 0), COALESCE(SUM(statut = ?), 0) "
+                  f"FROM {shopify_alignement.TABLE}", (shopify_alignement.STATUT_ALIGNE,))
+        n_align, v_align, f_align = c.fetchone()
+    except Exception:
+        n_align = v_align = f_align = 0
+    return (dernier_ticket, int(lignes or 0), int(poussees or 0),
+            int(n_align or 0), int(v_align or 0), int(f_align or 0))
 
 
 class ImportShopifyBloque(ValueError):
@@ -1610,6 +1622,490 @@ class ShopifySync:
                 conn.close()
         return synced_count
 
+    # --- Alignement du stock en ligne sur celui de la caisse ------------------------------------
+    #
+    # Les ventes et les retours partent en RELATIF : une quantité retirée ou rendue. Une quantité
+    # saisie à la main sur la fiche produit n'est ni l'un ni l'autre, c'est un ÉTAT voulu (« il y
+    # en a 8 »). Pour l'envoyer, on lit d'abord ce que la boutique affiche puis on envoie la
+    # différence. Lire d'abord rend l'opération sûre à rejouer : une coupure, une passe interrompue
+    # ou un double clic recalculent l'écart à partir de l'état réel, jamais d'une valeur périmée,
+    # et ne peuvent donc pas appliquer deux fois la même correction. Un ajustement relatif (et non
+    # une valeur absolue posée par-dessus) laisse aussi passer ce qui survient entre la lecture et
+    # l'envoi : une commande web n'est jamais « effacée ».
+    #
+    # Valeur visée = quantité de la caisse + ventes que la boutique n'a pas encore reçues. Ces
+    # ventes sont DÉJÀ retirées de la caisse ; elles partiront en relatif à la passe suivante et
+    # ramèneront alors le site sur la caisse. Sans ce terme, elles seraient décomptées deux fois.
+
+    LIGNES_ALIGNEES_PAR_PASSE = 60
+    LOT_NIVEAUX = 50   # plafond de Shopify pour `inventory_item_ids` dans une lecture de niveaux
+
+    @staticmethod
+    def _quantites_caisse(c, stock_id):
+        """
+        `(quantité en caisse, ventes pas encore envoyées à Shopify)` d'une ligne de stock, ou None
+        si la ligne n'existe plus. UNE requête : un instantané. Une vente qui s'enregistre ensuite
+        retire autant de la première qu'elle n'ajoute à la seconde ; leur somme, qui est la valeur
+        visée, ne bouge donc pas. Même sélection de lignes que `sync_tickets_to_shopify`.
+        """
+        c.execute("""
+            SELECT s.quantite_actuelle,
+                   COALESCE((SELECT SUM(vd.quantite)
+                             FROM Ventes_Details vd
+                             JOIN Tickets t ON t.id = vd.id_ticket
+                             LEFT JOIN Shopify_Sync_Lignes j ON j.id_vente_detail = vd.id
+                             WHERE vd.id_stock = s.id AND t.synced_shopify = 0 AND t.id > ?
+                               AND j.id_vente_detail IS NULL), 0)
+            FROM Stocks s WHERE s.id = ?
+        """, (_seuil_tickets_effectif(c), stock_id))
+        ligne = c.fetchone()
+        if not ligne:
+            return None
+        return int(ligne[0] or 0), int(ligne[1] or 0)
+
+    def _lire_niveaux(self, ids, location_id):
+        """
+        Quantité disponible en ligne de chaque `inventory_item_id`, au dépôt choisi.
+
+        Retourne `(niveaux, reussi)`. Un identifiant absent de `niveaux` n'a pas de niveau dans ce
+        dépôt ; la valeur None désigne un stock non suivi. `reussi` est faux si une lecture a échoué :
+        on ne conclut alors rien (la cause est dans `dernier_echec_detail`).
+        """
+        niveaux = {}
+        ids = [int(i) for i in ids]
+        for debut in range(0, len(ids), self.LOT_NIVEAUX):
+            lot = ids[debut:debut + self.LOT_NIVEAUX]
+            endpoint = ("inventory_levels.json?inventory_item_ids="
+                        + ",".join(str(i) for i in lot)
+                        + f"&location_ids={location_id}&limit=250")
+            res = self.make_request(endpoint)
+            if not isinstance(res, dict) or not isinstance(res.get("inventory_levels"), list):
+                return niveaux, False
+            for niveau in res["inventory_levels"]:
+                try:
+                    item = int(niveau.get("inventory_item_id"))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if str(niveau.get("location_id")) != str(location_id):
+                    continue
+                dispo = niveau.get("available")
+                try:
+                    niveaux[item] = int(dispo) if dispo is not None else None
+                except (TypeError, ValueError):
+                    niveaux[item] = None
+        return niveaux, True
+
+    def _alignement_cloturer(self, conn, stock_id, version, statut, erreur=None,
+                             kodo=None, site=None, ajustement=None):
+        """
+        Termine le marquage d'une ligne. `version` est celle lue AU DÉBUT du traitement : si la
+        commerçante a ressaisi la quantité entre-temps, la ligne a été re-marquée (version plus
+        haute) et reste à traiter — elle n'est pas déclarée alignée sur une valeur périmée.
+        """
+        try:
+            c = _ouvrir_ecriture(conn)
+            c.execute(
+                f"UPDATE {shopify_alignement.TABLE} SET statut = ?, derniere_erreur = ?, "
+                "quantite_kodo = ?, quantite_site = ?, ajustement = ?, date_maj = ? "
+                "WHERE stock_id = ? AND version = ? AND statut = ?",
+                (statut, erreur, kodo, site, ajustement,
+                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 stock_id, version, shopify_alignement.STATUT_A_ALIGNER))
+            conn.commit()
+        except Exception as e:
+            self._alignement_abandon(conn, stock_id, e)
+
+    def _alignement_echec(self, conn, stock_id, cause):
+        """Reste à aligner : compte l'essai et garde la cause. Le rythme des rejeux est celui des passes."""
+        try:
+            c = _ouvrir_ecriture(conn)
+            c.execute(
+                f"UPDATE {shopify_alignement.TABLE} SET tentatives = tentatives + 1, "
+                "derniere_erreur = ?, date_maj = ? WHERE stock_id = ? AND statut = ?",
+                (str(cause)[:200], datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 stock_id, shopify_alignement.STATUT_A_ALIGNER))
+            conn.commit()
+        except Exception as e:
+            self._alignement_abandon(conn, stock_id, e)
+
+    @staticmethod
+    def _alignement_abandon(conn, stock_id, erreur):
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.warning(f"Alignement du stock {stock_id} non enregistré (il sera recalculé) : {erreur}")
+
+    def _aligner_une_ligne(self, conn, stock_id, location_id) -> str:
+        """
+        Aligne UNE ligne de stock sur la boutique en ligne. Retourne son issue :
+        `ajuste`, `aligne` (déjà égale), `absent` (article non publié en ligne), `sans_niveau`,
+        `supprimee`, `echec` (à retenter à la passe suivante) ou `ignoree` (plus à aligner).
+        Aucune transaction n'est ouverte pendant un appel réseau.
+        """
+        c = conn.cursor()
+        c.execute(f"SELECT version FROM {shopify_alignement.TABLE} WHERE stock_id = ? AND statut = ?",
+                  (stock_id, shopify_alignement.STATUT_A_ALIGNER))
+        marque = c.fetchone()
+        if not marque:
+            return "ignoree"
+        version = int(marque[0])
+
+        c.execute("SELECT s.id_produit, p.code_barre FROM Stocks s "
+                  "JOIN Produits p ON p.id = s.id_produit WHERE s.id = ?", (stock_id,))
+        ligne = c.fetchone()
+        if not ligne:
+            self._alignement_cloturer(conn, stock_id, version, shopify_alignement.STATUT_SUPPRIMEE,
+                                      "ligne de stock supprimée dans Kōdo")
+            return "supprimee"
+        produit_id, code_produit = ligne
+
+        # Même résolution que pour une vente : le SKU de CETTE taille, jamais celui d'une voisine.
+        candidats = self._skus_candidats(c, produit_id, code_produit, stock_id)
+        sku = candidats[0] if candidats else None
+        inv_item_id, echec_reseau = None, False
+        for candidat in candidats:
+            inv_item_id, echec_reseau = self._resoudre_inventory_item(candidat)
+            if inv_item_id or echec_reseau:
+                sku = candidat
+                break
+        if echec_reseau:
+            self._alignement_echec(conn, stock_id, "recherche Shopify impossible" + self._suffixe_echec())
+            return "echec"
+        if not inv_item_id:
+            self._alignement_cloturer(
+                conn, stock_id, version, shopify_alignement.STATUT_ABSENT,
+                f"SKU {sku} introuvable sur Shopify : article non publié en ligne")
+            logger.info(f"Stock {stock_id} : SKU {sku} introuvable sur Shopify, rien à aligner.")
+            return "absent"
+
+        niveaux, reussi = self._lire_niveaux([inv_item_id], location_id)
+        if not reussi:
+            self._alignement_echec(conn, stock_id,
+                                   "lecture du stock en ligne impossible" + self._suffixe_echec())
+            return "echec"
+        if niveaux.get(inv_item_id) is None:
+            self._alignement_cloturer(
+                conn, stock_id, version, shopify_alignement.STATUT_SANS_NIVEAU,
+                "stock non suivi ou variante absente de ce dépôt : rien à aligner")
+            return "sans_niveau"
+        site = niveaux[inv_item_id]
+
+        quantites = self._quantites_caisse(c, stock_id)
+        if quantites is None:
+            self._alignement_cloturer(conn, stock_id, version, shopify_alignement.STATUT_SUPPRIMEE,
+                                      "ligne de stock supprimée dans Kōdo")
+            return "supprimee"
+        kodo, en_attente = quantites
+        cible = kodo + en_attente
+        if cible < 0:
+            self._alignement_echec(
+                conn, stock_id, f"valeur visée négative ({cible}) : ligne à vérifier à la main")
+            return "echec"
+
+        ecart = cible - site
+        if ecart:
+            logger.info(f"Alignement stock {stock_id} (SKU {sku}) : site {site} → {cible} ({ecart:+d}).")
+            try:
+                applique = self.adjust_shopify_stock(inv_item_id, location_id, ecart)
+            except Exception as exc:
+                logger.error(f"Exception lors de l'alignement du stock Shopify pour SKU {sku}: {exc}")
+                applique = False
+                self.dernier_echec = "reseau"
+            if not applique:
+                # Sans réponse, on ignore si l'ajustement a porté : aucune importance, la prochaine
+                # lecture le dira et l'écart sera recalculé à partir de l'état réel.
+                nature = ("aucune réponse de Shopify" if self.dernier_echec == "reseau"
+                          else "Shopify a refusé l'ajustement")
+                self._alignement_echec(conn, stock_id, nature + self._suffixe_echec())
+                return "echec"
+        self._alignement_cloturer(conn, stock_id, version, shopify_alignement.STATUT_ALIGNE, None,
+                                  kodo=kodo, site=site, ajustement=ecart)
+        return "ajuste" if ecart else "aligne"
+
+    def aligner_lignes_modifiees(self, limite: int = None) -> dict:
+        """
+        Aligne la boutique en ligne sur la caisse pour les lignes dont la quantité a été saisie à la
+        main (`Shopify_Alignements`). Appelée à chaque passe, APRÈS la poussée des ventes et
+        l'import des commandes. Ne rejoue rien d'aveugle : voir l'en-tête de cette section.
+        """
+        bilan = {"traitees": 0, "ajustees": 0, "alignees": 0, "absentes": 0, "sans_niveau": 0,
+                 "supprimees": 0, "en_echec": 0, "restantes": 0}
+        if not self.est_configure():
+            return bilan
+        limite = int(limite or self.LIGNES_ALIGNEES_PAR_PASSE)
+        correspondance = {"ajuste": "ajustees", "aligne": "alignees", "absent": "absentes",
+                          "sans_niveau": "sans_niveau", "supprimee": "supprimees", "echec": "en_echec"}
+        conn = get_connection()
+        try:
+            c = _ouvrir_ecriture(conn)
+            _assurer_tables_sync(c)
+            c.execute(f"SELECT stock_id FROM {shopify_alignement.TABLE} WHERE statut = ? "
+                      "ORDER BY date_maj, stock_id LIMIT ?",
+                      (shopify_alignement.STATUT_A_ALIGNER, limite))
+            ids = [r[0] for r in c.fetchall()]
+            c.execute(f"SELECT COUNT(*) FROM {shopify_alignement.TABLE} WHERE statut = ?",
+                      (shopify_alignement.STATUT_A_ALIGNER,))
+            total = int(c.fetchone()[0] or 0)
+            conn.commit()
+            bilan["restantes"] = max(0, total - len(ids))
+            if not ids:
+                return bilan
+
+            location_id = self.get_location_id()
+            if not location_id:
+                logger.warning("Alignement du stock impossible : dépôt d'inventaire Shopify introuvable.")
+                bilan["en_echec"] = len(ids)
+                return bilan
+
+            self._rest_scan_fait = False
+            self._rest_scan_echec = None
+            for stock_id in ids:
+                issue = self._aligner_une_ligne(conn, stock_id, location_id)
+                if issue == "ignoree":
+                    continue
+                bilan["traitees"] += 1
+                bilan[correspondance[issue]] += 1
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.error(f"Erreur lors de l'alignement du stock sur Shopify : {e}")
+            bilan["en_echec"] += 1
+        finally:
+            conn.close()
+        return bilan
+
+    # --- Comparaison caisse ↔ boutique en ligne (lecture seule) puis alignement demandé ---------
+
+    def _scanner_variantes_en_ligne(self):
+        """
+        Le catalogue en ligne, indexé par SKU puis par code-barres : `(par_sku, par_code)`, chacun
+        `{clé: {inventory_item_id, ...}}`.
+
+        Contrairement au cache de résolution (`_charger_cache_rest`, qui garde la PREMIÈRE variante
+        rencontrée), celui-ci garde TOUTES celles qui portent la même clé : deux variantes au même
+        SKU rendent une vente ambiguë, et c'est précisément ce que la comparaison doit montrer.
+        Retourne aussi la liste à plat des variantes (titre, déclinaison, SKU, ids), qui sert à
+        suggérer à quoi correspond un article que Kōdo ne retrouve pas par son SKU.
+        Lève `RuntimeError` si le balayage échoue : un catalogue tronqué ne se compare pas.
+        """
+        par_sku, par_code, a_plat = {}, {}, []
+        since_id = 0
+        for _ in range(self.MAX_PAGES):
+            endpoint = f"products.json?limit={self.PAGE_SIZE}&fields=id,title,variants"
+            if since_id:
+                endpoint += f"&since_id={since_id}"
+            data = self.make_request(endpoint)
+            if not isinstance(data, dict) or "products" not in data:
+                raise RuntimeError("Lecture du catalogue Shopify impossible"
+                                   + (f" ({self.dernier_echec_detail})" if self.dernier_echec_detail else "")
+                                   + " : rien n'a été comparé.")
+            page = data["products"]
+            for produit in page:
+                for v in produit.get("variants", []):
+                    iid = v.get("inventory_item_id")
+                    if not iid:
+                        continue
+                    for index, cle in ((par_sku, v.get("sku")), (par_code, v.get("barcode"))):
+                        cle = str(cle or "").strip()
+                        if cle:
+                            index.setdefault(cle, set()).add(int(iid))
+                    declinaison = self._taille_variante(v)
+                    a_plat.append({
+                        "variantId": v.get("id"), "item": int(iid), "titre": produit.get("title") or "",
+                        "taille": declinaison, "sku": str(v.get("sku") or "").strip(),
+                        "barcode": str(v.get("barcode") or "").strip(),
+                        "_titre": self._normaliser_libelle(produit.get("title")),
+                        "_taille": self._normaliser_libelle(declinaison),
+                    })
+            last_id = page[-1].get("id") if page else None
+            if len(page) < self.PAGE_SIZE or not last_id or last_id == since_id:
+                break
+            since_id = last_id
+        return par_sku, par_code, a_plat
+
+    @staticmethod
+    def _normaliser_libelle(valeur) -> str:
+        """Nom ou taille comparable : sans accents, sans casse, espaces réduits."""
+        import unicodedata
+        texte = unicodedata.normalize("NFKD", str(valeur if valeur is not None else ""))
+        texte = "".join(ch for ch in texte if not unicodedata.combining(ch))
+        return " ".join(texte.casefold().split())
+
+    def _suggerer_variante(self, nom, taille, ids_memorises, a_plat):
+        """
+        À quelle variante en ligne correspond une ligne que Kōdo ne retrouve pas par son SKU ?
+        Une réponse n'est donnée que si elle est UNIQUE. Par ordre de sûreté : une variante déjà
+        reliée à cet article par un import (id Shopify mémorisé), puis le même nom et la même taille.
+        C'est une INFORMATION pour la commerçante : ni la synchronisation ni l'alignement ne s'en
+        servent pour agir.
+        """
+        voulue = self._normaliser_libelle(taille)
+        if self._est_taille_unique(taille):
+            voulue = self._normaliser_libelle("Unique")
+
+        def meme_taille(v):
+            return v["_taille"] == voulue or (self._est_taille_unique(v["taille"])
+                                              and self._est_taille_unique(taille))
+
+        candidates = [v for v in a_plat if v["variantId"] in ids_memorises and meme_taille(v)]
+        via = "variante déjà reliée à cet article par un import"
+        if not candidates:
+            titre = self._normaliser_libelle(nom)
+            candidates = [v for v in a_plat if v["_titre"] == titre and meme_taille(v)]
+            via = "même nom et même taille"
+        if len(candidates) != 1:
+            return None
+        v = candidates[0]
+        return {"via": via, "titre": v["titre"], "taille": v["taille"], "skuEnLigne": v["sku"],
+                "codeBarresEnLigne": v["barcode"], "variantId": v["variantId"]}
+
+    def comparer_stock(self) -> dict:
+        """
+        Compare, ligne de stock par ligne de stock, la caisse et la boutique en ligne. LECTURE
+        SEULE : rien n'est modifié ni côté Kōdo ni côté Shopify.
+
+        Pour chaque ligne : la quantité en caisse, les ventes pas encore reçues par le site, la
+        valeur que le site DEVRAIT afficher (leur somme), ce qu'il affiche, et l'écart. `etat` :
+        `identique`, `ecart`, `absent` (non publié en ligne), `ambigu` (plusieurs variantes en ligne
+        portent ce SKU : aucune n'est choisie) ou `sans_niveau` (stock non suivi dans ce dépôt).
+        """
+        self.load_config()
+        if not self.est_configure():
+            raise ValueError("Configuration Shopify manquante (URL ou jeton).")
+        location_id = self.get_location_id()
+        if not location_id:
+            raise RuntimeError("Dépôt d'inventaire Shopify introuvable"
+                               + (f" ({self.dernier_echec_detail})" if self.dernier_echec_detail else "")
+                               + " : rien n'a été comparé.")
+        par_sku, par_code, a_plat = self._scanner_variantes_en_ligne()
+
+        conn = get_connection()
+        try:
+            c = _ouvrir_ecriture(conn)
+            _assurer_tables_sync(c)
+            conn.commit()
+            memorisees = {}
+            c.execute("SELECT variant_id, id_produit FROM Shopify_Variantes")
+            for variant_id, id_produit in c.fetchall():
+                memorisees.setdefault(id_produit, set()).add(variant_id)
+            c.execute("""
+                SELECT s.id, p.id, p.nom, p.code_barre, s.taille, s.quantite_actuelle,
+                       COALESCE((SELECT SUM(vd.quantite)
+                                 FROM Ventes_Details vd
+                                 JOIN Tickets t ON t.id = vd.id_ticket
+                                 LEFT JOIN Shopify_Sync_Lignes j ON j.id_vente_detail = vd.id
+                                 WHERE vd.id_stock = s.id AND t.synced_shopify = 0 AND t.id > ?
+                                   AND j.id_vente_detail IS NULL), 0)
+                FROM Stocks s JOIN Produits p ON p.id = s.id_produit
+                ORDER BY p.nom COLLATE NOCASE, s.id
+            """, (_seuil_tickets_effectif(c),))
+            lignes = c.fetchall()
+
+            rapport, a_lire = [], set()
+            for sid, pid, nom, code, taille, kodo, attente in lignes:
+                candidats = self._skus_candidats(c, pid, code, sid)
+                sku, items = (candidats[0] if candidats else None), set()
+                for candidat in candidats:
+                    trouves = par_sku.get(candidat) or par_code.get(candidat)
+                    if trouves:
+                        sku, items = candidat, set(trouves)
+                        break
+                kodo, attente = int(kodo or 0), int(attente or 0)
+                ligne = {"stockId": sid, "produitId": pid, "produit": nom, "taille": taille,
+                         "sku": sku, "quantiteKodo": kodo, "ventesEnAttente": attente,
+                         "cible": kodo + attente, "quantiteSite": None, "ecart": None,
+                         "etat": "absent", "suggestion": None, "_item": None}
+                if len(items) > 1:
+                    ligne["etat"] = "ambigu"
+                elif items:
+                    ligne["_item"] = next(iter(items))
+                    a_lire.add(ligne["_item"])
+                else:
+                    ligne["suggestion"] = self._suggerer_variante(
+                        nom, taille, memorisees.get(pid, set()), a_plat)
+                rapport.append(ligne)
+        finally:
+            conn.close()
+
+        niveaux, reussi = self._lire_niveaux(sorted(a_lire), location_id)
+        if not reussi:
+            raise RuntimeError("Lecture des quantités en ligne impossible"
+                               + (f" ({self.dernier_echec_detail})" if self.dernier_echec_detail else "")
+                               + " : rien n'a été comparé.")
+
+        resume = {"lignes": len(rapport), "identiques": 0, "ecarts": 0, "absentes": 0,
+                  "ambigues": 0, "sansNiveau": 0}
+        for ligne in rapport:
+            item = ligne.pop("_item")
+            if ligne["etat"] == "ambigu":
+                resume["ambigues"] += 1
+                continue
+            if item is None:
+                resume["absentes"] += 1
+                continue
+            if niveaux.get(item) is None:
+                ligne["etat"] = "sans_niveau"
+                resume["sansNiveau"] += 1
+                continue
+            ligne["quantiteSite"] = niveaux[item]
+            ligne["ecart"] = ligne["cible"] - niveaux[item]
+            ligne["etat"] = "ecart" if ligne["ecart"] else "identique"
+            resume["ecarts" if ligne["ecart"] else "identiques"] += 1
+            # La comparaison vient de résoudre ces SKU : l'alignement qui suit n'a pas à les
+            # rechercher un par un (une requête GraphQL de moins par ligne).
+            if ligne["sku"] and item:
+                self._cache_inventaire.setdefault(str(ligne["sku"]), item)
+        return {"lignes": rapport, "resume": resume, "depot": str(location_id)}
+
+    def aligner_stock(self, stock_ids=None) -> dict:
+        """
+        Aligne la boutique en ligne sur la caisse pour les lignes en écart (toutes, ou celles de
+        `stock_ids`). Les valeurs sont RELUES ligne par ligne au moment d'écrire : le rapport de
+        comparaison n'est qu'un point de départ, jamais une valeur envoyée telle quelle.
+        """
+        rapport = self.comparer_stock()
+        voulues = None if stock_ids is None else {int(s) for s in stock_ids}
+        retenues = [l for l in rapport["lignes"]
+                    if l["etat"] == "ecart" and (voulues is None or l["stockId"] in voulues)]
+        if retenues:
+            conn = get_connection()
+            try:
+                c = _ouvrir_ecriture(conn)
+                shopify_alignement.assurer_table(c)
+                for l in retenues:
+                    shopify_alignement.marquer(
+                        c, l["stockId"], origine=shopify_alignement.ORIGINE_COMPARAISON,
+                        produit_id=l["produitId"], produit=l["produit"], taille=l["taille"],
+                        forcer=True)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        bilan = self.aligner_lignes_modifiees(limite=10 ** 6)
+
+        resultats = []
+        if retenues:
+            conn = get_connection()
+            try:
+                c = conn.cursor()
+                for l in retenues:
+                    c.execute(f"SELECT statut, quantite_kodo, quantite_site, ajustement, derniere_erreur "
+                              f"FROM {shopify_alignement.TABLE} WHERE stock_id = ?", (l["stockId"],))
+                    r = c.fetchone()
+                    resultats.append({
+                        "stockId": l["stockId"], "produit": l["produit"], "taille": l["taille"],
+                        "sku": l["sku"], "statut": r[0] if r else None,
+                        "quantiteSiteAvant": r[2] if r else None,
+                        "ajustement": r[3] if r else None, "erreur": r[4] if r else None})
+            finally:
+                conn.close()
+        return {"comparaison": rapport["resume"], "bilan": bilan, "lignes": resultats}
+
     # --- Rapatriement des commandes Shopify -------------------------------------------------
 
     @staticmethod
@@ -2602,6 +3098,20 @@ class ShopifySync:
             texte += f" Dernier message de la synchronisation : {derniere}"
         return texte
 
+    @staticmethod
+    def _message_stock_non_envoye(lignes) -> str:
+        texte = (
+            f"Import du catalogue refusé : {lignes} ligne(s) de stock saisie(s) à la main dans Kōdo "
+            "n'ont pas encore été envoyées à la boutique en ligne. L'import recopierait les anciennes "
+            "quantités du site par-dessus celles de la caisse et effacerait ces corrections. "
+            "Cliquez sur « Rafraîchir la synchronisation », attendez qu'elle réussisse, puis "
+            "relancez l'import."
+        )
+        derniere = str(lire_etat_sync().get("message") or "").strip()
+        if derniere:
+            texte += f" Dernier message de la synchronisation : {derniere}"
+        return texte
+
     def _etat_avant_import(self, forcer):
         """
         Ce qui conditionne un import sûr, lu AVANT tout appel réseau, dans une courte transaction :
@@ -2616,6 +3126,7 @@ class ShopifySync:
             c = _ouvrir_ecriture(conn)
             _assurer_tables_sync(c)
             non_envoyees = ventes_non_envoyees(c)
+            a_aligner = shopify_alignement.compter_a_aligner(c)
             signature = _signature_activite(c)
             conn.commit()
         except Exception:
@@ -2626,6 +3137,9 @@ class ShopifySync:
         if self.auto_sync and non_envoyees["lignes"] and not forcer:
             raise ImportShopifyBloque(self._message_ventes_non_envoyees(non_envoyees),
                                       "ventes_non_envoyees", non_envoyees)
+        if self.auto_sync and a_aligner and not forcer:
+            raise ImportShopifyBloque(self._message_stock_non_envoye(a_aligner),
+                                      "stock_non_envoye", {"lignes": a_aligner, "tickets": 0})
         return signature, non_envoyees
 
     def import_catalog(self, progress_callback=None, forcer: bool = False) -> int:
@@ -2812,7 +3326,14 @@ class ShopifySync:
 
                     imported_count += 1
 
-            # Kōdo vient de copier le stock en ligne : les ventes antérieures y sont déjà comptées.
+            # Kōdo vient de copier le stock en ligne : les ventes antérieures y sont déjà comptées,
+            # et les quantités saisies à la main (qu'un import forcé vient d'écraser) n'ont plus
+            # rien à aligner.
+            c.execute(
+                f"UPDATE {shopify_alignement.TABLE} SET statut = ?, derniere_erreur = ?, date_maj = ? "
+                "WHERE statut = ?",
+                (shopify_alignement.STATUT_ALIGNE, "remplacé par l'import du catalogue", maintenant,
+                 shopify_alignement.STATUT_A_ALIGNER))
             noter_alignement_stock(conn)
             conn.commit()
         except Exception:
@@ -2917,6 +3438,7 @@ class ShopifySyncThread(threading.Thread):
         tout_va_bien = True
         incidents = []
         tickets = commandes = remboursements = 0
+        alignement = {}
         # Deux affectations simples (et non un appel de méthode) : le moteur peut être substitué.
         self.engine.dernier_echec = None
         self.engine.dernier_echec_detail = ""
@@ -2947,6 +3469,21 @@ class ShopifySyncThread(threading.Thread):
                 logger.error(f"Inspection des remboursements Shopify interrompue : {e}")
                 incidents.append(f"remboursements : {e}")
                 tout_va_bien = False
+        if self.engine.auto_sync:
+            try:
+                # Une quantité saisie à la main sur la fiche produit ne part pas avec les ventes :
+                # elle est alignée ici, après elles, pour que la valeur visée tienne compte de ce
+                # qui vient d'être envoyé et des commandes web qui viennent d'être rapatriées.
+                alignement = self.engine.aligner_lignes_modifiees()
+                if alignement.get("en_echec"):
+                    incidents.append(
+                        f"stock saisi à la main : {alignement['en_echec']} ligne(s) pas encore "
+                        "alignée(s) sur la boutique en ligne")
+                    tout_va_bien = False
+            except Exception as e:
+                logger.error(f"Alignement du stock sur Shopify interrompu : {e}")
+                incidents.append(f"alignement du stock : {e}")
+                tout_va_bien = False
         if self.engine.dernier_echec:
             tout_va_bien = False
             cause = getattr(self.engine, "dernier_echec_detail", "") or ""
@@ -2957,6 +3494,8 @@ class ShopifySyncThread(threading.Thread):
             f"{tickets} ticket(s) poussé(s), {commandes} commande(s) rapatriée(s), "
             f"{remboursements} remboursement(s) repris vers {self.engine.domaine()}"
         )
+        if alignement.get("ajustees") and not incidents:
+            message += f" ; {alignement['ajustees']} ligne(s) de stock alignée(s) sur la caisse"
         # Version d'API : Shopify sert en silence une autre version quand celle demandée est
         # retirée. Le dire ici, tant que tout marche, laisse le temps d'une mise à jour.
         servie = str(getattr(self.engine, "version_api_servie", "") or "")
@@ -3118,6 +3657,9 @@ def compter_file_attente() -> dict:
                       (FILE_PENDING, FILE_INDETERMINE))
             for statut, n in c.fetchall():
                 resultat["pending" if statut == FILE_PENDING else "indeterminate"] = int(n)
+            # Une quantité saisie à la main que le site n'a pas encore rattrapée est, pour la
+            # commerçante, un mouvement en attente comme un autre.
+            resultat["pending"] += shopify_alignement.compter_a_aligner(c)
         finally:
             conn.close()
     except Exception:
@@ -3173,6 +3715,72 @@ def lancer_rafraichissement() -> dict:
                                       debut=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     threading.Thread(target=_executer_rafraichissement, daemon=True, name="KodoShopifyRefresh").start()
     return {"demarre": True}
+
+
+def comparer_stock_boutique() -> dict:
+    """Comparaison caisse ↔ boutique en ligne (lecture seule), pour la route de support."""
+    return ShopifySync().comparer_stock()
+
+
+def aligner_stock_boutique(stock_ids=None) -> dict:
+    """
+    Aligne la boutique en ligne sur la caisse (lignes en écart, ou `stock_ids`).
+
+    Sous le verrou des passes : une passe automatique ne peut pas pousser une vente pendant que
+    l'alignement lit puis ajuste les mêmes quantités (la valeur visée tient compte des ventes
+    pas encore envoyées, elle ne doit pas changer sous ses pieds).
+    """
+    moteur = ShopifySync()
+    with _VERROU_PASSE:
+        return moteur.aligner_stock(stock_ids)
+
+
+def rapport_comparaison_texte(rapport: dict) -> str:
+    """Le rapport de `comparer_stock` en texte brut, lisible dans un Terminal sans outil JSON."""
+    resume = rapport.get("resume", {})
+    lignes = rapport.get("lignes", [])
+    sortie = [
+        f"Comparaison caisse ↔ boutique en ligne (dépôt {rapport.get('depot', '?')})",
+        (f"  {resume.get('lignes', 0)} ligne(s) de stock : {resume.get('identiques', 0)} identique(s), "
+         f"{resume.get('ecarts', 0)} en écart, {resume.get('absentes', 0)} non publiée(s) en ligne, "
+         f"{resume.get('ambigues', 0)} ambiguë(s), {resume.get('sansNiveau', 0)} sans stock suivi"),
+        "",
+    ]
+
+    def nom(l):
+        return f"{l['produit']} — {l['taille']}"
+
+    ecarts = [l for l in lignes if l["etat"] == "ecart"]
+    if ecarts:
+        sortie.append("EN ÉCART (le site devrait afficher la valeur visée = caisse + ventes pas encore envoyées)")
+        for l in ecarts:
+            attente = f" (+{l['ventesEnAttente']} en attente)" if l["ventesEnAttente"] else ""
+            sortie.append(f"  {nom(l)} [{l['sku']}] : caisse {l['quantiteKodo']}{attente}, "
+                          f"site {l['quantiteSite']} → site à ajuster de {l['ecart']:+d}")
+        sortie.append("")
+    ambigues = [l for l in lignes if l["etat"] == "ambigu"]
+    if ambigues:
+        sortie.append("SKU AMBIGUS (plusieurs variantes en ligne portent ce SKU : à corriger dans Shopify, ignorés)")
+        for l in ambigues:
+            sortie.append(f"  {nom(l)} [{l['sku']}]")
+        sortie.append("")
+    absentes = [l for l in lignes if l["etat"] == "absent"]
+    if absentes:
+        sortie.append("SKU INTROUVABLE EN LIGNE (rien n'est aligné ni poussé pour ces lignes)")
+        for l in absentes:
+            sortie.append(f"  {nom(l)} [{l['sku']}] : caisse {l['quantiteKodo']}")
+            s = l.get("suggestion")
+            if s:
+                sku_en_ligne = s["skuEnLigne"] or s["codeBarresEnLigne"] or "sans SKU"
+                sortie.append(f"      → en ligne : « {s['titre']} », taille {s['taille']}, "
+                              f"SKU « {sku_en_ligne} » ({s['via']})")
+        sortie.append("")
+    if ecarts:
+        sortie.append("Pour aligner le site sur la caisse : POST /api/shopify/stock-align "
+                      "avec {\"confirmer\": true}")
+    else:
+        sortie.append("Aucun écart : la boutique en ligne affiche ce que la caisse attend.")
+    return "\n".join(sortie)
 
 
 def import_shopify_catalog(progress_callback=None):

@@ -209,6 +209,20 @@ def _lister_imprimantes_cups(limite: int = 20) -> Tuple[List[Dict[str, Any]], Op
     return imprimantes, defaut
 
 
+def _compter_alignements_en_attente() -> int:
+    """Lignes de stock saisies à la main que la boutique en ligne n'a pas encore rattrapées."""
+    try:
+        from database_manager import get_connection
+        from kodo_core.db import shopify_alignement
+        conn = get_connection()
+        try:
+            return shopify_alignement.compter_a_aligner(conn.cursor())
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
 def handle_system_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any]]:
     """
     Gestionnaire de requêtes pour la santé système, la version, la licence et les utilisateurs.
@@ -868,6 +882,8 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             # File d'attente locale : mouvements de stock pas encore partis vers Shopify.
             "pendingCount": compter_file_attente()["pending"],
             "indeterminateCount": compter_file_attente()["indeterminate"],
+            # Dont : quantités saisies à la main dans Kōdo que le site n'a pas encore rattrapées.
+            "alignmentsPending": _compter_alignements_en_attente(),
             "refresh": etat_rafraichissement(),
         }
 
@@ -879,6 +895,46 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             return 400, {"success": False, "error": res["erreur"]}
         return 200, {"success": True, "started": bool(res.get("demarre")),
                      "alreadyRunning": bool(res.get("deja_en_cours"))}
+
+    # 14 quater. Comparaison caisse ↔ boutique en ligne : LECTURE SEULE, aucun écran ne la propose
+    # (outil de support). `?format=text` rend un texte lisible dans un Terminal.
+    elif method == "GET" and path == "/api/shopify/stock-comparison":
+        try:
+            from kodo_core.sync.shopify import comparer_stock_boutique, rapport_comparaison_texte
+            rapport = comparer_stock_boutique()
+        except ValueError as e:
+            return 400, {"success": False, "error": str(e), "message": str(e)}
+        except Exception as e:
+            return 502, {"success": False, "error": str(e), "message": str(e)}
+        if (query.get("format") or [""])[0] == "text":
+            return (200, rapport_comparaison_texte(rapport).encode("utf-8"),
+                    {"Content-Type": "text/plain; charset=utf-8"})
+        return 200, {"success": True, **rapport}
+
+    # 14 quinquies. Aligne la boutique en ligne sur la caisse. Modifie le stock du site : exige
+    # `confirmer: true` (booléen strict) après lecture de la comparaison, jamais un clic « à blanc ».
+    elif method == "POST" and path == "/api/shopify/stock-align":
+        if data.get("confirmer") is not True:
+            texte = ("Alignement non lancé : relisez d'abord la comparaison "
+                     "(GET /api/shopify/stock-comparison), puis relancez avec {\"confirmer\": true}.")
+            return 400, {"success": False, "error": texte, "message": texte}
+        ids = data.get("stockIds")
+        if ids is not None and not (isinstance(ids, list)
+                                    and all(isinstance(i, int) and not isinstance(i, bool) for i in ids)):
+            texte = "stockIds doit être une liste d'identifiants de lignes de stock (entiers)."
+            return 400, {"success": False, "error": texte, "message": texte}
+        try:
+            from kodo_core.sync.shopify import aligner_stock_boutique
+            resultat = aligner_stock_boutique(ids)
+        except ValueError as e:
+            return 400, {"success": False, "error": str(e), "message": str(e)}
+        except Exception as e:
+            return 502, {"success": False, "error": str(e), "message": str(e)}
+        bilan = resultat["bilan"]
+        message = (f"{bilan['ajustees']} ligne(s) alignée(s) sur la caisse, "
+                   f"{bilan['alignees']} déjà égale(s), {bilan['en_echec']} en échec "
+                   "(reprises automatiquement à la prochaine passe).")
+        return 200, {"success": True, "message": message, **resultat}
 
     # 15. Lancer l'importation du catalogue Shopify
     elif method == "POST" and path == "/api/shopify/import":

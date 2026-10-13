@@ -418,6 +418,13 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
     # 2. Ajout / Édition Produit
     elif method in ("POST", "PUT") and path == "/api/products":
         res = InventoryManager.save_product(data)
+        # Réveil de la synchronisation Shopify : une quantité saisie à la main doit rejoindre le site
+        # en quelques secondes, pas à la prochaine passe de la minute (même geste qu'après une vente).
+        try:
+            from kodo_core.sync.shopify import reveiller_sync
+            reveiller_sync()
+        except Exception:
+            pass
         return 200, {"success": True, "productId": res["product_id"]}
 
     # 3. Suppression Produit
