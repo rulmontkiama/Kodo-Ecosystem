@@ -23,6 +23,9 @@ Tu as un accès et une responsabilité **pleine et entière sur l'ensemble des c
 - **Dossiers & Fichiers clés** :
   - `kodo_core/api/routes/pos_routes.py` : Routes API locales pour les ventes, produits, clients, tickets, clôtures Z.
   - `kodo_core/services/updater.py` : Moteur de mise à jour automatique OTA via GitHub Releases / `latest.json`.
+  - `kodo_core/services/startup_check.py` : contrôle d'intégrité au lancement (lecture seule, thread de fond ; rapport
+    `<données>/diagnostics/dernier_controle.json`, API `GET /api/system/diagnostic`, résumé dans `/api/system/health`).
+  - `scripts/release/preflight.py` : go / no-go de pré-livraison (voir la procédure ci-dessous).
   - `ticket_printer.py` / `imprimer_ticket_soldes.py` : Moteurs d'impression thermique ESC/POS.
   - `database_manager.py` : Schéma SQLite, initialisation et intégrité des données.
   - `build_final_pro.sh` : Script de compilation PyInstaller et génération du DMG macOS livrable.
@@ -51,6 +54,15 @@ Tu as un accès et une responsabilité **pleine et entière sur l'ensemble des c
 ### 4. Précision Financière Backend
 - Dans le code Python, interdiction d'utiliser des `float` pour les calculs de montants, centimes, remises ou TVA. Utilise toujours `decimal.Decimal` avec arrondi `ROUND_HALF_UP` à 2 décimales.
 
+### 5. Filet de sécurité : le contrôle d'intégrité au lancement
+- `startup_check.py` cherche à chaque lancement les défauts DORMANTS (migration avalée, clé étrangère orpheline, file
+  Shopify bloquée, interface sans bundle, chaîne NF525…). Il est **en lecture seule** (`PRAGMA query_only`), jamais
+  bloquant, et ne répare rien : le journal signé n'est jamais modifié.
+- **Règle de croissance** : chaque défaut réel trouvé un jour devient un contrôle (fonction `_c_*` + ligne dans
+  `CONTROLES` + test dans `tests/test_startup_check.py`). C'est ainsi que l'inconnu recule.
+- Piège : n'y appeler ni `updater.get_installed_version()` (il ÉCRIT `app_version` dans `Parametres`) ni
+  `get_audit_machine_secret()` (il CRÉE la clé de scellement si elle manque). Un test garantit la base identique à l'octet.
+
 ---
 
 ## 🚀 PROCÉDURE DE LIVRAISON / MISE À JOUR (RELEASE)
@@ -67,7 +79,12 @@ Pour déployer une nouvelle version (ex: `v1.0.XX`) :
    - `public/latest.json` : nouvelle version, lien zip et changelog détaillé.
    - `kodo_core/services/updater.py` : `CURRENT_VERSION = "1.0.XX"`.
    - `src/components/Modals/WhatsNewModal.tsx` & `Sidebar.tsx` & `App.tsx`.
-6. **Git** : Committer, tagger `v1.0.XX` et pousser sur GitHub (`git push origin main && git push origin v1.0.XX`).
+6. **Go / no-go** : `python3 scripts/release/preflight.py --version 1.0.XX --front ~/Desktop/kōdo-pos-3`
+   (compile, importations de tout le produit, suite complète, patchs signés, migration d'une COPIE de la base réelle,
+   secrets, versions annoncées, zips signés/propres/égaux au dépôt, lint+build du front). Ne rien publier tant que le
+   verdict n'est pas **GO** (code 0). `INCOMPLET` (code 2) = un contrôle n'a pas pu être fait : il n'est jamais un succès.
+   `--rapide` (~15 s, code seul) peut être lancé à chaque modification. Ne publie, ne signe et ne modifie rien.
+7. **Git** : Committer, tagger `v1.0.XX` et pousser sur GitHub (`git push origin main && git push origin v1.0.XX`).
 
 ### Correctif backend Python à distance (optionnel, sans nouveau DMG)
 

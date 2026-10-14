@@ -241,7 +241,30 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
     elif method == "GET" and path == "/api/system/health":
         from kodo_core.services.client_sanitizer import get_system_health_report
         health = get_system_health_report()
+        # Résumé du contrôle d'intégrité du lancement (détail : GET /api/system/diagnostic).
+        try:
+            from kodo_core.services import startup_check
+            health["controle_demarrage"] = startup_check.resume_court(startup_check.dernier_rapport())
+        except Exception as e:  # noqa: BLE001 — un défaut du contrôle ne doit pas masquer le bilan de santé
+            health["controle_demarrage"] = {"disponible": False, "erreur": str(e)}
         return 200, health
+
+    # 1ter. Contrôle d'intégrité du lancement : dernier rapport, et relance à la demande
+    elif method == "GET" and path == "/api/system/diagnostic":
+        from kodo_core.services import startup_check
+        rapport = startup_check.dernier_rapport()
+        return 200, {
+            "success": True,
+            "disponible": rapport is not None,
+            "en_cours": startup_check.en_cours(),
+            "rapport": rapport,
+            "rapport_texte": startup_check.rendre_texte(rapport) if rapport else "",
+        }
+
+    elif method == "POST" and path == "/api/system/diagnostic/run":
+        from kodo_core.services import startup_check
+        demarre = startup_check.demarrer_en_arriere_plan(delai=0)
+        return 200, {"success": True, "demarre": bool(demarre), "en_cours": startup_check.en_cours()}
 
     # 2. Version
     elif method == "GET" and path == "/api/version":

@@ -559,6 +559,16 @@ def run_server(port=8765, busy_wait=8.0, host=None):
     except Exception as _shop_err:
         print(f"⚠️ [SHOPIFY] Synchronisation non démarrée : {_shop_err}")
 
+    # Contrôle d'intégrité au lancement : lecture seule, en arrière-plan, jamais bloquant.
+    # Il cherche les défauts dormants (migration avalée, clé étrangère orpheline, file Shopify
+    # bloquée, interface sans bundle…) et écrit son rapport dans <données>/diagnostics/.
+    # Lancé ICI (et non dans launch_app.py) pour rester livrable par un correctif backend.
+    try:
+        from kodo_core.services import startup_check
+        startup_check.demarrer_en_arriere_plan(dist_dir_provider=get_dist_dir)
+    except Exception as _chk_err:
+        print(f"⚠️ [CONTRÔLE DE DÉMARRAGE] Non lancé : {_chk_err}")
+
     print(f"🚀 [KODO POS SERVER Multi-Thread v2.0.1] REST API kodo_core & Web App en ligne sur http://localhost:{port} (écoute {host})")
     httpd.serve_forever()
 
