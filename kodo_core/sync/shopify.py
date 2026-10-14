@@ -804,6 +804,9 @@ class ShopifySync:
                         err_detail = str(e)
                     logger.error(f"Erreur HTTP {e.code} sur {method} {endpoint}: {err_detail}")
                     self._refus_401 = (e.code == 401)
+                    # Code HTTP de la dernière réponse en erreur : l'envoi d'une VENTE s'en sert pour distinguer
+                    # un refus net (4xx, 500, 503) d'une issue inconnue (502/504, voir `sync_tickets_to_shopify`).
+                    self._dernier_code_http = e.code
                     self._noter_echec("http", self._resumer_erreur_http(e.code, err_detail))
                     return None
             except Exception as e:
@@ -1511,10 +1514,17 @@ class ShopifySync:
             # Une ligne restée « en vol » vient d'un arrêt brutal entre l'envoi et la réponse :
             # on ignore si Shopify l'a appliquée. On ne la rejoue jamais (une double
             # décrémentation est irrattrapable) et on la signale pour vérification manuelle.
+            c.execute("SELECT id_vente_detail FROM Shopify_Sync_Lignes WHERE statut = ?", (STATUT_EN_VOL,))
+            lignes_en_vol = [r[0] for r in c.fetchall()]
             c.execute("UPDATE Shopify_Sync_Lignes SET statut = ? WHERE statut = ?",
                       (STATUT_INDETERMINE, STATUT_EN_VOL))
             en_suspens = c.rowcount
             conn.commit()
+            # La file `sync_queue` est ce que le contrôle de lancement et l'écran lisent : une ligne restée
+            # « en vol » n'y apparaissait pas comme à vérifier (revue du 2026-10-14).
+            for vd_en_vol in lignes_en_vol:
+                self._file_marquer(conn, vd_en_vol, FILE_INDETERMINE,
+                                   "poste arrêté entre l'envoi et la réponse de Shopify")
             if en_suspens:
                 logger.warning(
                     f"[SYNC AUDIT] {en_suspens} ligne(s) de vente restée(s) sans réponse de Shopify : "
@@ -1581,11 +1591,19 @@ class ShopifySync:
                     # Réservation AVANT l'appel : si le poste s'éteint pendant l'échange, la ligne
                     # est retrouvée « en vol » au démarrage suivant et ne sera pas rejouée à l'aveugle.
                     self._journaliser(conn, vd_id, t_id, code_barre, inv_item_id, -qte, STATUT_EN_VOL)
+                    self._dernier_code_http = None
                     try:
                         applique = self.adjust_shopify_stock(inv_item_id, location_id, -qte)
                     except Exception as exc:
                         logger.error(f"Exception lors de l'ajustement du stock Shopify pour SKU {code_barre}: {exc}")
                         applique = False
+                        self.dernier_echec = "reseau"
+                    # 502 / 504 : la PASSERELLE a échoué sans qu'on sache si l'ajustement avait déjà porté (le
+                    # « délai dépassé » d'un 504 est le cas typique). Un ajustement RELATIF ne se rejoue pas à
+                    # l'aveugle : c'est une issue INCONNUE, traitée comme une coupure réseau (ligne à vérifier).
+                    # 4xx, 500 et 503 restent des refus nets, retentés (revue du 2026-10-14).
+                    if (not applique and self.dernier_echec != "reseau"
+                            and getattr(self, "_dernier_code_http", None) in (502, 504)):
                         self.dernier_echec = "reseau"
 
                     c2 = _ouvrir_ecriture(conn)
@@ -1608,6 +1626,11 @@ class ShopifySync:
                         c2.execute("DELETE FROM Shopify_Sync_Lignes WHERE id_vente_detail = ? AND statut = ?",
                                    (vd_id, STATUT_EN_VOL))
                         logger.error(f"Échec de l'ajustement du stock Shopify pour SKU {code_barre}")
+                        # 404 / 422 : l'article d'inventaire n'existe plus (produit supprimé puis recréé sur le
+                        # site). Le cache le gardait pour toute la durée du processus : chaque passe retentait
+                        # le même identifiant périmé. On l'oublie pour le résoudre de nouveau (revue du 2026-10-14).
+                        if getattr(self, "_dernier_code_http", None) in (404, 422):
+                            self._cache_inventaire.pop(str(code_barre), None)
                         conn.commit()
                         self._file_echec(conn, vd_id, "Shopify a refusé l'ajustement (429/5xx/erreur)"
                                          + self._suffixe_echec())

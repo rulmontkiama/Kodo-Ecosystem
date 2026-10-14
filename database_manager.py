@@ -1193,6 +1193,18 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
         deja_rendu = Decimal(str(cursor.fetchone()[0] or 0))
         reste = Decimal(str(total_ticket_origine)) - deja_rendu
         montant = max(Decimal('0.00'), min(montant, reste))
+        # Dernière unité du ticket : la cliente récupère EXACTEMENT ce qu'elle a payé. Les arrondis par ligne
+        # laissaient 1 à 2 centimes de moins sur un retour intégral d'un ticket remisé (revue du 2026-10-14).
+        cursor.execute(
+            "SELECT COALESCE(SUM(quantite), 0) FROM Ventes_Details "
+            "WHERE id_ticket = ? AND quantite > 0 AND refund_of_vd_id IS NULL", (id_ticket_origine,))
+        vendu_total = int(cursor.fetchone()[0] or 0)
+        cursor.execute(
+            "SELECT COALESCE(SUM(-quantite), 0) FROM Ventes_Details "
+            "WHERE refund_of_vd_id IN (SELECT id FROM Ventes_Details WHERE id_ticket = ?)", (id_ticket_origine,))
+        rembourse_total = int(cursor.fetchone()[0] or 0)
+        if vendu_total - rembourse_total - int(quantite) == 0 and reste > Decimal('0.00'):
+            montant = reste
     total_tvac = -montant
     total_htva = (total_tvac / (Decimal('1.00') + taux_tva)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     total_tva = total_tvac - total_htva
@@ -1641,11 +1653,19 @@ def lister_jours_non_clotures(caisse_id="POS-01", conn=None):
         should_close = True
     try:
         c = conn.cursor()
+        # Un jour où l'on n'a vendu QUE des bons cadeaux (encaissement au journal de caisse, aucun ticket)
+        # attend lui aussi sa clôture : il était invisible ici et son encaissement partait dans le Z d'un
+        # autre jour (revue du 2026-10-14). Les apports / prélèvements seuls ne créent pas de journée.
         c.execute("""
-            SELECT substr(date_heure, 1, 10) AS jour, COUNT(*), COALESCE(SUM(total_tvac), 0)
-            FROM Tickets WHERE caisse_id = ? AND z_id IS NULL
-            GROUP BY jour ORDER BY jour ASC
-        """, (caisse_id,))
+            SELECT jour, SUM(nb), SUM(total) FROM (
+                SELECT substr(date_heure, 1, 10) AS jour, COUNT(*) AS nb, COALESCE(SUM(total_tvac), 0) AS total
+                FROM Tickets WHERE caisse_id = ? AND z_id IS NULL GROUP BY jour
+                UNION ALL
+                SELECT substr(date_heure, 1, 10) AS jour, 0 AS nb, 0 AS total
+                FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement = 'VENTE_BON'
+                GROUP BY jour
+            ) GROUP BY jour ORDER BY jour ASC
+        """, (caisse_id, caisse_id))
         return [
             {"jour": r[0], "nb_tickets": r[1], "total_tvac": float(Decimal(str(r[2] or "0")).quantize(Decimal("0.01")))}
             for r in c.fetchall()

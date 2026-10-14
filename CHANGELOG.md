@@ -4,6 +4,33 @@ Toutes les modifications notables apportées au projet Kōdo POS sont documenté
 
 ---
 
+## [2.1.2] - 2026-10-14
+
+> Les versions 2.0.x → 2.1.1 sont documentées dans les messages de commit et dans `public/latest.json`.
+
+### 🛡️ Filet de sécurité
+- **Contrôle d'intégrité au lancement** (`startup_check.py`) : lecture seule, jamais bloquant ; bandeau d'alerte à l'écran.
+- **Go / no-go de pré-livraison** (`scripts/release/preflight.py`) : une livraison n'est publiable que sur le verdict GO.
+
+### 💶 Argent
+- Une vente remisée n'est plus refusée « Paiement insuffisant » (l'écran envoie le pourcentage de remise).
+- Un Z validé sans comptage des espèces ne scelle plus un faux écart de caisse.
+- Un retour ne peut plus être remboursé plusieurs fois sur une ligne sans article en stock ; le retour intégral d'un ticket
+  remisé rend exactement le total payé ; la ventilation TVA du Z reste juste après un retour remisé.
+- Règlement en espèces seules : l'arrondi légal à 5 centimes est enregistré ; un avoir n'est jamais débité au-delà du dû.
+- Taux de TVA à 0 % conservé (il devenait 21 %) ; jours de bons cadeaux seuls listés pour la clôture.
+
+### 🧾 Stock, tickets, impression
+- Une fiche produit enregistrée sans quantités ne détruit plus le stock par taille ; un refus (code-barres déjà pris…)
+  est expliqué à l'écran.
+- Liste des tickets en attente lisible après redémarrage ; taille conservée.
+- Réimpression : date d'origine + mention DUPLICATA ; montant remis affiché avec le rendu ; un ticket écarté par une
+  imprimante en panne est remis en file quelques minutes.
+- Registre fiscal : les ventes dont le scellement a échoué sont rescellées au lancement.
+- Shopify : un 502/504 sur l'envoi d'une vente est tenu pour « issue inconnue » (jamais rejoué à l'aveugle).
+
+---
+
 ## [1.0.44] - 2026-08-29
 
 ### 🚀 Intégrations & Correctifs Majeurs

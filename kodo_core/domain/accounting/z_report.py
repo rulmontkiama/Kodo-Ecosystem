@@ -87,7 +87,10 @@ class ZReportEngine:
                 for t_id, lines in lines_by_ticket.items():
                     gross_total = gross_by_ticket.get(t_id, Decimal('0.00'))
                     net_total = net_by_ticket.get(t_id, Decimal('0.00'))
-                    ratio = (net_total / gross_total) if gross_total > Decimal('0.00') else Decimal('1.00')
+                    # Un ticket de REMBOURSEMENT a un brut ET un net négatifs (lignes de quantité négative) :
+                    # le ratio net/brut y est positif comme sur une vente. Le forcer à 1 dès `brut <= 0`
+                    # ventilait la ligne rendue à son prix avant remise (revue du 2026-10-14).
+                    ratio = (net_total / gross_total) if gross_total != Decimal('0.00') else Decimal('1.00')
                     for taux_dec, tvac_brut_dec in lines:
                         tvac_net = quantize_money(tvac_brut_dec * ratio)
                         accum[taux_dec] = accum.get(taux_dec, Decimal('0.00')) + tvac_net

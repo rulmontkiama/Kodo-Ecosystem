@@ -157,3 +157,28 @@ class TestZParJour(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJourDeBonsSeuls(unittest.TestCase):
+    """Un jour où l'on n'a vendu que des bons cadeaux attend sa clôture (revue du 2026-10-14)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        database_manager.DB_NAME = os.path.join(self.tmp, "kodo_pos.db")
+        initialiser_db()
+        self.conn = database_manager.get_connection()
+        self.c = self.conn.cursor()
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_le_jour_de_bons_seuls_est_liste_et_apport_seul_ne_l_est_pas(self):
+        database_manager.vendre_carte_cadeau(self.c, 30, "Espèces", emis_par="V", date_heure="2026-10-01 10:00:00")
+        database_manager.enregistrer_mouvement_caisse(self.c, "APPORT", 50, "fond", "V", "2026-10-02 08:00:00")
+        vente(self.c, "T-1", "2026-10-03", "10.00", [("Espèces", "10.00")])
+        self.conn.commit()
+        jours = lister_jours_non_clotures(conn=self.conn)
+        self.assertEqual([j["jour"] for j in jours], ["2026-10-01", "2026-10-03"])
+        self.assertEqual(jours[0]["nb_tickets"], 0)
+        self.assertEqual(jours[1]["nb_tickets"], 1)

@@ -710,3 +710,19 @@ class TestRevueDuFiltre(BaseControle):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRegistreFiscal(BaseControle):
+
+    def test_aucune_vente_en_attente_est_ok(self):
+        self.assertEqual(self.par_id(self.controle())["ventes.registre_fiscal"]["statut"], sc.OK)
+
+    def test_vente_non_scellee_est_signalee(self):
+        self.sql("CREATE TABLE IF NOT EXISTS fiscal_unsealed_sales (sale_id INTEGER PRIMARY KEY, total_ttc DECIMAL, "
+                 "total_ht DECIMAL, total_tva DECIMAL, timestamp_utc TEXT, failure_reason TEXT, recorded_at TEXT)")
+        self.sql("INSERT INTO fiscal_unsealed_sales VALUES (7, 10, 8.26, 1.74, '2026-10-14T10:00:00', 'disque plein', "
+                 "'2026-10-14T10:00:01')")
+        c = self.par_id(self.controle())["ventes.registre_fiscal"]
+        self.assertEqual(c["statut"], sc.ATTENTION)
+        self.assertEqual(c["donnees"]["en_attente"], 1)
+        self.assertIn("disque plein", c["detail"])

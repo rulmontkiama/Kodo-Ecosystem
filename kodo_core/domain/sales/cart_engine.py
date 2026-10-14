@@ -499,6 +499,30 @@ def process_sale_transaction(
                 raise ValueError(f"Montant de paiement invalide ({montant_p}) pour le mode {p[0]!r}.")
             paiements_dec.append((p[0], montant_p))
 
+        # Un avoir / une carte cadeau ne se débite JAMAIS au-delà de ce qu'il reste à régler : le surplus ne
+        # revient pas (pas de rendu sur un avoir) et disparaissait de la dette envers la cliente sans écriture
+        # (revue du 2026-10-14). Le reste dû tient compte des règlements non espèces autres que les avoirs ;
+        # les espèces, elles, absorbent l'éventuel rendu.
+        _MODES_AVOIR = ("avoir", "carte cadeau", "carte_cadeau", "gift card", "giftcard")
+
+        def _est_avoir(mode):
+            return str(mode or "").strip().lower() in _MODES_AVOIR
+
+        reste_pour_avoirs = tot_tvac_dec - sum(
+            (m for mode, m in paiements_dec
+             if not _est_avoir(mode) and database_manager.classer_moyen_paiement(mode) != "especes"),
+            Decimal('0.00'))
+        paiements_plafonnes = []
+        for mode, montant in paiements_dec:
+            if _est_avoir(mode):
+                utile = min(montant, max(Decimal('0.00'), reste_pour_avoirs))
+                reste_pour_avoirs -= utile
+                if utile <= Decimal('0.00'):
+                    continue  # le dû est déjà couvert : cet avoir n'est pas débité
+                montant = utile
+            paiements_plafonnes.append((mode, montant))
+        paiements_dec = paiements_plafonnes
+
         # Arrondi légal belge à 5 centimes sur le solde espèces (Loi du 01/12/2019).
         # IMMUNITÉ TVA : tot_tvac_dec, tot_htva_dec et tot_tva_dec restent strictement intouchés.
         # La classification passe par la source d'autorité unique du projet : un libellé
@@ -766,7 +790,10 @@ def park_cart(
                 "en_solde": item.get("en_solde", 0),
                 "prix_original_tvac": str(item["prix_original_tvac"]) if item.get("prix_original_tvac") is not None else None,
                 "remise_label": item.get("remise_label", ""),
-                "code_barre": item.get("code_barre")
+                "code_barre": item.get("code_barre"),
+                # Nécessaires pour reconstruire l'article à l'écran après un redémarrage (revue du 2026-10-14).
+                "product_id": item.get("product_id"),
+                "vendeur": item.get("vendeur"),
             })
             
         panier_json = json.dumps(panier_serializable, ensure_ascii=False)

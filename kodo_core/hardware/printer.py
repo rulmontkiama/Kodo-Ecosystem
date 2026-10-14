@@ -360,16 +360,29 @@ def generer_ticket(numero, panier, total_tvac, remise,
                    shop_vat=TVA_NON_RENSEIGNEE,
                    vendeur_nom="Caissier",
                    is_gift=False,
-                   ecart_arrondi_cash=None):
+                   ecart_arrondi_cash=None,
+                   date_heure=None,
+                   duplicata=False):
     """
     Génère le contenu texte d'un ticket thermique de caisse standard.
+
+    `date_heure` : date du ticket (chaîne ISO ou « AAAA-MM-JJ HH:MM:SS »). Absente, la date du jour est
+    imprimée (première impression). Une réimpression DOIT la fournir : elle portait la date du jour.
+    `duplicata` : imprime « *** DUPLICATA *** » sous l'en-tête.
     """
     now = datetime.datetime.now()
+    if date_heure:
+        try:
+            now = datetime.datetime.fromisoformat(str(date_heure).replace("Z", "").split("+")[0])
+        except ValueError:
+            pass
     lines = []
 
     # En-tête
     lines.append(_separator("="))
     lines.append(_center(shop_name))
+    if duplicata:
+        lines.append(_center("*** DUPLICATA ***"))
     if is_gift:
         lines.append(_center("*** TICKET CADEAU ***"))
     elif shop_subtitle:
@@ -1217,7 +1230,7 @@ def imprimer_ticket(contenu, numero, printer_name=None, host=None, port=9100, al
     return nom_fichier_txt
 
 
-def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100) -> bool:
+def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100, duplicata=False) -> bool:
     """
     Récupère un ticket depuis la base de données SQLite et lance son impression.
     Retourne True si l'impression physique a réussi, False sinon.
@@ -1279,6 +1292,17 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100) 
             mt_base = Decimal(str(total_tvac)) + (ecart_dec if is_cash else Decimal("0.00"))
             paiements = [(methode or "Espèces", mt_base)]
 
+        # Les règlements du grand livre sont NETS du rendu de monnaie (20 € remis pour 15 € dus : 15 € au
+        # journal). Imprimer « PAID BY ESPECES 15.00 » puis « CHANGE RETURNED 5.00 » laissait croire que
+        # 15 € avaient été remis ET 5 € rendus. Le montant REMIS (net + rendu) est donc affiché sur la
+        # ligne espèces, comme sur le ticket écran (revue du 2026-10-14).
+        rendu_affiche = Decimal(str(rendu or 0))
+        if rendu_affiche > 0:
+            for i, (m, mt) in enumerate(paiements):
+                if str(m or "").strip().lower() in ("especes", "espèces", "cash"):
+                    paiements[i] = (m, Decimal(str(mt)) + rendu_affiche)
+                    break
+
         # Infos Boutique & Imprimante
         shop_name = "Mon Commerce"
         shop_sub = "Boutique"
@@ -1317,7 +1341,9 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100) 
             shop_address=shop_addr,
             shop_vat=shop_vat,
             vendeur_nom=vendeur or "Non renseigné",
-            ecart_arrondi_cash=Decimal(str(ecart_arrondi or 0))
+            ecart_arrondi_cash=Decimal(str(ecart_arrondi or 0)),
+            date_heure=d_h,
+            duplicata=duplicata,
         )
 
         return bool(imprimer_ticket(contenu, num_ticket, printer_name=printer_name, host=host, port=port, return_status=True))

@@ -417,7 +417,17 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
 
     # 2. Ajout / Édition Produit
     elif method in ("POST", "PUT") and path == "/api/products":
-        res = InventoryManager.save_product(data)
+        # Un refus métier (code-barres déjà pris, quantité négative, nom manquant) est un refus, pas une panne :
+        # il remontait en HTTP 500 sans message et l'écran rechargeait le catalogue comme si de rien n'était
+        # (la modification « disparaissait » sans explication — revue du 2026-10-14).
+        try:
+            from kodo_core.domain.catalog.inventory_manager import BarcodeConflictError
+            res = InventoryManager.save_product(data)
+        except BarcodeConflictError as ce:
+            return 409, {"success": False, "error": str(ce), "code": getattr(ce, "code", "BARCODE_CONFLICT"),
+                         "conflict": getattr(ce, "details", None)}
+        except ValueError as ve:
+            return 400, {"success": False, "error": str(ve)}
         # Réveil de la synchronisation Shopify : une quantité saisie à la main doit rejoindre le site
         # en quelques secondes, pas à la prochaine passe de la minute (même geste qu'après une vente).
         try:

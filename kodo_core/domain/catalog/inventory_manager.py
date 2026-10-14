@@ -686,7 +686,10 @@ class InventoryManager:
             barcode = cls.clean_barcode(data.get("barcode") or data.get("code_barre"))
             price = Decimal(str(data.get("price") or data.get("prix_vente_tvac") or 0.0))
             purchase_price = Decimal(str(data.get("purchase_price_htva") or data.get("prix_achat_htva") or data.get("costPrice") or data.get("cost_price") or 0.0))
-            vat_rate = Decimal(str(data.get("vat_rate") or data.get("taux_tva") or 0.21))
+            # Un taux de 0 % est un VRAI taux (livres, exonérés) : `a or b or 0.21` l'enregistrait à 21 %.
+            brut_tva = next((v for v in (data.get("vat_rate"), data.get("taux_tva"))
+                             if v is not None and str(v).strip() != ""), None)
+            vat_rate = Decimal(str(brut_tva)) if brut_tva is not None else Decimal("0.21")
             sizes_str = data.get("sizes") or ""
             stock_default = int(data.get("stock") or 0)
             is_sale = 1 if data.get("en_solde") else 0
@@ -801,8 +804,14 @@ class InventoryManager:
             else:
                 declarees = {_norm_taille("Taille Unique"): ["Taille Unique", stock_default]}
 
-            cls._ecrire_lignes_de_stock(cursor, prod_id, declarees, alert_threshold,
-                                        produit_neuf=not existing_id)
+            # Une charge SANS `sizes` ni `stock` sur un article existant (changement de prix, de catégorie,
+            # import, appel d'une autre caisse) ne dit RIEN des quantités : l'ancien code y lisait « une
+            # seule taille, stock 0 » et retirait / mettait à zéro toutes les tailles réelles (revue du
+            # 2026-10-14). Les lignes de stock ne sont alors pas touchées.
+            quantites_non_fournies = bool(existing_id) and not sizes_str and data.get("stock") is None
+            if not quantites_non_fournies:
+                cls._ecrire_lignes_de_stock(cursor, prod_id, declarees, alert_threshold,
+                                            produit_neuf=not existing_id)
 
             conn.commit()
             return {"success": True, "product_id": str(prod_id)}

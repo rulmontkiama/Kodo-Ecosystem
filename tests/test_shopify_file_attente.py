@@ -66,6 +66,38 @@ class TestFileAttente(BaseTemporaire):
         self.assertEqual(envoyes, [-2], "la vente ne part qu'une seule fois")
         self.assertEqual(self.rows("SELECT statut FROM sync_queue"), [("DONE",)])
 
+    def test_un_504_sur_une_vente_est_indetermine_et_jamais_rejoue(self):
+        """Revue du 2026-10-14 : un 502/504 (passerelle) peut survenir APRÈS l'application de l'ajustement relatif.
+        Le tenir pour « rien appliqué » ferait décompter deux fois la même vente sur le site."""
+        envoyes = []
+        boite = {}
+
+        def adjust(endpoint, data):
+            envoyes.append(data["available_adjustment"])
+            boite["moteur"]._dernier_code_http = 504
+            return None
+
+        moteur = self.moteur(adjust)
+        boite["moteur"] = moteur
+        moteur.dernier_echec = None
+        # le bouchon pose « http » : le code 504 doit suffire à reclasser en issue inconnue
+        self.assertEqual(moteur.sync_tickets_to_shopify(), 0)
+        self.assertEqual(self.rows("SELECT statut FROM sync_queue"), [("INDETERMINE",)])
+        self.assertEqual(moteur.sync_tickets_to_shopify(), 0)
+        self.assertEqual(envoyes, [-2], "la ligne indéterminée n'est JAMAIS renvoyée à l'aveugle")
+
+    def test_un_503_reste_un_refus_net_retente(self):
+        boite = {}
+
+        def adjust(endpoint, data):
+            boite["moteur"]._dernier_code_http = 503
+            return None
+
+        moteur = self.moteur(adjust)
+        boite["moteur"] = moteur
+        self.assertEqual(moteur.sync_tickets_to_shopify(), 0)
+        self.assertEqual(self.rows("SELECT statut FROM sync_queue"), [("PENDING",)])
+
     def test_une_panne_de_la_file_ne_bloque_pas_la_synchro(self):
         """La file éclaire, elle ne gouverne pas : écriture impossible ⇒ la vente part quand même."""
         self.ecrire("CREATE TRIGGER refuse_file BEFORE INSERT ON sync_queue "

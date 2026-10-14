@@ -81,7 +81,9 @@ Pour déployer une nouvelle version (ex: `v1.0.XX`) :
    REFUSENT tout zip sans signature valide. La clé privée (`~/.kodo_signing/`) ne quitte jamais le Mac du développeur.
 5. **Incrémenter les versions** :
    - `public/latest.json` : nouvelle version, lien zip et changelog détaillé.
-   - `kodo_core/services/updater.py` : `CURRENT_VERSION = "1.0.XX"`.
+   - `kodo_core/services/updater.py` : `CURRENT_VERSION` est la version du DMG installé (la BASE), PAS la version
+     publiée : `updater.py` n'est pas patchable à distance, on ne le touche que pour un nouveau DMG
+     (`build_final_pro.sh` l'aligne sur `kodo_base.BASE_VERSION`). Une release OTA/patch ne le modifie pas.
    - `src/components/Modals/WhatsNewModal.tsx` & `Sidebar.tsx` & `App.tsx`.
 6. **Go / no-go** : `python3 scripts/release/preflight.py --version 1.0.XX --front ~/Desktop/kōdo-pos-3`
    (compile, importations de tout le produit, suite complète, patchs signés, migration d'une COPIE de la base réelle,

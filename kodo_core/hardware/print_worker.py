@@ -170,12 +170,17 @@ class PrintWorker:
         self._worker_thread = threading.Thread(target=self._process_queue, name="KodoPrintWorker", daemon=True)
         self._worker_thread.start()
 
-    def enqueue_ticket_print(self, ticket_number: str, printer_name: Optional[str] = None, host: Optional[str] = None, port: int = 9100) -> PrintJob:
+    def enqueue_ticket_print(self, ticket_number: str, printer_name: Optional[str] = None, host: Optional[str] = None, port: int = 9100,
+                             duplicata: bool = False) -> PrintJob:
         """
         Enfile une impression de ticket de manière totalement non-bloquante.
         Retourne l'objet PrintJob immédiatement.
+
+        `duplicata=True` (réimpression d'un ticket déjà remis) imprime la mention « DUPLICATA » et la date
+        d'ORIGINE du ticket : une copie ne doit jamais passer pour l'original (revue du 2026-10-14).
         """
-        job = PrintJob(ticket_number, printer_name=printer_name, host=host, port=port)
+        job = PrintJob(ticket_number, printer_name=printer_name, host=host, port=port,
+                       payload={"duplicata": True} if duplicata else None)
         with self._lock:
             self._jobs[job.job_id] = job
             self._recent_job_ids.append(job.job_id)
@@ -270,8 +275,14 @@ class PrintWorker:
 
             # Vérification Circuit Breaker avant tout appel matériel
             if not self.circuit_breaker.can_attempt():
-                job.status = PrintJob.STATUS_SKIPPED
                 job.error = f"Circuit breaker ouvert (imprimante indisponible : {self.circuit_breaker.last_failure_reason})"
+                # Un ticket jamais tenté (rouleau vide, câble débranché) n'est pas perdu : il est remis en
+                # file quelques minutes, le temps que la commerçante règle le problème. Aucun risque de
+                # double impression : l'imprimante n'a jamais été sollicitée pour ce travail.
+                if self._replanifier(job):
+                    self._queue.task_done()
+                    continue
+                job.status = PrintJob.STATUS_SKIPPED
                 job.completed_at = datetime.now(timezone.utc).isoformat()
                 self._queue.task_done()
                 continue
@@ -296,7 +307,8 @@ class PrintWorker:
                         num_ticket=job.ticket_number,
                         printer_name=job.printer_name,
                         host=job.host,
-                        port=job.port
+                        port=job.port,
+                        duplicata=bool(job.payload.get("duplicata"))
                     )
 
                 if success:
@@ -315,6 +327,25 @@ class PrintWorker:
                 self.circuit_breaker.record_failure(str(ex))
             finally:
                 self._queue.task_done()
+
+    # Reprises d'un travail écarté par le disjoncteur ouvert : 12 × 20 s ≈ 4 minutes, puis abandon visible.
+    _REPRISES_MAX = 12
+    _DELAI_REPRISE_S = 20.0
+
+    def _replanifier(self, job: PrintJob) -> bool:
+        """Remet en file, après un délai, un travail que le disjoncteur a écarté sans tentative d'impression."""
+        if job.attempts > 0:
+            return False
+        reprises = int(job.payload.get("_reprises", 0))
+        if reprises >= self._REPRISES_MAX:
+            return False
+        job.payload["_reprises"] = reprises + 1
+        job.status = PrintJob.STATUS_PENDING
+        delai = max(self._DELAI_REPRISE_S, float(self.circuit_breaker.recovery_timeout) + 1.0)
+        minuteur = threading.Timer(delai, self._queue.put, args=(job,))
+        minuteur.daemon = True
+        minuteur.start()
+        return True
 
     def _process_label_job(self, job: PrintJob) -> None:
         """

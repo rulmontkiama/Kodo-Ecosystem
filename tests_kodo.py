@@ -265,6 +265,17 @@ def run_tests():
     fingerprint = license_manager.get_machine_fingerprint()
     assert len(fingerprint) == 16, f"L'empreinte devrait faire 16 caractères, obtenu: {len(fingerprint)}"
     
+    # Ce script écrit puis SUPPRIME le cache de licence : sur le Mac du développeur c'est la vraie licence.
+    # On la met de côté avant toute écriture et on la remet à la fin (revue du 2026-10-14).
+    from database_manager import data_path as _data_path
+    _fichiers_licence = [_data_path("license_cache.json"),
+                         os.path.expanduser("~/Library/Application Support/Kodo_POS/license.lic")]
+    _licence_sauvegardee = {}
+    for _chemin in _fichiers_licence:
+        if os.path.exists(_chemin):
+            with open(_chemin, "rb") as _f:
+                _licence_sauvegardee[_chemin] = _f.read()
+
     # Tester l'écriture et le chargement d'une licence locale
     expiry_date = "2029-12-31"
     last_check = (datetime.date.today() - datetime.timedelta(days=2)).isoformat()
@@ -308,11 +319,13 @@ def run_tests():
     is_valid, msg = license_manager.check_license(key_path="non_existent_key.json")
     assert not is_valid, "La détection d'une licence suspendue a échoué"
     
-    # Nettoyage du fichier cache de test
-    if os.path.exists(cache_path):
-        os.remove(cache_path)
-    if os.path.exists(backup_path):
-        os.remove(backup_path)
+    # Nettoyage : remise en place de la licence d'origine (ou suppression si aucune n'existait)
+    for _chemin in _fichiers_licence:
+        if _chemin in _licence_sauvegardee:
+            with open(_chemin, "wb") as _f:
+                _f.write(_licence_sauvegardee[_chemin])
+        elif os.path.exists(_chemin):
+            os.remove(_chemin)
     print("✅ Système de licence testé avec succès.")
     
     conn.close()

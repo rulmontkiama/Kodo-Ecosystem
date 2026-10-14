@@ -184,7 +184,7 @@ def test_load_recovers_from_backup_when_primary_missing(temp_cache_paths, fixed_
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def test_ed25519_keypair(monkeypatch):
+def ed25519_keypair(monkeypatch):
     """Génère une paire de clés Ed25519 éphémère et l'injecte comme clé de confiance."""
     import kodo_ed25519
     secret = bytes.fromhex("42" * 32)
@@ -216,9 +216,9 @@ def test_demo_key_is_now_rejected(temp_cache_paths, fixed_fingerprint):
     assert ok is False
 
 
-def test_signed_ed25519_license_is_accepted(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+def test_signed_ed25519_license_is_accepted(temp_cache_paths, fixed_fingerprint, ed25519_keypair):
     """Une clé signée Ed25519 valide pour ce matériel active l'application."""
-    secret, _ = test_ed25519_keypair
+    secret, _ = ed25519_keypair
     signed_key = license_module.generate_signed_license(
         secret, fixed_fingerprint, plan="PRO", expiry_date="2030-01-01"
     )
@@ -231,9 +231,9 @@ def test_signed_ed25519_license_is_accepted(temp_cache_paths, fixed_fingerprint,
     assert cache["license_key"] == signed_key
 
 
-def test_signed_ed25519_license_for_other_hardware_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+def test_signed_ed25519_license_for_other_hardware_is_rejected(temp_cache_paths, fixed_fingerprint, ed25519_keypair):
     """Une clé signée pour un autre HWID est immédiatement refusée."""
-    secret, _ = test_ed25519_keypair
+    secret, _ = ed25519_keypair
     other_key = license_module.generate_signed_license(
         secret, "OTHERHWID0000000", plan="PRO", expiry_date="2030-01-01"
     )
@@ -242,9 +242,9 @@ def test_signed_ed25519_license_for_other_hardware_is_rejected(temp_cache_paths,
     assert "autre appareil" in msg
 
 
-def test_signed_ed25519_license_expired_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+def test_signed_ed25519_license_expired_is_rejected(temp_cache_paths, fixed_fingerprint, ed25519_keypair):
     """Une clé signée dont la date est passée est refusée."""
-    secret, _ = test_ed25519_keypair
+    secret, _ = ed25519_keypair
     expired_key = license_module.generate_signed_license(
         secret, fixed_fingerprint, plan="PRO", expiry_date="2020-01-01"
     )
@@ -253,9 +253,9 @@ def test_signed_ed25519_license_expired_is_rejected(temp_cache_paths, fixed_fing
     assert "expiré" in msg
 
 
-def test_signed_ed25519_license_permanent_is_accepted(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+def test_signed_ed25519_license_permanent_is_accepted(temp_cache_paths, fixed_fingerprint, ed25519_keypair):
     """Une clé signée PERMANENT configure une date d'expiration permanente."""
-    secret, _ = test_ed25519_keypair
+    secret, _ = ed25519_keypair
     perm_key = license_module.generate_signed_license(
         secret, fixed_fingerprint, plan="PRO", expiry_date="PERMANENT"
     )
@@ -267,9 +267,9 @@ def test_signed_ed25519_license_permanent_is_accepted(temp_cache_paths, fixed_fi
     assert cache["expiry_date"] == "Permanent"
 
 
-def test_signed_ed25519_tampered_payload_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+def test_signed_ed25519_tampered_payload_is_rejected(temp_cache_paths, fixed_fingerprint, ed25519_keypair):
     """Altérer un seul caractère du payload fait échouer la signature (test de falsification)."""
-    secret, _ = test_ed25519_keypair
+    secret, _ = ed25519_keypair
     key = license_module.generate_signed_license(
         secret, fixed_fingerprint, plan="PRO", expiry_date="2030-01-01"
     )
@@ -282,9 +282,9 @@ def test_signed_ed25519_tampered_payload_is_rejected(temp_cache_paths, fixed_fin
     assert ok is False
 
 
-def test_signed_ed25519_tampered_signature_is_rejected(temp_cache_paths, fixed_fingerprint, test_ed25519_keypair):
+def test_signed_ed25519_tampered_signature_is_rejected(temp_cache_paths, fixed_fingerprint, ed25519_keypair):
     """Altérer un bit de la signature fait échouer la vérification (test de mutation)."""
-    secret, _ = test_ed25519_keypair
+    secret, _ = ed25519_keypair
     key = license_module.generate_signed_license(
         secret, fixed_fingerprint, plan="PRO", expiry_date="2030-01-01"
     )

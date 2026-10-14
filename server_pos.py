@@ -559,6 +559,22 @@ def run_server(port=8765, busy_wait=8.0, host=None):
     except Exception as _shop_err:
         print(f"⚠️ [SHOPIFY] Synchronisation non démarrée : {_shop_err}")
 
+    # Reprise du scellement fiscal : une vente ou un retour dont le scellement a échoué APRÈS le commit est
+    # journalisé dans `fiscal_unsealed_sales`. La reprise était prévue « au prochain démarrage » mais n'était
+    # branchée nulle part (revue du 2026-10-14). Elle ne modifie rien d'autre que le registre fiscal.
+    try:
+        from kodo_core.services import fiscal_service
+        _fconn = database_manager.get_connection()
+        try:
+            fiscal_service.ensure_schema(_fconn)
+            _rescelles = fiscal_service.reseal_pending_sales(_fconn)
+            if _rescelles:
+                print(f"🧾 [REGISTRE FISCAL] {len(_rescelles)} vente(s) rescellée(s) au démarrage.")
+        finally:
+            _fconn.close()
+    except Exception as _fiscal_err:
+        print(f"⚠️ [REGISTRE FISCAL] Reprise du scellement non faite : {_fiscal_err}")
+
     # Contrôle d'intégrité au lancement : lecture seule, en arrière-plan, jamais bloquant.
     # Il cherche les défauts dormants (migration avalée, clé étrangère orpheline, file Shopify
     # bloquée, interface sans bundle…) et écrit son rapport dans <données>/diagnostics/.

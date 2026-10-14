@@ -267,7 +267,8 @@ def export_comptable_belge():
         brut   = brut_par_ticket.get(t_id, Decimal("0"))
         rapport = (Decimal(str(total_net)) / brut) if (total_net is not None and brut != 0) else Decimal("1")
         tvac_d = (pu_d * qte_d * rapport).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        taux_d = Decimal(str(taux or 0.21))
+        # Un taux de 0 % est un VRAI taux (livres, exonérés) : `taux or 0.21` le faisait exporter à 21 %.
+        taux_d = Decimal("0.21") if taux in (None, "") else Decimal(str(taux))
         htva   = (tvac_d / (Decimal("1") + taux_d)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         tva    = (tvac_d - htva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         records.append({

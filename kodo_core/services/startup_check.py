@@ -519,6 +519,26 @@ def _c_z_orphelins(ctx: _Contexte):
                     "Les totaux d'un Z ne se reconstitueraient pas : à signaler au support.")
 
 
+def _c_registre_fiscal(ctx: _Contexte):
+    """Ventes ou retours dont le scellement fiscal a échoué et qui attendent d'être rescellés.
+
+    `fiscal_unsealed_sales` est alimentée quand `seal_sale` échoue APRÈS le commit de la vente. Le serveur
+    les rescelle à chaque lancement : si des lignes y restent, le rescellement échoue encore (revue du
+    2026-10-14 : la reprise n'était branchée nulle part, les lignes s'accumulaient en silence)."""
+    titre = "Registre fiscal (ventes à sceller)"
+    if not ctx.existe("fiscal_unsealed_sales"):
+        return _constat("ventes.registre_fiscal", titre, OK, "Aucune vente en attente de scellement.")
+    n = ctx.conn.execute("SELECT COUNT(*) FROM fiscal_unsealed_sales").fetchone()[0]
+    if n == 0:
+        return _constat("ventes.registre_fiscal", titre, OK, "Aucune vente en attente de scellement.", {"en_attente": 0})
+    derniere = ctx.conn.execute(
+        "SELECT failure_reason FROM fiscal_unsealed_sales ORDER BY recorded_at DESC LIMIT 1").fetchone()
+    return _constat("ventes.registre_fiscal", titre, ATTENTION,
+                    f"{n} vente(s) ou retour(s) enregistrés mais pas encore scellés au registre fiscal "
+                    f"(dernière cause : {str(derniere[0])[:120]}).", {"en_attente": n},
+                    "Relancer l'application retente le scellement ; si cela persiste, le signaler au support.")
+
+
 _RE_NUMERO = re.compile(r"^TCK-(\d{4})-(\d+)$")
 
 
@@ -679,6 +699,7 @@ CONTROLES: List[tuple] = [
     ("ventes.jours_non_clotures", "Journées non clôturées", NIVEAU_COMPLET, True, _c_jours_non_clotures),
     ("ventes.z_orphelins", "Rattachement aux clôtures Z", NIVEAU_COMPLET, True, _c_z_orphelins),
     ("ventes.numerotation", "Numérotation des tickets", NIVEAU_COMPLET, True, _c_numerotation),
+    ("ventes.registre_fiscal", "Registre fiscal (ventes à sceller)", NIVEAU_COMPLET, True, _c_registre_fiscal),
     ("stock.coherence", "Cohérence du stock", NIVEAU_COMPLET, True, _c_stock),
     ("produits.catalogue", "Catalogue", NIVEAU_COMPLET, True, _c_catalogue),
     ("shopify.file", "Synchronisation Shopify", NIVEAU_COMPLET, True, _c_shopify),

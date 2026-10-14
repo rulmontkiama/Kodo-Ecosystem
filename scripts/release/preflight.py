@@ -423,6 +423,10 @@ def g_base_alignee(ctx) -> Resultat:
 def _pytest(ctx, cibles: List[str], timeout: int) -> Resultat:
     env = env_isole(ctx.tmp)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Les gardes textuelles de l'interface (ex. jeton Shopify hors du navigateur) lisent `src/` du front :
+    # sans ce chemin elles se SAUTENT en silence sur une machine où le front n'est pas au chemin habituel.
+    if getattr(ctx, "front", None):
+        env["KODO_FRONT_SRC"] = os.path.join(str(ctx.front), "src")
     code, sortie = lancer([sys.executable, "-B", "-m", "pytest", *cibles, "-q", "-p", "no:cacheprovider", "--no-header"],
                           cwd=ctx.root, env=env, timeout=timeout)
     resume = queue(sortie, 1)[0] if queue(sortie, 1) else "(aucune sortie)"

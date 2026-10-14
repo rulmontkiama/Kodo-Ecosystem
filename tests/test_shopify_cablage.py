@@ -183,7 +183,8 @@ class TestJetonShopifyNeSortPas(TestCablageShopify):
 
     def test_l_interface_ne_conserve_plus_le_jeton_dans_le_navigateur(self):
         """Garde textuelle : le jeton ne doit revenir sous AUCUNE forme dans le stockage local."""
-        racine = Path("/Users/kiamarulmont/Desktop/kōdo-pos-3/src")
+        # `KODO_FRONT_SRC` : dossier `src` de l'interface (le go/no-go le renseigne avec `--front`).
+        racine = Path(os.environ.get("KODO_FRONT_SRC") or "/Users/kiamarulmont/Desktop/kōdo-pos-3/src")
         if not racine.exists():
             self.skipTest("interface non présente sur cette machine")
         coupables = []

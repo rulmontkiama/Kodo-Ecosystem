@@ -22,6 +22,58 @@ from kodo_core.domain.accounting.z_report import ZReportEngine
 import ticket_printer
 
 
+def _ticket_attente_pour_ecran(panier: Dict[str, Any]) -> Dict[str, Any]:
+    """Un panier en attente tel que l'écran le lit (`HeldTicket` de types.ts), clés brutes conservées."""
+    date_creation = str(panier.get("date_creation") or "").replace("T", " ")
+    jour, _, heure = date_creation.partition(" ")
+    try:
+        date_fr = datetime.datetime.strptime(jour, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        date_fr = jour
+    groupes: Dict[tuple, Dict[str, Any]] = {}
+    for ligne in panier.get("panier") or []:
+        taille = ligne.get("taille") or ""
+        cle = (ligne.get("product_id") or ligne.get("nom"), taille, str(ligne.get("prix_vente_tvac")))
+        if cle in groupes:
+            groupes[cle]["quantity"] += 1
+            continue
+        try:
+            prix = float(ligne.get("prix_vente_tvac") or 0)
+        except (TypeError, ValueError):
+            prix = 0.0
+        groupes[cle] = {
+            "product": {
+                "id": str(ligne.get("product_id") or ""),
+                "name": ligne.get("nom") or "Article",
+                "category": "",
+                "barcode": ligne.get("code_barre") or "",
+                "price": prix,
+                "stock": 0,
+                "type": "product",
+            },
+            "quantity": 1,
+            "selectedSize": taille,
+        }
+    vendeur = next((l.get("vendeur") for l in panier.get("panier") or [] if l.get("vendeur")), "") or "Caisse"
+    client = None
+    if panier.get("client_id") or panier.get("client_nom"):
+        client = {"id": str(panier.get("client_id") or ""), "name": panier.get("client_nom") or "",
+                  "phone": "", "email": "", "points": 0}
+    ecran = dict(panier)
+    ecran.update({
+        "id": str(panier.get("id")),
+        "ticketNumber": f"ATT-{panier.get('id')}",
+        "date": date_fr,
+        "time": heure[:5],
+        "items": list(groupes.values()),
+        "client": client,
+        "discountPercent": panier.get("remise") or 0,
+        "cashierName": vendeur,
+        "totalTTC": panier.get("total_tvac") or 0.0,
+    })
+    return ecran
+
+
 def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any]]:
     """
     Gestionnaire de requêtes pour le module POS et Ventes.
@@ -114,7 +166,16 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             payments = [(p[0], float(p[1])) for p in data['payments'] if float(p[1]) > 0]
         
         if not payments:
-            payments = [(mode_paiement, total_ttc)]
+            montant_regle = total_ttc
+            # Règlement unique en espèces : l'écran affiche le montant arrondi au 5 c mais n'envoie que le
+            # total brut. Le tiroir reçoit le montant arrondi ; le journal scellé doit donc le porter, avec
+            # l'écart d'arrondi enregistré par le moteur (revue du 2026-10-14). Le TTC du ticket reste exact.
+            if database_manager.classer_moyen_paiement(mode_paiement) == "especes":
+                from kodo_core.domain.sales.cart_engine import apply_belgian_cash_rounding
+                montant_arrondi, _ = apply_belgian_cash_rounding(Decimal(str(total_ttc)))
+                if montant_arrondi > 0:
+                    montant_regle = float(montant_arrondi)
+            payments = [(mode_paiement, montant_regle)]
 
         try:
             res = process_sale_transaction(
@@ -226,7 +287,7 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         try:
             from kodo_core.hardware.print_worker import get_print_worker
             worker = get_print_worker()
-            job = worker.enqueue_ticket_print(numero_ticket)
+            job = worker.enqueue_ticket_print(numero_ticket, duplicata=True)
             return 200, {"success": True, "receiptNumber": numero_ticket, "print_job_id": job.job_id, "status": "ENQUEUED"}
         except Exception as pe:
             print(f"[IMPRESSION REPRINT WARNING] {pe}")
@@ -261,7 +322,10 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
     # 4. Liste des paniers en attente
     elif method == "GET" and path == "/api/held-tickets":
         paniers = get_parked_carts()
-        return 200, paniers
+        # L'écran lit `items`, `ticketNumber`, `totalTTC`… (types.ts `HeldTicket`) : il recevait la forme brute de
+        # la base (`panier`, `total_tvac`…), donc `ticket.items.map` plantait à l'ouverture de la liste après
+        # un redémarrage. Les clés brutes sont conservées pour les autres lecteurs.
+        return 200, [_ticket_attente_pour_ecran(p) for p in paniers]
 
     # 5. Mettre un panier en attente
     elif method == "POST" and path == "/api/held-tickets":
@@ -287,7 +351,10 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
             for _ in range(qty):
                 panier_adapted.append({
                     "nom": prod.get('name', 'Article'),
-                    "taille": item.get('size', ''),
+                    # L'écran envoie la taille sous `selectedSize` : lire seulement `size` la perdait.
+                    "taille": item.get('size') or item.get('selectedSize') or '',
+                    "product_id": prod.get('product_id') or prod.get('id'),
+                    "vendeur": data.get('cashierName') or '',
                     "prix_vente_tvac": float(prod.get('price', 0)),
                     "code_barre": prod.get('barcode', ''),
                     "en_solde": prod.get('en_solde', 0),
