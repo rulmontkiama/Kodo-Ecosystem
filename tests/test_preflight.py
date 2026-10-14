@@ -82,6 +82,31 @@ class TestAnalyseDesImportations(Depot):
         """)
         self.assertEqual(self.analyser()["introuvables"], [])
 
+    def test_module_local_manquant_n_est_pas_facultatif_meme_sous_try_except(self):
+        # Le motif « Shopify jamais câblé » : `try: import <notre module> / except Exception: pass`
+        # rendait invisible un module livré qui n'existe pas.
+        self.ecrire("launch_app.py", """
+            try:
+                from kodo_core.services import module_livre_mais_absent
+            except Exception:
+                module_livre_mais_absent = None
+        """)
+        self.ecrire("kodo_core/__init__.py", "")
+        self.ecrire("kodo_core/services/__init__.py", "")
+        r = self.analyser()
+        self.assertEqual(len(r["introuvables"]) + len(r["noms_absents"]), 1, r)
+
+    def test_nom_local_absent_n_est_pas_facultatif_meme_sous_try_except(self):
+        self.ecrire("launch_app.py", """
+            try:
+                from kodo_core.outils import fonction_renommee
+            except Exception:
+                fonction_renommee = None
+        """)
+        self.ecrire("kodo_core/__init__.py", "")
+        self.ecrire("kodo_core/outils.py", "def autre(): ...\n")
+        self.assertEqual(self.analyser()["noms_absents"], ["kodo_core.outils.fonction_renommee  ←  launch_app.py:3"])
+
     def test_import_dans_un_try_qui_n_attrape_pas_importerror_est_signale(self):
         self.ecrire("launch_app.py", """
             try:
@@ -202,6 +227,19 @@ class TestPortesStatiques(Depot):
         self.assertEqual(pf.g_filet_actif(self.ctx()).statut, pf.PASS)
         self.ecrire("server_pos.py", "print('serveur')\n")
         self.assertEqual(pf.g_filet_actif(self.ctx()).statut, pf.FAIL)
+
+    def test_filet_actif_refuse_un_appel_commente_ou_une_simple_chaine(self):
+        self.ecrire("kodo_core/api/routes/system_routes.py", 'p = "/api/system/diagnostic"\n')
+        self.ecrire("server_pos.py", "from kodo_core.services import startup_check\n"
+                                     "# startup_check.demarrer_en_arriere_plan()\n")
+        r = pf.g_filet_actif(self.ctx())
+        self.assertEqual(r.statut, pf.FAIL, "un appel mis en commentaire ne démarre rien")
+        self.ecrire("server_pos.py", "NOTE = 'startup_check.demarrer_en_arriere_plan()'\n")
+        self.assertEqual(pf.g_filet_actif(self.ctx()).statut, pf.FAIL)
+        self.ecrire("server_pos.py", "from kodo_core.services import startup_check\n"
+                                     "startup_check.demarrer_en_arriere_plan()\n")
+        self.ecrire("kodo_core/api/routes/system_routes.py", "# /api/system/diagnostic\n")
+        self.assertEqual(pf.g_filet_actif(self.ctx()).statut, pf.FAIL, "la route n'est plus servie")
 
     def test_fichiers_parasites(self):
         self.ecrire("dist/index.html", "<html></html>")
@@ -407,6 +445,22 @@ class TestArtefacts(Depot):
         self.assertEqual(r.statut, pf.FAIL)
         self.assertTrue(any("n'est plus le code du dépôt" in l for l in r.lignes))
 
+    def test_fichier_modifie_depuis_la_base_mais_absent_du_patch(self):
+        sys.path.insert(0, os.path.join(RACINE, "scripts", "release"))
+        import kodo_release as kr
+        git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=self.root,
+                                        capture_output=True, text=True, check=True)
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-q", "-m", "base")
+        git("tag", f"v{self.kodo_base.BASE_VERSION}")
+        # modifié depuis la base ET présent dans le patch : conforme ; un second fichier modifié est OUBLIÉ.
+        self.ecrire("kodo_core/services/oublie.py", "X = 1\n")
+        with mock.patch.object(kr, "ROOT", self.root):
+            r = self.porte(self.V)
+        self.assertEqual(r.statut, pf.FAIL, r.lignes)
+        self.assertTrue(any("OUBLIE" in l and "oublie.py" in l for l in r.lignes), r.lignes)
+
     def test_patch_qui_n_inclut_pas_la_base_du_dmg(self):
         self.fabriquer(base_min="1.0.0", base_max="1.9.9")
         r = self.porte(self.V)
@@ -420,8 +474,11 @@ class TestFront(Depot):
         bin_dir = os.path.join(self.tmp, "bin")
         os.makedirs(bin_dir, exist_ok=True)
         p = os.path.join(bin_dir, "npm")
+        # `npm run build -- --outDir X` : le faux build écrit X/index.html (contenu fixe).
+        fabrique = ('while [ $# -gt 0 ]; do if [ "$1" = "--outDir" ]; then mkdir -p "$2"; '
+                    'echo "<html>build</html>" > "$2/index.html"; fi; shift; done\n') if code == 0 else ""
         with open(p, "w") as f:
-            f.write(f"#!/bin/sh\necho \"npm $@\"\n{'echo erreur TS2304 >&2' if code else ''}\nexit {code}\n")
+            f.write(f"#!/bin/sh\n{fabrique}echo \"npm\"\n{'echo erreur TS2304 >&2' if code else ''}\nexit {code}\n")
         os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
         return bin_dir
 
@@ -439,8 +496,23 @@ class TestFront(Depot):
 
     def test_lint_et_build_ok(self):
         front = self.front()
+        self.ecrire("dist/index.html", "<html>build</html>\n")
         with mock.patch.dict(os.environ, {"PATH": self.faux_npm(0) + os.pathsep + os.environ["PATH"]}):
             self.assertEqual(pf.g_front(self.ctx(front=front)).statut, pf.PASS)
+
+    def test_dist_absent_n_est_pas_un_succes(self):
+        # Sans ./dist, l'interface qui sera zippée n'a pas été comparée au build : avertissement, pas PASS.
+        front = self.front()
+        with mock.patch.dict(os.environ, {"PATH": self.faux_npm(0) + os.pathsep + os.environ["PATH"]}):
+            r = pf.g_front(self.ctx(front=front))
+        self.assertEqual(r.statut, pf.WARN)
+        self.assertIn("./dist/index.html est absent", r.detail)
+
+    def test_dist_different_du_build_est_un_avertissement(self):
+        front = self.front()
+        self.ecrire("dist/index.html", "<html>autre chose</html>\n")
+        with mock.patch.dict(os.environ, {"PATH": self.faux_npm(0) + os.pathsep + os.environ["PATH"]}):
+            self.assertEqual(pf.g_front(self.ctx(front=front)).statut, pf.WARN)
 
     def test_front_absent_est_non_verifie_pas_reussi(self):
         self.assertEqual(pf.g_front(self.ctx(front=os.path.join(self.tmp, "nulle_part"))).statut, pf.SKIP)
@@ -537,7 +609,7 @@ class TestVerdict(unittest.TestCase):
 
     def lancer(self, portes, **kw):
         args = mock.Mock(root=None, version=None, front=None, base_copie=None, ignorer=None, sans_front=False,
-                         sans_artefacts=False, rapide=False)
+                         sans_artefacts=False, rapide=False, strict=False)
         for k, v in kw.items():
             setattr(args, k, v)
         with mock.patch.object(pf, "PORTES", portes):
@@ -577,7 +649,33 @@ class TestVerdict(unittest.TestCase):
 
     def test_mode_rapide_ne_lance_que_les_portes_rapides(self):
         code, r = self.lancer([self.porte("rapide", pf.PASS, rapide=True), self.porte("lente", pf.FAIL)], rapide=True)
-        self.assertEqual((code, [p["id"] for p in r["portes"]]), (0, ["rapide"]))
+        self.assertEqual([p["id"] for p in r["portes"]], ["rapide"])
+        # Une partie des portes seulement : jamais « GO » (revue du 2026-10-14 : 10 portes sur 16 non jouées).
+        self.assertEqual((code, r["verdict"]), (2, "RAPIDE"))
+        self.assertEqual(r["portes_non_jouees"], ["lente"])
+
+    def test_mode_rapide_rend_quand_meme_no_go_sur_un_echec(self):
+        code, r = self.lancer([self.porte("rapide", pf.FAIL, rapide=True)], rapide=True)
+        self.assertEqual((code, r["verdict"]), (1, "NO-GO"))
+
+    def test_un_avertissement_est_repris_sous_le_verdict(self):
+        lignes = []
+        args = mock.Mock(root=None, version=None, front=None, base_copie=None, ignorer=None, sans_front=False,
+                         sans_artefacts=False, rapide=False, strict=False)
+        with mock.patch.object(pf, "PORTES", [self.porte("a", pf.PASS), self.porte("b", pf.WARN)]):
+            code, r = pf.executer(args, sortie=lambda *a: lignes.append(" ".join(map(str, a))))
+        self.assertEqual((code, r["verdict"]), (0, "GO"))
+        self.assertEqual(r["avertissements"], ["b"])
+        self.assertTrue(any("Avertissements à lire" in l and "b" in l for l in lignes))
+
+    def test_strict_fait_d_un_avertissement_un_echec(self):
+        code, r = self.lancer([self.porte("a", pf.PASS), self.porte("b", pf.WARN)], strict=True)
+        self.assertEqual((code, r["verdict"]), (1, "NO-GO"))
+
+    def test_tout_ecarte_n_est_pas_un_go(self):
+        code, r = self.lancer([self.porte("a", pf.PASS)], ignorer=["a"])
+        self.assertEqual((code, r["verdict"]), (2, "INCOMPLET"))
+        self.assertEqual(r["portes_ecartees"], ["a"])
 
     def test_l_interface_doit_annoncer_la_version_en_preparation(self):
         vues = {}

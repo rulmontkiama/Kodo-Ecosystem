@@ -22,8 +22,12 @@ Règles
 - Il ne publie, ne signe et ne modifie RIEN. Les essais tournent dans des dossiers temporaires avec
   un HOME jetable ; la base réelle n'est jamais ouverte par SQLite, seulement copiée octet à octet.
 - Verdict honnête : un contrôle qui n'a pas pu être fait est `NON VÉRIFIÉ`, jamais un succès.
-  « GO » exige zéro échec et zéro contrôle manquant (sauf ceux écartés explicitement par l'option).
-- Code de sortie : 0 = GO, 1 = NO-GO (au moins un échec), 2 = INCOMPLET (contrôle(s) non vérifiés).
+  « GO » exige zéro échec et zéro contrôle manquant (sauf ceux écartés explicitement par l'option) ;
+  les avertissements et les portes écartées sont REPRIS sous le verdict, jamais noyés. `--strict` fait
+  d'un avertissement un échec.
+- `--rapide` ne joue qu'une partie des portes : il ne rend JAMAIS « GO » (verdict RAPIDE, code 2).
+- Code de sortie : 0 = GO, 1 = NO-GO (au moins un échec), 2 = INCOMPLET (contrôle(s) non vérifiés
+  ou mode rapide).
 
 Règle de croissance : un défaut réel trouvé un jour devient un contrôle ici (une fonction `g_*` + une
 ligne dans `PORTES`) ou un test dans tests/.
@@ -202,7 +206,13 @@ def _noms_de_premier_niveau(chemin: str, cache: Dict[str, Optional[Set[str]]]) -
 
 
 def _garde_optionnel(chaine_ancetres: List[ast.AST]) -> bool:
-    """Import volontairement facultatif : dans un try qui attrape ImportError, ou sous un test de plateforme."""
+    """
+    Import volontairement facultatif : dans un try qui attrape ImportError, ou sous un test de plateforme.
+
+    NE S'APPLIQUE QU'AUX MODULES TIERS (absents de l'installation). Un module ou un nom de NOTRE code est
+    livré avec le produit : s'il manque, `except Exception: pass` ne le rend pas facultatif, il cache le
+    défaut — c'est exactement le motif « Shopify jamais câblé ». Ces importations-là sont toujours jugées.
+    """
     for i, noeud in enumerate(chaine_ancetres):
         if isinstance(noeud, ast.Try):
             suivant = chaine_ancetres[i + 1] if i + 1 < len(chaine_ancetres) else None
@@ -307,7 +317,8 @@ def analyser_importations(racine: str, entrees: Tuple[str, ...] = POINTS_ENTREE,
             local = _chemin_local(racine, module)
             if not local:
                 if top in stdlib or _chemin_local(racine, top):
-                    if top not in stdlib and not optionnel:
+                    # Paquet local dont le sous-module manque : défaut, qu'un `try` l'entoure ou non.
+                    if top not in stdlib:
                         introuvables.setdefault(module, []).append(f"{rel}:{noeud.lineno}")
                     continue
                 try:
@@ -318,8 +329,6 @@ def analyser_importations(racine: str, entrees: Tuple[str, ...] = POINTS_ENTREE,
                     introuvables.setdefault(module, []).append(f"{rel}:{noeud.lineno}")
                 continue
             suivre_local(module)
-            if optionnel:
-                continue
             for a in noeud.names:
                 if a.name == "*":
                     continue
@@ -369,17 +378,24 @@ def g_filet_actif(ctx) -> Resultat:
     """Le filet de sécurité lui-même est-il encore câblé ?"""
     chemin = os.path.join(ctx.root, "server_pos.py")
     try:
-        src = open(chemin, encoding="utf-8").read()
-    except OSError:
+        arbre = ast.parse(open(chemin, encoding="utf-8").read())
+    except (OSError, SyntaxError):
         return Resultat(FAIL, "server_pos.py illisible")
     absents = []
-    if "startup_check" not in src or "demarrer_en_arriere_plan" not in src:
-        absents.append("server_pos.py ne lance plus le contrôle de démarrage")
+    # Un APPEL réel dans le code : le nom dans un commentaire ou une chaîne ne démarre rien.
+    appelle = any(isinstance(n, ast.Call)
+                  and getattr(n.func, "attr", getattr(n.func, "id", "")) == "demarrer_en_arriere_plan"
+                  for n in ast.walk(arbre))
+    if not appelle:
+        absents.append("server_pos.py n'appelle plus demarrer_en_arriere_plan() (appel absent ou commenté)")
     routes = os.path.join(ctx.root, "kodo_core", "api", "routes", "system_routes.py")
     try:
-        if "/api/system/diagnostic" not in open(routes, encoding="utf-8").read():
+        arbre_routes = ast.parse(open(routes, encoding="utf-8").read())
+        # Chaîne littérale du CODE (un commentaire n'est pas dans l'arbre) : la route est réellement servie.
+        if not any(isinstance(n, ast.Constant) and isinstance(n.value, str) and "/api/system/diagnostic" in n.value
+                   for n in ast.walk(arbre_routes)):
             absents.append("la route /api/system/diagnostic a disparu")
-    except OSError:
+    except (OSError, SyntaxError):
         absents.append("system_routes.py illisible")
     if absents:
         return Resultat(FAIL, "le contrôle de démarrage n'est plus câblé", absents)
@@ -557,13 +573,19 @@ def g_front(ctx) -> Resultat:
             return Resultat(FAIL, f"{etape} échoue (branche {branche or '?'})", queue(sortie, 20))
     neuf = os.path.join(sortie_build, "index.html")
     publie = os.path.join(ctx.root, "dist", "index.html")
-    if os.path.isfile(neuf) and os.path.isfile(publie):
-        if open(neuf, "rb").read() != open(publie, "rb").read():
-            return Resultat(WARN, f"lint + build sans erreur (branche {branche or '?'}), MAIS l'interface construite "
-                                  "depuis ce dossier n'est pas celle de ./dist",
-                            ["Le zip OTA ne vient peut-être pas de cette branche du front : reconstruire puis recopier "
-                             "dist/ (étapes 2-3), ou vérifier la branche."])
-    return Resultat(PASS, f"lint + build sans erreur (branche {branche or '?'})")
+    if not os.path.isfile(neuf):
+        return Resultat(FAIL, f"le build a réussi mais n'a produit aucun index.html (branche {branche or '?'})")
+    if not os.path.isfile(publie):
+        # Sans ./dist, on ne peut pas dire que l'interface qui sera zippée est celle du front : pas un succès.
+        return Resultat(WARN, f"lint + build sans erreur (branche {branche or '?'}), mais ./dist/index.html est "
+                              "absent : l'interface à zipper n'a pas pu être comparée à ce build",
+                        ["Copier dist/ du front vers ./dist (étape 3 de la procédure), puis relancer."])
+    if open(neuf, "rb").read() != open(publie, "rb").read():
+        return Resultat(WARN, f"lint + build sans erreur (branche {branche or '?'}), MAIS l'interface construite "
+                              "depuis ce dossier n'est pas celle de ./dist",
+                        ["Le zip OTA ne vient peut-être pas de cette branche du front : reconstruire puis recopier "
+                         "dist/ (étapes 2-3), ou vérifier la branche."])
+    return Resultat(PASS, f"lint + build sans erreur (branche {branche or '?'}), identique à ./dist")
 
 
 def g_front_version(ctx) -> Resultat:
@@ -641,6 +663,40 @@ def _entrees_zip(zf: zipfile.ZipFile) -> List[str]:
 _SALE = re.compile(r"(^|/)(\._[^/]*|\.DS_Store|__MACOSX(/.*)?)$")
 
 
+def _fichiers_modifies_hors_patch(ctx, pl, bundle, infos: List[str]) -> List[str]:
+    """
+    Fichiers patchables modifiés depuis la base du DMG (même sélection que `make-patch --since`) qui ne sont
+    PAS dans le zip : un client corrigé à moitié, sans qu'aucun contrôle ne le voie. Renvoie [] quand la
+    comparaison est impossible (étiquette de la base absente) — ce qui est dit dans `infos`.
+    """
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "scripts", "release"))
+        import kodo_base
+        import kodo_release as kr
+        if os.path.abspath(kr.ROOT) != os.path.abspath(ctx.root):
+            infos.append("dépôt contrôlé ≠ dépôt de l'outil de release : fichiers modifiés non comparés au patch")
+            return []
+        base_tag = f"v{kodo_base.BASE_VERSION}"
+        code, _ = lancer(["git", "rev-parse", "--verify", "--quiet", base_tag + "^{commit}"], cwd=ctx.root, timeout=20)
+        if code != 0:
+            infos.append(f"étiquette {base_tag} absente : fichiers modifiés depuis la base non comparés au patch")
+            return []
+        attendus = []
+        for rel in kr.changed_python_files(base_tag):
+            rel = rel.replace(os.sep, "/")
+            if rel.startswith(kr.NOT_MODULES):
+                continue
+            try:
+                pl.validate_module_path(rel)
+            except pl.PatchError:
+                continue  # non patchable à distance (chargeur, updater…) : exclu par make-patch aussi
+            attendus.append(rel)
+        return sorted(set(attendus) - set(bundle.files))
+    except Exception as e:  # noqa: BLE001 — la comparaison est un bonus de contrôle, jamais un plantage
+        infos.append(f"comparaison des fichiers modifiés non faite ({type(e).__name__})")
+        return []
+
+
 def g_artefacts(ctx) -> Resultat:
     """Zips OTA publiés : signés, propres, et réellement égaux au code / à l'interface du dépôt."""
     v = ctx.version
@@ -714,6 +770,10 @@ def g_artefacts(ctx) -> Resultat:
             if not (pl.parse_version(bmin) <= pl.parse_version(kodo_base.BASE_VERSION) <= pl.parse_version(bmax)):
                 fautes.append(f"backend_v{v}.zip : bases {bmin}→{bmax} n'incluent PAS la base du DMG "
                               f"({kodo_base.BASE_VERSION}) : aucun client ne l'appliquerait")
+            manquants = _fichiers_modifies_hors_patch(ctx, pl, bundle, infos)
+            if manquants:
+                fautes.append(f"backend_v{v}.zip OUBLIE {len(manquants)} fichier(s) modifié(s) depuis la base du DMG : "
+                              f"{manquants[:5]} — le refaire (make-patch --since)")
             perimes = []
             for rel, data in bundle.files.items():
                 p = os.path.join(ctx.root, rel)
@@ -885,13 +945,24 @@ def executer(args, sortie=print) -> Tuple[int, dict]:
         shutil.rmtree(tmp, ignore_errors=True)
 
     nb = {s: sum(1 for x in rapport["portes"] if x["statut"] == s) for s in (PASS, FAIL, WARN, SKIP, IGNORE)}
-    if nb[FAIL]:
+    non_jouees = [p.id for p in PORTES if p not in selection]
+    strict_echecs = nb[WARN] if getattr(args, "strict", False) else 0
+    if nb[FAIL] or strict_echecs:
         verdict, code = "NO-GO", 1
     elif nb[SKIP]:
         verdict, code = "INCOMPLET", 2
+    elif args.rapide:
+        # Une partie seulement des portes a tourné : ce n'est PAS un GO, quoi qu'elles disent.
+        verdict, code = "RAPIDE", 2
+    elif nb[PASS] == 0:
+        # Tout écarté (ou rien joué) : aucune garantie n'a été donnée.
+        verdict, code = "INCOMPLET", 2
     else:
         verdict, code = "GO", 0
-    rapport.update(verdict=verdict, code=code, comptes=nb, duree_s=round(time.time() - debut, 1))
+    rapport.update(verdict=verdict, code=code, comptes=nb, duree_s=round(time.time() - debut, 1),
+                   portes_non_jouees=non_jouees,
+                   avertissements=[x["id"] for x in rapport["portes"] if x["statut"] == WARN],
+                   portes_ecartees=[x["id"] for x in rapport["portes"] if x["statut"] == IGNORE])
     sortie(f"\n{'═' * 70}\nVERDICT : {verdict}  —  {nb[PASS]} passé(s), {nb[WARN]} avertissement(s), "
            f"{nb[FAIL]} échec(s), {nb[SKIP]} non vérifié(s), {nb[IGNORE]} écarté(s)  ({rapport['duree_s']} s)")
     if verdict == "NO-GO":
@@ -900,8 +971,17 @@ def executer(args, sortie=print) -> Tuple[int, dict]:
         manquants = [x["id"] for x in rapport["portes"] if x["statut"] == SKIP]
         sortie("→ Des contrôles n'ont pas pu être faits : " + ", ".join(manquants)
                + ". Fournissez ce qu'ils demandent, ou écartez-les explicitement (--ignorer ID).")
+    elif verdict == "RAPIDE":
+        sortie(f"→ Contrôle RAPIDE : aucun défaut dans les {len(selection)} portes jouées, mais "
+               f"{len(non_jouees)} porte(s) n'ont PAS tourné ({', '.join(non_jouees)}). Ce n'est pas un GO : "
+               "lancez le contrôle complet (--version X.Y.Z) avant de publier.")
     else:
         sortie("→ Aucun défaut détecté par ces contrôles (ils ne garantissent pas l'absence de défaut).")
+    # Ce qui ne bloque pas mais mérite d'être lu : repris ICI, sous le verdict.
+    if rapport["avertissements"]:
+        sortie("⚠️  Avertissements à lire avant de publier : " + ", ".join(rapport["avertissements"]))
+    if rapport["portes_ecartees"]:
+        sortie("➖ Portes écartées à la demande (non jouées) : " + ", ".join(rapport["portes_ecartees"]))
     sortie("═" * 70 + "\n")
     return code, rapport
 
@@ -916,6 +996,7 @@ def main(argv=None) -> int:
     ap.add_argument("--sans-front", action="store_true", help="écarte explicitement les contrôles du front")
     ap.add_argument("--sans-artefacts", action="store_true", help="écarte explicitement le contrôle des zips")
     ap.add_argument("--ignorer", action="append", metavar="ID", help="écarte une porte (répétable)")
+    ap.add_argument("--strict", action="store_true", help="un avertissement devient un échec (NO-GO)")
     ap.add_argument("--json", metavar="FICHIER", help="écrit le rapport en JSON")
     ap.add_argument("--root", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)

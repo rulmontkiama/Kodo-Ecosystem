@@ -1232,13 +1232,16 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
 
     ticket_id = cursor.lastrowid
 
-    if id_stock_origine:
-        if recrediter_stock:
-            cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?", (quantite, id_stock_origine))
-        cursor.execute("""
-            INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac, refund_of_vd_id)
-            VALUES (?, ?, ?, ?, ?)
-        """, (ticket_id, id_stock_origine, -quantite, prix_unitaire, vd_id))
+    # Seul le RECRÉDIT du stock dépend de l'existence d'un article en stock. La ligne négative, elle, est
+    # TOUJOURS écrite : c'est la trace qui empêche de rembourser deux fois la même ligne. Une ligne sans
+    # `id_stock` (commande Shopify dont l'article est « INTROUVABLE ») n'en laissait aucune : elle pouvait
+    # être remboursée autant de fois qu'on cliquait (revue du 2026-10-14).
+    if id_stock_origine and recrediter_stock:
+        cursor.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?", (quantite, id_stock_origine))
+    cursor.execute("""
+        INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac, refund_of_vd_id)
+        VALUES (?, ?, ?, ?, ?)
+    """, (ticket_id, id_stock_origine or None, -quantite, prix_unitaire, vd_id))
 
     sig_ledger, hash_ledger = signer_ledger(cursor, 'REMBOURSEMENT', total_tvac, mode, new_tk, date_heure)
     cursor.execute("""

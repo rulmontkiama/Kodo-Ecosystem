@@ -375,14 +375,17 @@ class TestJamaisBloquant(BaseControle):
         self.assertIn("défaut imprévu", c["x.boom"]["detail"])
         self.assertEqual(c["x.sain"]["statut"], sc.OK)
         self.assertEqual(r["resume"]["erreur"], 1)
-        # Un contrôle en erreur n'est pas un « tout va bien » mais n'alarme pas non plus la commerçante.
-        self.assertEqual(r["statut"], "OK")
+        # Un contrôle qui n'a pas pu conclure n'est JAMAIS un « tout va bien » (revue du 2026-10-14).
+        self.assertEqual(r["statut"], "ATTENTION")
 
     def test_le_budget_de_temps_est_respecte_et_signale(self):
         with mock.patch.object(sc, "BUDGET_SECONDES", -1.0):
             r = self.controle()
-        self.assertEqual(r["controles"], [])
+        self.assertEqual([c["id"] for c in r["controles"]], ["controle.incomplet"])
         self.assertEqual(len(r["non_executes"]), len(sc.CONTROLES))
+        # Des contrôles sautés ne sont jamais présentés comme « OK » : constat visible + statut global.
+        self.assertEqual(r["statut"], "ATTENTION")
+        self.assertEqual(r["controles"][0]["statut"], sc.ATTENTION)
 
     def test_dossier_de_rapport_illisible_ne_leve_pas(self):
         # Un fichier à la place du dossier : l'écriture échoue, le rapport est tout de même retourné.
@@ -466,6 +469,243 @@ class TestRapportEtRoutes(BaseControle):
         self.assertEqual(code, 200)
         self.assertTrue(res["success"])
         self.assertFalse(res["demarre"])
+
+
+class TestRevueDuFiltre(BaseControle):
+    """Défauts du filet lui-même relevés par la revue du 2026-10-14 : chacun a un test."""
+
+    def _ledger(self, n=3):
+        """Journal de caisse correctement scellé (même primitive que l'application)."""
+        from kodo_core.db import audit_trail
+        conn = sqlite3.connect(self.db)
+        try:
+            c = conn.cursor()
+            for i in range(n):
+                dh = f"2026-10-0{i + 1} 10:00:00"
+                sig, prec = audit_trail.signer_ledger(c, "VENTE", f"{10 + i}.50", "ESPECES", f"TCK-2026-{i + 1:04d}", dh)
+                c.execute("INSERT INTO Ledger_Caisse (date_heure, type_mouvement, montant, methode_paiement, "
+                          "reference, signature, hash_precedent) VALUES (?,?,?,?,?,?,?)",
+                          (dh, "VENTE", f"{10 + i}.50", "ESPECES", f"TCK-2026-{i + 1:04d}", sig, prec))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _z(self, n=2):
+        from kodo_core.db import audit_trail
+        conn = sqlite3.connect(self.db)
+        try:
+            c = conn.cursor()
+            for i in range(n):
+                donnees = json.dumps({"total": 10 * (i + 1)})
+                sig, prec = audit_trail.signer_rapport_z(c, f"2026-10-0{i + 1}", donnees)
+                c.execute("INSERT INTO Rapports_Z (date, donnees_json, signature, hash_precedent) VALUES (?,?,?,?)",
+                          (f"2026-10-0{i + 1}", donnees, sig, prec))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _clotures(self, n=3):
+        """Vrais Z de caisse, scellés comme `enregistrer_cloture_caisse`."""
+        from kodo_core.db import audit_trail
+        conn = sqlite3.connect(self.db)
+        try:
+            prec = "GENESIS_Z_00000000000000000000000000000000"
+            for i in range(n):
+                tvac, esp, carte = 100.10 + i, 60.05 + i, 40.05
+                date = f"2026-10-0{i + 1} 20:00:00"
+                h = audit_trail.calculer_hash_cloture(prec, date, "POS-01", tvac, esp, carte)
+                conn.execute("INSERT INTO Clotures_Caisse (date_cloture, caisse_id, total_ventes_tvac, total_especes, "
+                             "total_carte, hash_precedent, current_hash, signature) VALUES (?,?,?,?,?,?,?,?)",
+                             (date, "POS-01", tvac, esp, carte, prec, h, h))
+                prec = h
+            conn.commit()
+        finally:
+            conn.close()
+
+    def nf525(self):
+        return self.par_id(self.controle())["ventes.chaine_nf525"]
+
+    def alterer(self, requete, params=()):
+        """Altération « à la main » : un tiers qui retire d'abord les déclencheurs de protection."""
+        for (nom,) in self.sql("SELECT name FROM sqlite_master WHERE type='trigger'"):
+            self.sql(f'DROP TRIGGER "{nom}"')
+        self.sql(requete, params)
+
+    # -- le contrôle ne plante plus sur une altération : il la NOMME ---------------------------
+    def test_chaines_saines_sont_ok(self):
+        self.poser_cle_de_scellement()
+        self._ledger()
+        self._z()
+        self._clotures()
+        c = self.nf525()
+        self.assertEqual(c["statut"], sc.OK, c["detail"])
+        self.assertTrue(c["donnees"]["clotures_ok"])
+
+    def test_journal_de_caisse_altere_est_critique_et_non_une_erreur(self):
+        self.poser_cle_de_scellement()
+        self._ledger()
+        self.alterer("UPDATE Ledger_Caisse SET montant = '999.99' WHERE id = 2")
+        r = self.controle()
+        c = self.par_id(r)["ventes.chaine_nf525"]
+        self.assertEqual(c["statut"], sc.CRITIQUE)
+        self.assertIn("journal de caisse", c["detail"])
+        self.assertEqual(r["statut"], "CRITIQUE", "une altération ne doit plus se perdre en statut global « OK »")
+        self.assertEqual(r["resume"]["erreur"], 0)
+
+    def test_journal_de_caisse_avec_montant_illisible_est_critique(self):
+        self.poser_cle_de_scellement()
+        self._ledger()
+        self.alterer("UPDATE Ledger_Caisse SET montant = 'abc' WHERE id = 1")
+        c = self.nf525()
+        self.assertEqual(c["statut"], sc.CRITIQUE)
+        self.assertFalse(c["donnees"]["ledger_ok"])
+
+    def test_journal_des_z_altere_est_critique(self):
+        self.poser_cle_de_scellement()
+        self._z()
+        self.sql("UPDATE Rapports_Z SET donnees_json = '{\"total\": 1}' WHERE id = 1")
+        c = self.nf525()
+        self.assertEqual(c["statut"], sc.CRITIQUE)
+        self.assertIn("journal des Z", c["detail"])
+
+    def test_la_cle_absente_n_empeche_pas_de_voir_un_journal_altere(self):
+        self._ledger()
+        self.ticket("TCK-2026-0001")  # sans clé : les tickets ne sont pas vérifiables, le journal l'est
+        self.alterer("UPDATE Ledger_Caisse SET montant = '1.00' WHERE id = 3")
+        c = self.nf525()
+        self.assertEqual(c["statut"], sc.CRITIQUE)
+        self.assertIn("journal de caisse", c["detail"])
+        self.assertIn("tickets", c["detail"])  # signalés « non vérifiés »
+
+    # -- les VRAIS Z (Clotures_Caisse) sont enfin vérifiés --------------------------------------
+    def test_total_d_une_cloture_z_retouche_est_critique(self):
+        self.poser_cle_de_scellement()
+        self._clotures()
+        self.sql("UPDATE Clotures_Caisse SET total_especes = 0.01 WHERE id = 2")
+        c = self.nf525()
+        self.assertEqual(c["statut"], sc.CRITIQUE)
+        self.assertIn("clôtures Z", c["detail"])
+
+    def test_cloture_z_supprimee_au_milieu_rompt_la_chaine(self):
+        self.poser_cle_de_scellement()
+        self._clotures()
+        self.sql("DELETE FROM Clotures_Caisse WHERE id = 2")
+        c = self.nf525()
+        self.assertEqual(c["statut"], sc.CRITIQUE)
+        self.assertFalse(c["donnees"]["clotures_ok"])
+
+    def test_vraie_cloture_scellee_par_l_application_est_reconnue(self):
+        # Pas de reconstitution à la main : le Z est scellé par la fonction de production.
+        self.poser_cle_de_scellement()
+        self.ticket("TCK-2026-0001")
+        conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
+        try:
+            from database_manager import enregistrer_cloture_caisse
+            enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=None, conn=conn)
+        finally:
+            conn.close()
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM Clotures_Caisse")[0][0], 1)
+        c = self.nf525()
+        self.assertTrue(c["donnees"]["clotures_ok"], c["detail"])
+
+    # -- aucune clé n'est fabriquée, même quand le fichier existe mais est trop court ----------
+    def test_cle_trop_courte_n_est_pas_regeneree(self):
+        self.ticket("TCK-2026-0001")
+        dossier = os.path.join(os.environ["HOME"], ".kodo_signing")
+        os.makedirs(dossier)
+        cle = os.path.join(dossier, "audit_hmac.key")
+        with open(cle, "wb") as f:
+            f.write(b"court")
+        c = self.nf525()
+        self.assertEqual(c["statut"], sc.ATTENTION)
+        with open(cle, "rb") as f:
+            self.assertEqual(f.read(), b"court", "le contrôle a réécrit la clé de scellement")
+
+    # -- lecture seule au niveau du fichier ----------------------------------------------------
+    def test_une_base_en_mode_delete_garde_son_en_tete(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.commit()
+        conn.close()
+        with open(self.db, "rb") as f:
+            entete = f.read(100)
+        self.assertEqual(entete[18:20], b"\x01\x01", "précondition : base en mode journal DELETE")
+        avant = _sha(self.db)
+        self.controle()
+        with open(self.db, "rb") as f:
+            self.assertEqual(f.read(100)[18:20], b"\x01\x01", "le contrôle a basculé la base en mode WAL")
+        self.assertEqual(_sha(self.db), avant)
+        self.assertFalse(os.path.exists(self.db + "-wal"))
+
+    def test_chemin_avec_espaces_diacritiques_et_diese(self):
+        dossier = os.path.join(self.tmp, "Kōdo POS #1 ?x")
+        os.makedirs(dossier)
+        copie = os.path.join(dossier, "kodo pos.db")
+        shutil.copy(self.db, copie)
+        r = sc.executer_controle(db_path=copie, dossier_rapport=self.rapports, ecrire=False)
+        self.assertNotEqual(r["statut"], "CRITIQUE", [(c["id"], c["detail"]) for c in r["controles"]])
+        self.assertEqual(self.par_id(r)["base.integrite"]["statut"], sc.OK)
+
+    def test_le_rapport_n_est_pas_ecrit_via_un_temporaire_fixe(self):
+        self.controle()
+        self.controle()
+        self.assertEqual(sorted(os.listdir(self.rapports)), [sc.NOM_RAPPORT],
+                         "un temporaire est resté dans le dossier des rapports")
+
+    # -- numérotation : plages, empreinte complète, mémoire bornée -----------------------------
+    def test_numero_aberrant_ne_consomme_pas_la_memoire(self):
+        self.ticket("TCK-2026-0001")
+        self.ticket("TCK-2026-99999999")
+        debut = time.monotonic()
+        c = self.par_id(self.controle())["ventes.numerotation"]
+        self.assertLess(time.monotonic() - debut, 5)
+        self.assertEqual(c["donnees"]["nombre"]["2026"], 99999997)
+        self.assertEqual(len(c["donnees"]["manquants"]["2026"]), 20)
+
+    def test_un_nouveau_trou_au_dela_des_20_premiers_est_vu(self):
+        for n in range(1, 90, 2):  # 1,3,5…89 : 44 trous (> 20)
+            self.ticket(f"TCK-2026-{n:04d}")
+        self.controle()
+        premier = self.par_id(self.controle())["ventes.numerotation"]
+        self.assertEqual(premier["statut"], sc.INFO)
+        for n in (91, 94):  # un trou de plus à la FIN : invisible dans les 20 premiers affichés
+            self.ticket(f"TCK-2026-{n:04d}")
+        r = self.controle()
+        c = self.par_id(r)["ventes.numerotation"]
+        self.assertEqual(c["statut"], sc.ATTENTION, "un trou nouveau au-delà des 20 premiers doit être signalé")
+        self.assertIn("NOUVEAU", c["detail"])
+
+    # -- Shopify -----------------------------------------------------------------------------
+    def test_date_iso_avec_t_est_comprise(self):
+        ancien = (datetime.datetime.now() - datetime.timedelta(hours=60)).strftime("%Y-%m-%dT%H:%M:%S")
+        self.sql("INSERT INTO sync_queue (id_vente_detail, id_ticket, code_barre, delta, statut, tentatives, "
+                 "derniere_erreur, date_creation, date_maj) VALUES (1, 1, 'X', -1, 'PENDING', 12, "
+                 "'HTTP 401', ?, ?)", (ancien, ancien))
+        c = self.par_id(self.controle())["shopify.file"]
+        self.assertEqual(c["statut"], sc.ATTENTION)
+        self.assertGreaterEqual(c["donnees"]["age_heures"], 59)
+
+    def test_mouvements_ecartes_pour_sku_introuvable_sont_dits(self):
+        maintenant = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.sql("INSERT INTO sync_queue (id_vente_detail, id_ticket, code_barre, delta, statut, "
+                 "derniere_erreur, date_creation, date_maj) VALUES (1, 1, 'X', -1, 'IGNORE', "
+                 "'SKU introuvable sur Shopify', ?, ?)", (maintenant, maintenant))
+        c = self.par_id(self.controle())["shopify.file"]
+        self.assertEqual(c["statut"], sc.INFO)
+        self.assertEqual(c["donnees"]["ignores_sku_introuvable"], 1)
+        self.assertIn("introuvable", c["detail"])
+
+    # -- ordre et budget -----------------------------------------------------------------------
+    def test_la_chaine_nf525_passe_en_dernier(self):
+        self.assertEqual(sc.CONTROLES[-1][0], "ventes.chaine_nf525")
+
+    def test_le_resume_court_porte_les_controles_non_executes(self):
+        with mock.patch.object(sc, "BUDGET_SECONDES", -1.0):
+            r = self.controle()
+        court = sc.resume_court(r)
+        self.assertEqual(court["statut"], "ATTENTION")
+        self.assertTrue(court["non_executes"])
 
 
 if __name__ == "__main__":

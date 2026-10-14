@@ -536,22 +536,22 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
     # 11. Calcul Panier pur avec Decimal (cart_service)
     elif method == "POST" and path == "/api/cart/calculate":
         try:
-            from kodo_core.services.cart_service import compute_cart_totals
+            from kodo_core.services.cart_service import calculate_cart
             from kodo_core.domain.sales.models import Cart
             cart = Cart.from_dict(data)
-            totals = compute_cart_totals(cart)
+            totals = calculate_cart(cart.items, cart.global_discount)
             return 200, {
-                "subtotal_ttc": str(totals.subtotal_ttc),
-                "total_discount": str(totals.total_discount),
+                "subtotal_ttc": str(totals.total_ttc + totals.total_discount_ttc),
+                "total_discount": str(totals.total_discount_ttc),
                 "total_ht": str(totals.total_ht),
                 "total_tva": str(totals.total_tva),
                 "total_ttc": str(totals.total_ttc),
                 "vat_breakdown": [
                     {
-                        "rate": str(line.rate),
+                        "rate": str(line.vat_rate),
                         "base_ht": str(line.base_ht),
-                        "vat_amount": str(line.vat_amount),
-                        "total_ttc": str(line.total_ttc)
+                        "vat_amount": str(line.montant_tva),
+                        "total_ttc": str(line.montant_ttc)
                     }
                     for line in totals.vat_breakdown
                 ]

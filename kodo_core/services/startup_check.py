@@ -11,12 +11,15 @@ la caisse.
 
 Ce qu'il garantit
 -----------------
-- LECTURE SEULE. La base est ouverte avec `PRAGMA query_only=ON`, aucune écriture, aucune réparation.
-  Le journal signé n'est jamais modifié (règle Kōdo). Les seuls fichiers écrits sont le rapport
-  JSON et son fichier temporaire, dans `<données>/diagnostics/`.
+- LECTURE SEULE. La base est ouverte en LECTURE SEULE au niveau du fichier (`mode=ro`) ET avec
+  `PRAGMA query_only=ON` : aucune écriture, aucune réparation, pas même l'en-tête du fichier ni le
+  point de contrôle du journal WAL. Le journal signé n'est jamais modifié (règle Kōdo). Les seuls
+  fichiers écrits sont le rapport JSON (et son temporaire) dans `<données>/diagnostics/`, plus une
+  sonde d'écriture éphémère `.kodo_controle_*` dans le dossier de la base (supprimée aussitôt).
 - JAMAIS BLOQUANT. Il tourne dans un thread démon, après le démarrage du serveur, et chaque contrôle
   est isolé : une exception devient un constat « erreur » (le contrôle lui-même a échoué), jamais un
-  plantage ni un faux « tout va bien ».
+  plantage. Un contrôle en erreur ou non exécuté (délai) n'est JAMAIS présenté comme « OK » : le
+  statut global passe à ATTENTION.
 - TRANSPARENT. Un contrôle qui ne peut pas conclure le dit (`erreur`, `info`) au lieu d'inventer un
   résultat plausible.
 - SANS EFFET DE BORD. Il ne crée ni clé de scellement, ni sauvegarde, ni snapshot de migration, ne
@@ -40,6 +43,7 @@ import hashlib
 import json
 import logging
 import os
+import pathlib
 import platform
 import re
 import shutil
@@ -400,27 +404,84 @@ def _chemin_cle_scellement() -> str:
     return os.path.join(os.path.expanduser("~/.kodo_signing"), "audit_hmac.key")
 
 
+def _cle_scellement_utilisable() -> bool:
+    """
+    Même critère que `get_audit_machine_secret` (≥ 16 octets une fois nettoyée), mais SANS jamais écrire :
+    cette fonction-là FABRIQUE une nouvelle clé dès que la clé existante est absente ou trop courte, ce
+    qui rendrait ensuite illisibles les tickets déjà scellés. Le contrôle ne l'appelle donc qu'après
+    avoir constaté que la clé est utilisable.
+    """
+    try:
+        with open(_chemin_cle_scellement(), "rb") as f:
+            return len(f.read().strip()) >= 16
+    except OSError:
+        return False
+
+
 def _c_chaine_nf525(ctx: _Contexte):
     if not ctx.existe("Tickets"):
         return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", INFO, "Table Tickets absente.")
     n = ctx.conn.execute("SELECT COUNT(*) FROM Tickets").fetchone()[0]
-    # `get_audit_machine_secret` CRÉE la clé quand elle manque : le contrôle ne doit jamais en fabriquer une.
-    if n > 0 and not os.path.exists(_chemin_cle_scellement()):
-        return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", ATTENTION,
-                        f"{n} ticket(s) mais la clé de scellement de cette machine est absente : la chaîne ne peut pas "
-                        "être vérifiée ici (base restaurée sur un autre poste ?).", {"tickets": n},
-                        "Signaler au support : ne pas régénérer la clé à la main.")
     from kodo_core.db import audit_trail
-    rapport = audit_trail.audit_complet(ctx.conn)
-    tables = {"tickets_ok": "tickets", "ledger_ok": "journal de caisse", "z_ok": "clôtures Z", "audit_ok": "piste d'audit"}
-    cassees = [nom for cle, nom in tables.items() if not rapport.get(cle)]
-    donnees = {"tickets": n, **{k: bool(rapport.get(k)) for k in tables}}
-    if rapport.get("conforme"):
-        return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", OK,
-                        f"Chaînage intact sur les tables scellées ({n} ticket(s)).", donnees)
-    return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", CRITIQUE,
-                    "Rupture ou altération détectée sur : " + ", ".join(cassees) + ".", donnees,
-                    "Ne rien modifier : transmettre ce rapport au support.")
+
+    # nom lisible -> True (intacte) / False (rupture ou altération) / None (non vérifiable ici)
+    resultats: Dict[str, Optional[bool]] = {}
+    pourquoi: Dict[str, str] = {}
+
+    def verifier(nom: str, table: str, fonction: Callable[[], Any]) -> None:
+        if not ctx.existe(table):
+            resultats[nom] = True  # table absente d'une très ancienne base : aucune chaîne à rompre
+            return
+        try:
+            resultats[nom] = bool(fonction())
+        except ValueError:
+            resultats[nom] = False  # violation d'intégrité constatée (verify_database_integrity)
+        except Exception as e:  # noqa: BLE001 — contenu ou schéma imprévu : pas vérifiable, mais dit
+            resultats[nom] = None
+            pourquoi[nom] = f"{type(e).__name__}: {_cacher_domicile(e)[:80]}"
+
+    # Les tickets sont scellés par HMAC avec la clé de CETTE machine : sans clé utilisable (base restaurée
+    # sur un autre poste, fichier tronqué), ils ne peuvent pas être vérifiés — et on ne fabrique rien.
+    cle_ok = n == 0 or _cle_scellement_utilisable()
+    if cle_ok:
+        verifier("tickets", "Tickets", lambda: audit_trail.verify_database_integrity(ctx.conn))
+    else:
+        resultats["tickets"] = None
+    verifier("journal de caisse", "Ledger_Caisse", lambda: audit_trail.verifier_chainage(
+        "Ledger_Caisse", compute_hash_func=audit_trail.hash_ledger_row, conn=ctx.conn))
+    verifier("journal des Z", "Rapports_Z", lambda: audit_trail.verifier_chainage(
+        "Rapports_Z", compute_hash_func=audit_trail.hash_z_row, conn=ctx.conn))
+    # Les vrais Z de caisse (Clotures_Caisse) : chaîne distincte du journal Rapports_Z.
+    verifier("clôtures Z", "Clotures_Caisse", lambda: audit_trail.verifier_clotures(ctx.conn))
+    verifier("piste d'audit", "Audit_Trail", lambda: audit_trail.verifier_chainage("Audit_Trail", conn=ctx.conn))
+
+    cles = {"tickets": "tickets_ok", "journal de caisse": "ledger_ok", "journal des Z": "z_ok",
+            "clôtures Z": "clotures_ok", "piste d'audit": "audit_ok"}
+    donnees: Dict[str, Any] = {"tickets": n, **{cles[nom]: ok for nom, ok in resultats.items()}}
+    cassees = [nom for nom, ok in resultats.items() if ok is False]
+    inverifiees = [nom for nom, ok in resultats.items() if ok is None]
+    if pourquoi:
+        donnees["inverifiable"] = pourquoi
+
+    if cassees:
+        detail = "Rupture ou altération détectée sur : " + ", ".join(cassees) + "."
+        if inverifiees:
+            detail += " Non vérifié(s) : " + ", ".join(inverifiees) + "."
+        return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", CRITIQUE, detail, donnees,
+                        "Ne rien modifier : transmettre ce rapport au support.")
+    if inverifiees:
+        morceaux = []
+        if "tickets" in inverifiees and not cle_ok:
+            morceaux.append(f"{n} ticket(s) mais la clé de scellement de cette machine est absente ou illisible : "
+                            "les tickets ne peuvent pas être vérifiés ici (base restaurée sur un autre poste ?)")
+        autres = [x for x in inverifiees if not (x == "tickets" and not cle_ok)]
+        if autres:
+            morceaux.append("vérification impossible pour : " + ", ".join(autres))
+        return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", ATTENTION,
+                        " ; ".join(morceaux) + ".", donnees,
+                        "Signaler au support : ne pas régénérer la clé à la main.")
+    return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", OK,
+                    f"Chaînage intact sur les tables scellées ({n} ticket(s)).", donnees)
 
 
 def _c_jours_non_clotures(ctx: _Contexte):
@@ -469,18 +530,40 @@ def _c_numerotation(ctx: _Contexte):
         m = _RE_NUMERO.match(str(num or ""))
         if m:
             par_annee[m.group(1)].add(int(m.group(2)))
+    # Les trous sont calculés en PLAGES (jamais `range(1, max)` en mémoire : un numéro aberrant comme
+    # TCK-2026-99999999 y mettrait des gigaoctets). L'empreinte du constat porte sur TOUTES les plages :
+    # un trou nouveau change l'empreinte même quand les 20 premiers numéros affichés sont inchangés.
     manquants: Dict[str, list] = {}
-    for annee, nums in par_annee.items():
-        trous = sorted(set(range(1, max(nums) + 1)) - nums)
-        if trous:
-            manquants[annee] = trous[:20]
+    nombre: Dict[str, int] = {}
+    plages_par_annee: Dict[str, list] = {}
+    empreintes: Dict[str, str] = {}
+    for annee, nums in sorted(par_annee.items()):
+        plages, precedent = [], 0
+        for num in sorted(nums):
+            if num > precedent + 1:
+                plages.append((precedent + 1, num - 1))
+            precedent = num
+        if not plages:
+            continue
+        nombre[annee] = sum(b - a + 1 for a, b in plages)
+        plages_par_annee[annee] = [f"{a}" if a == b else f"{a}-{b}" for a, b in plages[:20]]
+        empreintes[annee] = hashlib.sha256(
+            ";".join(f"{a}-{b}" for a, b in plages).encode("ascii")).hexdigest()[:12]
+        affiches: List[int] = []
+        for a, b in plages:
+            affiches.extend(range(a, min(b, a + 20) + 1))
+            if len(affiches) >= 20:
+                break
+        manquants[annee] = affiches[:20]
     if not manquants:
         return _constat("ventes.numerotation", "Numérotation des tickets", OK, "Séquence continue, sans trou.")
-    total = sum(len(v) for v in manquants.values())
+    total = sum(nombre.values())
     return _constat("ventes.numerotation", "Numérotation des tickets", INFO,
-                    f"{total} numéro(s) manquant(s) dans la séquence ({', '.join(f'{a} : {len(n)}' for a, n in sorted(manquants.items()))}). "
+                    f"{total} numéro(s) manquant(s) dans la séquence ({', '.join(f'{a} : {n}' for a, n in sorted(nombre.items()))}). "
                     "Un trou ancien est hérité d'une version antérieure ; un trou NOUVEAU est signalé.",
-                    {"manquants": manquants}, "Un trou ne se comble pas après coup : le documenter pour le comptable.",
+                    {"manquants": manquants, "plages": plages_par_annee, "nombre": nombre,
+                     "empreinte_trous": empreintes},
+                    "Un trou ne se comble pas après coup : le documenter pour le comptable.",
                     alerter_si_nouveau=True)
 
 
@@ -542,7 +625,10 @@ def _c_shopify(ctx: _Contexte):
         donnees.update(en_attente=n_attente, plus_ancien=plus_ancien, indetermines=indetermines)
         if n_attente and plus_ancien:
             try:
-                age = datetime.datetime.now() - datetime.datetime.strptime(str(plus_ancien)[:19], "%Y-%m-%d %H:%M:%S")
+                # `date_creation` peut venir en ISO (« 2026-10-14T09:30:00 ») : sans ce remplacement le
+                # parsing échouait et une file bloquée n'était jamais signalée.
+                age = datetime.datetime.now() - datetime.datetime.strptime(
+                    str(plus_ancien).replace("T", " ")[:19], "%Y-%m-%d %H:%M:%S")
                 heures = int(age.total_seconds() // 3600)
                 donnees["age_heures"] = heures
                 if heures >= FILE_SHOPIFY_BLOQUEE_HEURES:
@@ -556,6 +642,12 @@ def _c_shopify(ctx: _Contexte):
                 pass
         if indetermines:
             problemes.append(f"{indetermines} envoi(s) Shopify de statut indéterminé, à vérifier à la main")
+        # Mouvements écartés parce que l'article n'existe pas (ou plus) sur Shopify : légitime pour un
+        # article vendu seulement en boutique, mais le stock du site n'a alors JAMAIS été mis à jour.
+        ignores = int(ctx.conn.execute(
+            "SELECT COUNT(*) FROM sync_queue WHERE statut = 'IGNORE' AND derniere_erreur LIKE 'SKU introuvable%'"
+        ).fetchone()[0] or 0)
+        donnees["ignores_sku_introuvable"] = ignores
     if ctx.existe("Shopify_Sync_Lignes"):
         ind = int(ctx.conn.execute("SELECT COUNT(*) FROM Shopify_Sync_Lignes WHERE statut = 'INDETERMINE'").fetchone()[0] or 0)
         donnees["lignes_indeterminees"] = ind
@@ -566,6 +658,10 @@ def _c_shopify(ctx: _Contexte):
                         "Ouvrir Paramètres › Shopify : jeton expiré ou boutique injoignable ?")
     if not donnees:
         return _constat("shopify.file", "Synchronisation Shopify", OK, "Aucune file d'attente (Shopify non utilisé).")
+    if donnees.get("ignores_sku_introuvable"):
+        return _constat("shopify.file", "Synchronisation Shopify", INFO,
+                        f"Aucun envoi bloqué ; {donnees['ignores_sku_introuvable']} mouvement(s) écarté(s) car "
+                        "l'article est introuvable sur Shopify (stock du site non mis à jour pour ceux-là).", donnees)
     return _constat("shopify.file", "Synchronisation Shopify", OK, "Aucun envoi bloqué.", donnees)
 
 
@@ -580,13 +676,15 @@ CONTROLES: List[tuple] = [
     ("base.migrations", "Migrations du schéma", NIVEAU_RAPIDE, True, _c_migrations),
     ("base.derive_schema", "Structure de la base", NIVEAU_RAPIDE, True, _c_derive_schema),
     ("base.cles_etrangeres", "Références entre tables", NIVEAU_RAPIDE, True, _c_cles_etrangeres),
-    ("ventes.chaine_nf525", "Chaîne de signatures NF525", NIVEAU_COMPLET, True, _c_chaine_nf525),
     ("ventes.jours_non_clotures", "Journées non clôturées", NIVEAU_COMPLET, True, _c_jours_non_clotures),
     ("ventes.z_orphelins", "Rattachement aux clôtures Z", NIVEAU_COMPLET, True, _c_z_orphelins),
     ("ventes.numerotation", "Numérotation des tickets", NIVEAU_COMPLET, True, _c_numerotation),
     ("stock.coherence", "Cohérence du stock", NIVEAU_COMPLET, True, _c_stock),
     ("produits.catalogue", "Catalogue", NIVEAU_COMPLET, True, _c_catalogue),
     ("shopify.file", "Synchronisation Shopify", NIVEAU_COMPLET, True, _c_shopify),
+    # EN DERNIER : c'est le seul contrôle long (il relit tous les tickets). Placé en tête, il pouvait
+    # consommer le budget et faire sauter tous les autres (mesuré : 118 s sur 300 000 tickets).
+    ("ventes.chaine_nf525", "Chaîne de signatures NF525", NIVEAU_COMPLET, True, _c_chaine_nf525),
 ]
 
 
@@ -596,7 +694,11 @@ CONTROLES: List[tuple] = [
 
 def _ouvrir_lecture_seule(db_path: str) -> sqlite3.Connection:
     # Le fichier est vérifié par l'appelant : `sqlite3.connect` créerait une base vide s'il manquait.
-    conn = sqlite3.connect(db_path, timeout=5.0, detect_types=sqlite3.PARSE_DECLTYPES)
+    # `mode=ro` : lecture seule au niveau du FICHIER. `query_only` seul laissait passer le changement de
+    # mode de journal (SafeConnection exécute `PRAGMA journal_mode=WAL`, qui réécrit l'en-tête d'une
+    # base en mode DELETE) et le point de contrôle du WAL à la fermeture.
+    uri = pathlib.Path(os.path.abspath(db_path)).as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=5.0, detect_types=sqlite3.PARSE_DECLTYPES)
     try:
         conn.execute("PRAGMA query_only=ON")
         # `connect` et le pragma ne lisent pas le fichier : sans cette lecture, un fichier qui n'est
@@ -646,16 +748,26 @@ def _lire_json(chemin: str) -> Optional[dict]:
 
 
 def _ecrire_atomique(chemin: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(chemin), exist_ok=True)
-    tmp = chemin + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-    os.replace(tmp, chemin)
+    dossier = os.path.dirname(chemin)
+    os.makedirs(dossier, exist_ok=True)
+    # Nom unique : deux contrôles simultanés (lancement + « relancer » depuis l'API) ne s'écrasent plus.
+    fd, tmp = tempfile.mkstemp(dir=dossier, prefix=NOM_RAPPORT + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp, chemin)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _statut_global(constats: List[dict]) -> str:
     pire = max((_RANG[c["statut"]] for c in constats), default=0)
-    return {3: "CRITIQUE", 2: "ATTENTION"}.get(pire, "OK")
+    # ERREUR (rang 1) = un contrôle n'a pas pu conclure : on ne peut pas dire « OK ».
+    return {3: "CRITIQUE", 2: "ATTENTION", 1: "ATTENTION"}.get(pire, "OK")
 
 
 def executer_controle(db_path: Optional[str] = None, dist_dir: Optional[str] = None,
@@ -722,6 +834,14 @@ def executer_controle(db_path: Optional[str] = None, dist_dir: Optional[str] = N
                 ctx.conn.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    if non_executes and not base_illisible:
+        # Jamais un « OK » silencieux : ce qui n'a pas tourné est dit, et compte dans le statut global.
+        constats.append(_constat(
+            "controle.incomplet", "Contrôle incomplet", ATTENTION,
+            f"{len(non_executes)} contrôle(s) n'ont pas été exécutés (délai de {int(BUDGET_SECONDES)} s dépassé) : "
+            + ", ".join(non_executes) + ".", {"non_executes": list(non_executes)},
+            "Relancer le contrôle (Paramètres) ou transmettre ce rapport au support."))
 
     # Comparaison avec le contrôle précédent (le premier lancement n'a aucune référence : rien n'est « nouveau »).
     chemin = _chemin_rapport(dossier_rapport) if ecrire else None
@@ -858,6 +978,7 @@ def resume_court(rapport: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "disponible": True, "en_cours": en_cours(), "statut": rapport.get("statut"),
         "genere_le": rapport.get("genere_le"), "resume": rapport.get("resume", {}),
         "nouveautes": rapport.get("nouveautes", []), "empreinte": rapport.get("empreinte", ""),
+        "non_executes": rapport.get("non_executes", []),
     }
 
 

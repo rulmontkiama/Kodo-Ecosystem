@@ -56,12 +56,16 @@ Tu as un accès et une responsabilité **pleine et entière sur l'ensemble des c
 
 ### 5. Filet de sécurité : le contrôle d'intégrité au lancement
 - `startup_check.py` cherche à chaque lancement les défauts DORMANTS (migration avalée, clé étrangère orpheline, file
-  Shopify bloquée, interface sans bundle, chaîne NF525…). Il est **en lecture seule** (`PRAGMA query_only`), jamais
+  Shopify bloquée, interface sans bundle, chaîne NF525…). Il est **en lecture seule** (fichier ouvert en `mode=ro` + `PRAGMA query_only`), jamais
   bloquant, et ne répare rien : le journal signé n'est jamais modifié.
 - **Règle de croissance** : chaque défaut réel trouvé un jour devient un contrôle (fonction `_c_*` + ligne dans
   `CONTROLES` + test dans `tests/test_startup_check.py`). C'est ainsi que l'inconnu recule.
 - Piège : n'y appeler ni `updater.get_installed_version()` (il ÉCRIT `app_version` dans `Parametres`) ni
-  `get_audit_machine_secret()` (il CRÉE la clé de scellement si elle manque). Un test garantit la base identique à l'octet.
+  `get_audit_machine_secret()` (il CRÉE la clé de scellement si elle manque OU si elle fait moins de 16 octets : le
+  contrôle lit lui-même le fichier). Ouvrir la base sans `mode=ro` fait réécrire l'en-tête par `SafeConnection`
+  (`PRAGMA journal_mode=WAL`). Un test garantit la base identique à l'octet.
+- Un contrôle en erreur ou non exécuté n'est JAMAIS « OK » : statut global ATTENTION. La chaîne NF525 (seul contrôle
+  long) reste en dernier dans `CONTROLES`.
 
 ---
 

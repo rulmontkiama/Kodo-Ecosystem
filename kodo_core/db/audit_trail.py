@@ -110,6 +110,21 @@ def record_audit_event(conn_or_cursor, event_type: str, entity_name: str, entity
 
     return current_hash, previous_hash
 
+def _lire_lignes(cursor, table: str):
+    """
+    Lit les lignes d'une table scellée. Une valeur que le convertisseur de colonne ne sait plus lire (texte dans
+    une colonne DECIMAL…) lève dès le `fetchall` : c'est un contenu ALTÉRÉ, pas une panne, et le contrôle doit le
+    dire (None = illisible) au lieu de planter. Les vraies erreurs SQLite (`sqlite3.Error`) continuent de remonter.
+    """
+    try:
+        return cursor.fetchall()
+    except sqlite3.Error:
+        raise
+    except Exception as e:  # noqa: BLE001
+        print(f"[ALERTE] Contenu illisible dans {table} ({type(e).__name__}).")
+        return None
+
+
 def verifier_chainage(table: str, id_col="id", sig_col="signature", hash_prec_col="hash_precedent", compute_hash_func=None, conn=None) -> bool:
     """
     Vérifie l'intégrité de la chaîne séquentielle cryptographique pour une table donnée.
@@ -125,7 +140,9 @@ def verifier_chainage(table: str, id_col="id", sig_col="signature", hash_prec_co
     try:
         c = safe_conn.cursor()
         c.execute(f"SELECT * FROM {table} ORDER BY {id_col} ASC")
-        rows = c.fetchall()
+        rows = _lire_lignes(c, table)
+        if rows is None:
+            return False
 
         c.execute(f"PRAGMA table_info({table})")
         cols = [r[1] for r in c.fetchall()]
@@ -165,19 +182,35 @@ def verifier_chainage(table: str, id_col="id", sig_col="signature", hash_prec_co
                 erreurs += 1
 
             if compute_hash_func:
-                computed_sig = compute_hash_func(row_dict)
+                # Une ligne dont le contenu n'est plus lisible (montant devenu texte, date absente…) est une
+                # ligne ALTÉRÉE : elle compte comme violation, elle ne doit jamais faire planter la vérification
+                # (sinon l'appelant ne voit qu'une « erreur » au lieu d'une rupture de chaîne).
+                try:
+                    computed_sig = compute_hash_func(row_dict)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[ALERTE] Ligne illisible dans {table} à l'ID {row_dict[id_col]} ({type(e).__name__}).")
+                    erreurs += 1
+                    last_sig = signature_enregistree
+                    continue
                 if computed_sig != signature_enregistree:
-                    # Rétrocompatibilité : tester les algorithmes connus (V3 HMAC, V2, V1) si compute_hash_func diverge
-                    num = row_dict.get('numero_ticket')
-                    total = row_dict.get('total_tvac')
-                    dt = row_dict.get('date_heure')
-                    caisse = row_dict.get('caisse_id', 'POS-01')
-                    details = row_dict.get('details_articles', '')
-                    candidats = [
-                        calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, numero_ticket=num, algo=HASH_ALGO_V3),
-                        calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, numero_ticket=num, algo=HASH_ALGO_V2),
-                        calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, algo=HASH_ALGO_V1),
-                    ]
+                    # Rétrocompatibilité : tester les algorithmes connus (V3 HMAC, V2, V1) si compute_hash_func
+                    # diverge. Ces candidats ne valent QUE pour les tickets (seule table qui porte total_tvac) :
+                    # appliqués au journal de caisse ou aux Z, ils calculaient sur des champs absents.
+                    candidats = []
+                    if "total_tvac" in row_dict:
+                        num = row_dict.get('numero_ticket')
+                        total = row_dict.get('total_tvac')
+                        dt = row_dict.get('date_heure')
+                        caisse = row_dict.get('caisse_id', 'POS-01')
+                        details = row_dict.get('details_articles', '')
+                        try:
+                            candidats = [
+                                calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, numero_ticket=num, algo=HASH_ALGO_V3),
+                                calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, numero_ticket=num, algo=HASH_ALGO_V2),
+                                calculer_hash_transaction(actuel_hash_prec, dt, total, caisse, details, algo=HASH_ALGO_V1),
+                            ]
+                        except Exception:  # noqa: BLE001 — contenu illisible : aucun candidat ne peut correspondre
+                            candidats = []
                     if signature_enregistree not in candidats:
                         print(f"[ALERTE] Falsification de données détectée dans {table} à l'ID {row_dict[id_col]}!")
                         erreurs += 1
@@ -217,7 +250,9 @@ def verify_database_integrity(conn=None) -> bool:
                    {prev_hash_expr}, {curr_hash_expr}, signature, hash_precedent 
             FROM Tickets ORDER BY id ASC
         """)
-        rows = c.fetchall()
+        rows = _lire_lignes(c, "Tickets")
+        if rows is None:
+            raise ValueError("Violation d'intégrité : contenu des tickets illisible (valeur altérée).")
 
         if not rows:
             print("[OK] La table des ventes (Tickets) est vide.")
@@ -250,16 +285,24 @@ def verify_database_integrity(conn=None) -> bool:
             caisse_val = caisse if caisse is not None else "POS-01"
             details_val = details if details is not None else ""
 
-            # Algorithme courant (V3 HMAC avec clé machine).
-            computed_hash = calculer_hash_transaction(
-                actuel_prev,
-                dt,
-                total,
-                caisse_val,
-                details_val,
-                numero_ticket=num,
-                algo=HASH_ALGO_COURANT,
-            )
+            # Algorithme courant (V3 HMAC avec clé machine). Un montant ou une date devenus illisibles
+            # (texte dans une colonne numérique…) = ticket altéré : violation, jamais un plantage.
+            try:
+                computed_hash = calculer_hash_transaction(
+                    actuel_prev,
+                    dt,
+                    total,
+                    caisse_val,
+                    details_val,
+                    numero_ticket=num,
+                    algo=HASH_ALGO_COURANT,
+                )
+            except Exception as e:  # noqa: BLE001
+                msg = f"Ticket illisible (ID {t_id}, {num}) : {type(e).__name__}"
+                print(f"[ALERTE] {msg}")
+                erreurs.append(msg)
+                last_hash = actuel_curr
+                continue
 
             if actuel_curr != computed_hash:
                 # Rétrocompatibilité : les maillons antérieurs (V2 SHA-256 avec ticket, V1 legacy)
@@ -293,24 +336,87 @@ def verify_database_integrity(conn=None) -> bool:
         if close_at_end:
             safe_conn.close()
 
+def hash_ledger_row(r) -> str:
+    """Empreinte attendue d'une ligne de Ledger_Caisse (r = dict de la ligne)."""
+    dt = r['date_heure']
+    dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, 'strftime') else str(dt)
+    montant_str = f"{Decimal(str(r['montant'])):.2f}"
+    data = f"{r['hash_precedent']}|{r['type_mouvement']}|{montant_str}|{r['methode_paiement']}|{r['reference']}|{dt_str}"
+    return compute_sha256(data)
+
+
+def hash_z_row(r) -> str:
+    """Empreinte attendue d'une ligne de Rapports_Z (r = dict de la ligne)."""
+    data = f"{r['hash_precedent']}|{r['date']}|{r['donnees_json']}"
+    return compute_sha256(data)
+
+
+def verifier_clotures(conn=None) -> bool:
+    """
+    Chaîne des VRAIS Z de caisse (`Clotures_Caisse`, scellés par `enregistrer_cloture_caisse`), une chaîne
+    par caisse. Ne vérifie PAS que `Rapports_Z` (journal des Z) : sans ce contrôle, une clôture dont les
+    totaux ont été retouchés après coup passait inaperçue. Lecture seule.
+    """
+    safe_conn = get_connection(conn=conn)
+    close_at_end = (conn is None)
+    try:
+        c = safe_conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Clotures_Caisse'")
+        if c.fetchone() is None:
+            return True
+        c.execute("PRAGMA table_info(Clotures_Caisse)")
+        cols = [r[1] for r in c.fetchall()]
+        if not {"hash_precedent", "current_hash", "total_ventes_tvac", "total_especes", "total_carte",
+                "date_cloture", "caisse_id"} <= set(cols):
+            return True  # base antérieure à la chaîne des Z : rien à vérifier
+        c.execute("SELECT * FROM Clotures_Caisse ORDER BY id ASC")
+        lignes = _lire_lignes(c, "Clotures_Caisse")
+        if lignes is None:
+            return False
+        derniere: dict = {}
+        erreurs = 0
+        for row in lignes:
+            r = dict(zip(cols, row))
+            courant = r.get("current_hash") or r.get("signature")
+            if courant is None:
+                continue  # Z d'une version qui ne scellait pas encore
+            caisse = r["caisse_id"]
+            prec = r.get("hash_precedent")
+            if caisse in derniere and prec != derniere[caisse]:
+                print(f"[ALERTE] Rupture de chaîne des Z (caisse {caisse}) à l'ID {r['id']}.")
+                erreurs += 1
+            try:
+                attendu = calculer_hash_cloture(prec, r["date_cloture"], caisse, r["total_ventes_tvac"],
+                                                r["total_especes"], r["total_carte"])
+            except Exception as e:  # noqa: BLE001 — montant illisible = clôture altérée
+                print(f"[ALERTE] Clôture Z illisible à l'ID {r['id']} ({type(e).__name__}).")
+                erreurs += 1
+                derniere[caisse] = courant
+                continue
+            if attendu != courant:
+                print(f"[ALERTE] Totaux d'une clôture Z modifiés après scellement (ID {r['id']}).")
+                erreurs += 1
+            derniere[caisse] = courant
+        if erreurs:
+            print(f"[DANGER] {erreurs} violation(s) d'intégrité sur Clotures_Caisse!")
+            return False
+        print("[OK] La chaîne des clôtures Z de caisse est intacte.")
+        return True
+    finally:
+        if close_at_end:
+            safe_conn.close()
+
+
 def audit_complet(conn=None) -> dict:
     """Effectue un audit cryptographique complet de toutes les tables scellées."""
-    def hash_ledger(r):
-        dt = r['date_heure']
-        dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if hasattr(dt, 'strftime') else str(dt)
-        montant_str = f"{Decimal(str(r['montant'])):.2f}"
-        data = f"{r['hash_precedent']}|{r['type_mouvement']}|{montant_str}|{r['methode_paiement']}|{r['reference']}|{dt_str}"
-        return compute_sha256(data)
-
-    def hash_z(r):
-        data = f"{r['hash_precedent']}|{r['date']}|{r['donnees_json']}"
-        return compute_sha256(data)
+    hash_ledger, hash_z = hash_ledger_row, hash_z_row
 
     print("\nLancement de l'Audit de Traçabilité & Chaînage SHA-256...\n")
     report = {
         "tickets_ok": False,
         "ledger_ok": False,
         "z_ok": False,
+        "clotures_ok": False,
         "audit_ok": False,
         "conforme": False
     }
@@ -323,9 +429,11 @@ def audit_complet(conn=None) -> dict:
 
     report["ledger_ok"] = verifier_chainage("Ledger_Caisse", compute_hash_func=hash_ledger, conn=conn)
     report["z_ok"] = verifier_chainage("Rapports_Z", compute_hash_func=hash_z, conn=conn)
+    report["clotures_ok"] = verifier_clotures(conn=conn)
     report["audit_ok"] = verifier_chainage("Audit_Trail", conn=conn)
 
-    report["conforme"] = (report["tickets_ok"] and report["ledger_ok"] and report["z_ok"] and report["audit_ok"])
+    report["conforme"] = (report["tickets_ok"] and report["ledger_ok"] and report["z_ok"]
+                          and report["clotures_ok"] and report["audit_ok"])
 
     if report["conforme"]:
         print("\n=> RÉSULTAT AUDIT : chaînage intact. Aucune altération détectée sur les "
