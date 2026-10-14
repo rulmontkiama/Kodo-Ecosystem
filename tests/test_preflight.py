@@ -278,7 +278,8 @@ class TestVersionEtDepot(Depot):
         self.assertIn("Exports_Client/ventes.csv", r.lignes)
 
         self.ecrire("config.py", 'TOKEN = "shpat_' + "a" * 32 + '"\n')
-        self.ecrire("cle.txt", "-----BEGIN PRIVATE KEY-----\nxx\n")
+        # Fixture bâtie par concaténation : le littéral complet dans CE fichier suivi ferait signaler le test lui-même.
+        self.ecrire("cle.txt", "-----BEGIN " + "PRIVATE KEY-----\nxx\n")
         self.ecrire("firebase-adminsdk-abc.json", "{}")
         self._git("add", "-A")
         r = pf.g_secrets(self.ctx())
@@ -447,17 +448,19 @@ class TestFront(Depot):
         os.makedirs(front)
         self.assertEqual(pf.g_front(self.ctx(front=front)).statut, pf.SKIP)
 
-    def test_version_annoncee_par_l_interface(self):
+    def test_version_annoncee_par_les_notes_de_version(self):
         front = os.path.join(self.tmp, "front")
         os.makedirs(os.path.join(front, "src/components/Modals"))
-        open(os.path.join(front, "src/components/Sidebar.tsx"), "w").write('  currentVersion = "2.1.2",\n')
-        open(os.path.join(front, "src/components/Modals/WhatsNewModal.tsx"), "w").write('  version: "v2.1.2",\n')
-        open(os.path.join(front, "src/App.tsx"), "w").write("localStorage.setItem('kodo_installed_version', '2.1.2');\n")
-        self.assertEqual(pf.g_front_version(self.ctx(front=front, version_publiee="2.1.2")).statut, pf.PASS)
+        notes = os.path.join(front, "src/components/Modals/WhatsNewModal.tsx")
+        # Sidebar et App gardent la version de BASE du DMG : ce n'est PAS un défaut.
+        open(os.path.join(front, "src/components/Sidebar.tsx"), "w").write('  currentVersion = "2.0.5",\n')
         open(os.path.join(front, "src/App.tsx"), "w").write("localStorage.setItem('kodo_installed_version', '2.0.5');\n")
+        open(notes, "w").write('  version: "v2.1.2",\n  version: "v2.1.1",\n')
+        self.assertEqual(pf.g_front_version(self.ctx(front=front, version_publiee="2.1.2")).statut, pf.PASS)
+        open(notes, "w").write('  version: "v2.1.1",\n  version: "v2.1.0",\n')
         r = pf.g_front_version(self.ctx(front=front, version_publiee="2.1.2"))
         self.assertEqual(r.statut, pf.FAIL)
-        self.assertIn("src/App.tsx", r.lignes[0])
+        self.assertIn("WhatsNewModal.tsx", r.lignes[0])
 
 
 class TestDonnees(Depot):
@@ -575,6 +578,24 @@ class TestVerdict(unittest.TestCase):
     def test_mode_rapide_ne_lance_que_les_portes_rapides(self):
         code, r = self.lancer([self.porte("rapide", pf.PASS, rapide=True), self.porte("lente", pf.FAIL)], rapide=True)
         self.assertEqual((code, [p["id"] for p in r["portes"]]), (0, ["rapide"]))
+
+    def test_l_interface_doit_annoncer_la_version_en_preparation(self):
+        vues = {}
+
+        def espion(ctx):
+            vues["version_publiee"] = ctx.version_publiee
+            return pf.Resultat(pf.PASS, "ok")
+
+        racine = tempfile.mkdtemp(prefix="kodo_pf_lj_")
+        try:
+            os.makedirs(os.path.join(racine, "public"))
+            json.dump({"version": "2.1.1"}, open(os.path.join(racine, "public", "latest.json"), "w"))
+            self.lancer([pf.Porte("espion", "espion", espion)], root=racine, version="2.1.2")
+            self.assertEqual(vues["version_publiee"], "2.1.2")
+            self.lancer([pf.Porte("espion", "espion", espion)], root=racine, version=None)
+            self.assertEqual(vues["version_publiee"], "2.1.1")
+        finally:
+            shutil.rmtree(racine, ignore_errors=True)
 
     def test_le_catalogue_de_portes_est_coherent(self):
         ids = [p.id for p in pf.PORTES]

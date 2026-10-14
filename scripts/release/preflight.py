@@ -572,19 +572,20 @@ def g_front_version(ctx) -> Resultat:
         return Resultat(SKIP, "dossier du front introuvable")
     if not attendu:
         return Resultat(SKIP, "version attendue inconnue (latest.json illisible)")
-    trouvees = {}
-    for rel, motif in (("src/components/Sidebar.tsx", r'currentVersion\s*=\s*["\']v?([0-9][0-9.]*)'),
-                       ("src/components/Modals/WhatsNewModal.tsx", r'version:\s*["\']v?([0-9][0-9.]*)'),
-                       ("src/App.tsx", r"setItem\(\s*['\"]kodo_installed_version['\"]\s*,\s*['\"]([0-9][0-9.]*)")):
-        try:
-            m = re.search(motif, open(os.path.join(front, rel), encoding="utf-8").read())
-            trouvees[rel] = m.group(1) if m else None
-        except OSError:
-            trouvees[rel] = None
-    faux = [f"{rel} : {v or 'version introuvable'} (attendu {attendu})" for rel, v in trouvees.items() if v != attendu]
-    if faux:
-        return Resultat(FAIL, f"l'interface n'annonce pas la version {attendu}", faux)
-    return Resultat(PASS, f"Sidebar, Nouveautés et App annoncent {attendu}")
+    # Seules les NOTES DE VERSION (première entrée = la plus récente) portent la version publiée.
+    # Sidebar.tsx et App.tsx gardent la version de BASE du DMG (kodo_base.BASE_VERSION) : la version
+    # réellement installée vient du backend (/api/version). Les exiger à jour ferait échouer une
+    # release correcte (constaté sur release/2.1.1).
+    rel = "src/components/Modals/WhatsNewModal.tsx"
+    try:
+        m = re.search(r'version:\s*["\']v?([0-9][0-9.]*)', open(os.path.join(front, rel), encoding="utf-8").read())
+    except OSError:
+        return Resultat(FAIL, f"{rel} illisible")
+    trouvee = m.group(1) if m else None
+    if trouvee != attendu:
+        return Resultat(FAIL, f"les notes de version n'annoncent pas la version {attendu}",
+                        [f"{rel} : première entrée = {trouvee or 'introuvable'} (attendu {attendu})"])
+    return Resultat(PASS, f"les notes de version annoncent {attendu}")
 
 
 def _json(chemin: str) -> Optional[dict]:
@@ -852,7 +853,8 @@ def executer(args, sortie=print) -> Tuple[int, dict]:
     lj = _json(os.path.join(racine, "public", "latest.json")) or {}
     ctx = Contexte(racine, tmp, args.version, os.path.expanduser(args.front) if args.front else FRONT_PAR_DEFAUT,
                    os.path.expanduser(args.base_copie) if args.base_copie else BASE_REELLE_PAR_DEFAUT,
-                   lj.get("version"))
+                   # version que l'interface doit annoncer : celle en préparation, sinon la dernière publiée
+                   args.version or lj.get("version"))
     ignores = set(args.ignorer or [])
     if args.sans_front:
         ignores |= {"front", "front_version"}
