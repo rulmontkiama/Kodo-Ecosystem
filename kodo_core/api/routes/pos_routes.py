@@ -430,12 +430,22 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         except (TypeError, ValueError):
             return 400, {"error": "Montant invalide"}
 
+        # Un bon cadeau VENDU est un encaissement : le moyen de paiement est obligatoire (ou « Offert »
+        # pour un geste commercial). Sans lui, l'argent reçu n'entrait dans aucune écriture de caisse.
+        mode_paiement = data.get("paymentMethod") or data.get("mode") or data.get("paiement")
+        if not str(mode_paiement or "").strip():
+            return 400, {"error": "Moyen de paiement requis : Espèces, CB, QR, ou « Offert » (aucun encaissement)."}
+
         conn = database_manager.get_connection()
         try:
             cursor = conn.cursor()
-            carte = database_manager.emettre_carte_cadeau(
+            if not conn.in_transaction:
+                # Écriture exclusive : la signature du journal de caisse relit la précédente.
+                cursor.execute("BEGIN IMMEDIATE")
+            carte = database_manager.vendre_carte_cadeau(
                 cursor=cursor,
                 montant=montant,
+                mode_paiement=mode_paiement,
                 code=data.get("code"),
                 client_id=data.get("clientId"),
                 client_nom=data.get("clientName"),
@@ -447,6 +457,9 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         except ValueError as ve:
             conn.rollback()
             return 400, {"error": str(ve)}
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

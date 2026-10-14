@@ -855,13 +855,19 @@ def _initialiser_db_raw(conn):
 
 
 def generer_numero_ticket(cursor):
-    """Génère un numéro de ticket séquentiel TCK-AAAA-XXXX."""
+    """Génère un numéro de ticket séquentiel TCK-AAAA-XXXX.
+
+    Seuls les tickets de vente de l'année (TCK-AAAA-NNNN) alimentent la séquence. Les tickets de
+    remboursement (REF-TCK-AAAA-NNNN-SSSSS) et les commandes web (SHPF-…) ont leur propre forme :
+    lus à partir du 10e caractère, « REF-TCK-2026-0001-12036 » donnait « 026 », donc 26. Un retour
+    fait avant le 26e ticket de l'année faisait sauter la numérotation (…0002 puis 0027), un trou
+    que rien ne peut combler après coup."""
     annee = datetime.datetime.now().year
     cursor.execute('''
-        SELECT COALESCE(MAX(CAST(SUBSTR(numero_ticket, 10) AS INTEGER)), 0) 
-        FROM Tickets 
-        WHERE strftime('%Y', date_heure) = ?
-    ''', (str(annee),))
+        SELECT COALESCE(MAX(CAST(SUBSTR(numero_ticket, 10) AS INTEGER)), 0)
+        FROM Tickets
+        WHERE numero_ticket GLOB ?
+    ''', (f"TCK-{annee}-[0-9]*",))
     seq = cursor.fetchone()[0]
     return f"TCK-{annee}-{seq + 1:04d}"
 
@@ -1421,6 +1427,70 @@ def emettre_carte_cadeau(cursor, montant, code=None, client_id=None, client_nom=
     }
 
 
+_MODES_BON_CARTE = ("cb", "carte", "carte bancaire", "carte_bancaire", "bancontact", "visa", "mastercard", "maestro")
+_MODES_BON_OFFERT = ("offert", "gratuit", "geste commercial", "geste_commercial")
+# Libellés écrits dans le journal de caisse : toujours les mêmes, quel que soit le libellé reçu.
+_LIBELLE_ENCAISSEMENT_BON = {"especes": "Espèces", "carte": "CB", "qr": "QR"}
+
+
+def classer_encaissement_bon(mode):
+    """'especes' | 'carte' | 'qr' | 'offert' pour le règlement d'un bon cadeau VENDU, sinon ValueError.
+
+    `classer_moyen_paiement` range tout libellé inconnu dans « carte » : acceptable pour relire des
+    règlements anciens, pas pour créer une écriture de caisse à partir d'un libellé erroné."""
+    m = str(mode or "").strip().lower()
+    if not m:
+        raise ValueError("Moyen de paiement du bon cadeau requis (Espèces, CB, QR) ou « Offert ».")
+    if m in _MODES_BON_OFFERT:
+        return "offert"
+    if m in _MODES_AVOIR:
+        raise ValueError("Un bon cadeau ne peut pas être payé avec un avoir ou une autre carte cadeau.")
+    if m in _MODES_ESPECES:
+        return "especes"
+    if m in _MODES_QR:
+        return "qr"
+    if m in _MODES_BON_CARTE:
+        return "carte"
+    raise ValueError(f"Moyen de paiement non reconnu pour un bon cadeau : {mode!r} (Espèces, CB, QR ou Offert).")
+
+
+def vendre_carte_cadeau(cursor, montant, mode_paiement, code=None, client_id=None, client_nom=None, notes=None,
+                        emis_par=None, prefix="AVOIR", date_heure=None, caisse_id="POS-01"):
+    """Vend un bon cadeau : émet la carte ET inscrit l'encaissement dans le journal de caisse signé.
+
+    Jusqu'ici l'écran « Cartes cadeaux » émettait la carte sans aucune écriture : l'argent encaissé
+    n'apparaissait ni dans le Z (écart de caisse ou de terminal du même montant) ni dans les exports.
+    Un bon vendu est une dette envers la cliente, pas un chiffre d'affaires : ni ticket ni TVA (elle
+    est due à l'utilisation du bon, sur le ticket de vente qui le consomme).
+
+    `mode_paiement` = « Offert » : bon émis sans encaissement (geste commercial), aucune écriture de caisse.
+    Les écritures se font dans la transaction de l'appelant : si l'une échoue, rien n'est écrit."""
+    classe = classer_encaissement_bon(mode_paiement)
+    carte = emettre_carte_cadeau(cursor=cursor, montant=montant, code=code, client_id=client_id,
+                                 client_nom=client_nom, notes=notes, emis_par=emis_par, prefix=prefix)
+
+    from kodo_core.db.audit_trail import record_audit_event
+    if classe == "offert":
+        record_audit_event(cursor, "CARTE_CADEAU_OFFERTE", "Cartes_Cadeaux", carte["code"], emis_par or "",
+                           "OFFRE", f"Bon de {carte['initialAmount']} EUR offert, aucun encaissement")
+        carte.update({"paymentMode": "Offert", "encaisse": False})
+        return carte
+
+    montant_dec = Decimal(str(carte["initialAmount"])).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    methode = _LIBELLE_ENCAISSEMENT_BON[classe]
+    date_heure = date_heure or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    signature, hash_prec = signer_ledger(cursor, 'VENTE_BON', montant_dec, methode, carte["code"], date_heure)
+    cursor.execute("""
+        INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure,
+                                   signature, hash_precedent, caisse_id)
+        VALUES (?, 'VENTE_BON', ?, ?, ?, ?, ?, ?, ?)
+    """, (emis_par, float(montant_dec), methode, carte["code"], date_heure, signature, hash_prec, caisse_id))
+    record_audit_event(cursor, "CARTE_CADEAU_ENCAISSEE", "Cartes_Cadeaux", carte["code"], emis_par or "",
+                       "ENCAISSEMENT", f"{montant_dec} EUR encaissés ({methode})")
+    carte.update({"paymentMode": methode, "encaisse": True})
+    return carte
+
+
 def lister_cartes_cadeaux(conn=None):
     """Liste toutes les cartes cadeaux/avoirs émis, soldes actuels inclus."""
     should_close = False
@@ -1630,13 +1700,16 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
         tot_remises = sum((Decimal(str(row[4] or "0.00")) for row in ticket_rows), Decimal("0.00"))
         tot_arrondi_cash = sum((Decimal(str(row[6] or "0.00")) for row in ticket_rows), Decimal("0.00"))
 
-        # Seuls les mouvements de VENTE/REMBOURSEMENT alimentent le chiffre d'affaires
+        # Seuls les mouvements de VENTE/REMBOURSEMENT/VENTE_BON alimentent les règlements
         # espèces/carte : sans ce filtre, tout autre type de mouvement présent dans
         # Ledger_Caisse (ex. apports/prélèvements de caisse) serait compté à tort comme
         # du chiffre d'affaires, gonflant ou faussant total_especes/total_carte.
+        # VENTE_BON = bon cadeau vendu : l'argent est réellement entré dans le tiroir ou sur le
+        # terminal, mais ce n'est pas un chiffre d'affaires (aucun ticket, aucune TVA) : il entre
+        # dans les règlements ET dans `total_bons_vendus`, pour que l'équation des règlements tienne.
         c.execute("""
             SELECT id, methode_paiement, montant, reference, type_mouvement
-            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('VENTE', 'REMBOURSEMENT')""" + filtre_date, (caisse_id,) + params_date)
+            FROM Ledger_Caisse WHERE caisse_id = ? AND z_id IS NULL AND type_mouvement IN ('VENTE', 'REMBOURSEMENT', 'VENTE_BON')""" + filtre_date, (caisse_id,) + params_date)
         ledger_rows = c.fetchall()
 
         ledger_ids = [row[0] for row in ledger_rows]
@@ -1644,6 +1717,7 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
         tot_carte = Decimal("0.00")
         tot_qr = Decimal("0.00")
         tot_avoir = Decimal("0.00")
+        tot_bons_vendus = Decimal("0.00")
 
         # Classification explicite par moyen de paiement (cf. classer_moyen_paiement) : aucun
         # paiement QR ni avoir n'a jamais transité par le terminal CB.
@@ -1661,6 +1735,8 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
                 tot_carte += mt_dec
             if tm == "VENTE":
                 lignes_par_ticket.setdefault(ref, []).append((classe, mt_dec))
+            elif tm == "VENTE_BON":
+                tot_bons_vendus += mt_dec
 
         # Régularisation du rendu de monnaie : d'anciennes versions déduisaient le rendu deux
         # fois dans le journal de caisse (montant encaissé = total - rendu au lieu du total).
@@ -1685,8 +1761,9 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
         # Le total encaissé légalement dû = CA brut + somme des écarts d'arrondi espèces.
         # Sans ce terme, l'arrondi légal apparaissait chaque jour comme une anomalie de
         # règlement, rendant impossible la détection d'un vrai écart de caisse.
+        # Les bons cadeaux vendus sont encaissés (donc dans les règlements) sans être du chiffre d'affaires.
         ecart_reglements = (
-            (tot_tvac + tot_arrondi_cash) - (tot_esp + tot_carte + tot_qr + tot_avoir)
+            (tot_tvac + tot_arrondi_cash + tot_bons_vendus) - (tot_esp + tot_carte + tot_qr + tot_avoir)
         ).quantize(Decimal("0.01"))
 
         # Apports/prélèvements de la période en cours (non encore clôturés) : suivis
@@ -1718,6 +1795,7 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
             "total_carte": tot_carte,
             "total_qr": tot_qr,
             "total_avoir": tot_avoir,
+            "total_bons_vendus": tot_bons_vendus,
             "total_arrondi_cash": tot_arrondi_cash,
             "regularisation_rendu": regularisation_rendu,
             "ecart_reglements": ecart_reglements,
@@ -1733,14 +1811,17 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
 
 def _assurer_colonne_periode_z(cursor):
     """Ajoute à Clotures_Caisse les colonnes récentes si absentes : periode_jusqu_au (dernier jour
-    couvert par le Z), total_qr, total_avoir et total_arrondi_cash. Ces colonnes ne font pas partie du hash de la chaîne NF525."""
+    couvert par le Z), total_qr, total_avoir, total_arrondi_cash et total_bons_vendus (bons cadeaux
+    encaissés, inclus dans les règlements mais pas dans le chiffre d'affaires). Ces colonnes ne font
+    pas partie du hash de la chaîne NF525."""
     cursor.execute("PRAGMA table_info(Clotures_Caisse)")
     existantes = [row[1] for row in cursor.fetchall()]
     for col, ddl in (
         ("periode_jusqu_au", "TEXT"),
         ("total_qr", "DECIMAL DEFAULT '0.00'"),
         ("total_avoir", "DECIMAL DEFAULT '0.00'"),
-        ("total_arrondi_cash", "DECIMAL DEFAULT '0.00'")
+        ("total_arrondi_cash", "DECIMAL DEFAULT '0.00'"),
+        ("total_bons_vendus", "DECIMAL DEFAULT '0.00'")
     ):
         if col not in existantes:
             cursor.execute(f"ALTER TABLE Clotures_Caisse ADD COLUMN {col} {ddl}")
@@ -1795,14 +1876,15 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
                 date_cloture, caisse_id, total_ventes_tvac, total_htva, total_tva,
                 total_especes, total_carte, total_remises, total_tickets,
                 fond_caisse_reel, ecart, vendeur, hash_precedent, current_hash, signature, created_at_utc,
-                periode_jusqu_au, total_qr, total_avoir, total_arrondi_cash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                periode_jusqu_au, total_qr, total_avoir, total_arrondi_cash, total_bons_vendus
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             now_str, caisse_id, float(bilan["total_tvac"]), float(bilan["total_htva"]), float(bilan["total_tva"]),
             float(bilan["total_especes"]), float(bilan["total_carte"]), float(bilan["total_remises"]),
             bilan["nb_tickets"], float(fond_reel_dec), float(ecart), vendeur,
             hash_prec, curr_hash, curr_hash, now_utc, jusqu_au,
-            float(bilan["total_qr"]), float(bilan["total_avoir"]), float(tot_arrondi)
+            float(bilan["total_qr"]), float(bilan["total_avoir"]), float(tot_arrondi),
+            float(bilan.get("total_bons_vendus", Decimal("0.00")))
         ))
         z_id = c.lastrowid
 
@@ -1840,7 +1922,8 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
             "nb_tickets": bilan["nb_tickets"],
             "jusqu_au": jusqu_au,
             "ecart": float(ecart),
-            "total_arrondi_cash": float(tot_arrondi)
+            "total_arrondi_cash": float(tot_arrondi),
+            "total_bons_vendus": float(bilan.get("total_bons_vendus", Decimal("0.00")))
         }
     finally:
         if should_close:

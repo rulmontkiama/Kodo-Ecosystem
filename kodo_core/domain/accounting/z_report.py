@@ -151,7 +151,7 @@ class ZReportEngine:
 
             # Conversion des Decimals en floats pour la sérialisation
             for key in ["total_tvac", "total_htva", "total_tva", "total_remises", "total_especes",
-                        "total_carte", "total_qr", "total_avoir", "total_arrondi_cash", "total_apports", "total_prelevements",
+                        "total_carte", "total_qr", "total_avoir", "total_bons_vendus", "total_arrondi_cash", "total_apports", "total_prelevements",
                         "regularisation_rendu", "ecart_reglements"]:
                 if key in bilan and isinstance(bilan[key], Decimal):
                     bilan[key] = float(bilan[key])
@@ -290,11 +290,12 @@ class ZReportEngine:
             cursor.execute("PRAGMA table_info(Clotures_Caisse)")
             cols = [r[1] for r in cursor.fetchall()]
             has_arrondi = "total_arrondi_cash" in cols
+            has_bons = "total_bons_vendus" in cols
 
             cursor.execute(f"""
                 SELECT id, date_cloture, caisse_id, total_ventes_tvac, total_htva, total_tva,
                        total_especes, total_carte, total_remises, total_tickets, fond_caisse_reel,
-                       ecart, vendeur, current_hash, signature, created_at_utc{", COALESCE(total_arrondi_cash, 0.0)" if has_arrondi else ", 0.0"}
+                       ecart, vendeur, current_hash, signature, created_at_utc{", COALESCE(total_arrondi_cash, 0.0)" if has_arrondi else ", 0.0"}{", COALESCE(total_bons_vendus, 0.0)" if has_bons else ", 0.0"}
                 FROM Clotures_Caisse
                 ORDER BY id DESC
                 LIMIT ?
@@ -319,7 +320,8 @@ class ZReportEngine:
                     "vendeur": r[12] or "Admin",
                     "hash": r[13] or r[14] or "",
                     "created_at_utc": r[15] or "",
-                    "total_arrondi_cash": float(r[16]) if len(r) > 16 else 0.0
+                    "total_arrondi_cash": float(r[16]) if len(r) > 16 else 0.0,
+                    "total_bons_vendus": float(r[17]) if len(r) > 17 else 0.0
                 })
 
             return reports
@@ -345,7 +347,7 @@ class ZReportEngine:
         fieldnames = [
             "id", "date_cloture", "caisse_id", "total_ventes_tvac", "total_htva",
             "total_tva", "total_especes", "total_carte", "total_remises", "total_tickets",
-            "total_arrondi_cash", "fond_caisse_reel", "ecart", "vendeur", "hash"
+            "total_arrondi_cash", "total_bons_vendus", "fond_caisse_reel", "ecart", "vendeur", "hash"
         ]
 
         with open(output_path, "w", newline="", encoding="utf-8-sig") as csvfile:

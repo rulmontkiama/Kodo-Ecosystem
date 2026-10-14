@@ -57,13 +57,172 @@ def _ensure_dir():
     os.makedirs(EXPORT_DIR, exist_ok=True)
     return EXPORT_DIR
 
+# ---------------------------------------------------------------------------
+# Écritures comptables : règlements par moyen, TVA par taux, bons cadeaux
+# ---------------------------------------------------------------------------
+
+# Comptes par défaut (plan comptable belge usuel). Chacun est remplaçable par un paramètre
+# `compta_compte_<nom>` (table Parametres) : l'expert-comptable de la boutique impose parfois les siens.
+COMPTES_DEFAUT = {
+    "caisse": "570000",  # règlements en espèces
+    "banque": "580000",  # carte bancaire, QR, virement, commandes web
+    "ventes": "700000",
+    "tva": "451000",
+    "bons": "460000",    # dette envers les clientes : bons cadeaux vendus et avoirs non utilisés
+}
+TAUX_TVA_USUELS = (Decimal("0"), Decimal("0.06"), Decimal("0.12"), Decimal("0.21"))
+_DEUX_DECIMALES = Decimal("0.01")
+
+
+def _comptes_export(c):
+    """Comptes des écritures : valeurs par défaut, remplacées par les paramètres `compta_compte_*` valides."""
+    comptes = dict(COMPTES_DEFAUT)
+    try:
+        c.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'compta_compte_%'")
+        for cle, valeur in c.fetchall():
+            nom = str(cle)[len("compta_compte_"):]
+            numero = str(valeur or "").strip()
+            if nom in comptes and re.fullmatch(r"[0-9]{3,10}", numero):
+                comptes[nom] = numero
+    except Exception:
+        pass
+    return comptes
+
+
+def _arrondi(valeur):
+    return Decimal(str(valeur or 0)).quantize(_DEUX_DECIMALES, rounding=ROUND_HALF_UP)
+
+
+def _montant_csv(valeur):
+    return f"{_arrondi(valeur):.2f}".replace(".", ",")
+
+
+def _code_tva(taux):
+    """Taux (0.21) -> code de la ligne de vente (« 21 »). 0.06 -> « 06 », exonéré -> « 00 »."""
+    pourcent = (Decimal(str(taux)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return f"{int(pourcent):02d}"
+
+
+def _methode_lue(methode):
+    """« REMB (Avoir) » (ticket de remboursement) se lit « Avoir » ; toute autre valeur est gardée telle quelle."""
+    texte = str(methode or "").strip()
+    interieur = re.search(r"\(([^)]*)\)", texte)
+    if texte.upper().startswith("REMB") and interieur:
+        return interieur.group(1).strip()
+    return texte
+
+
+def _classe_reglement(methode):
+    """'especes' | 'carte' | 'qr' | 'avoir' (même classification que la clôture Z)."""
+    from database_manager import classer_moyen_paiement
+    return classer_moyen_paiement(_methode_lue(methode))
+
+
+def _compte_reglement(classe, comptes):
+    if classe == "especes":
+        return comptes["caisse"]
+    if classe == "avoir":
+        return comptes["bons"]
+    return comptes["banque"]
+
+
+def _lignes_reglement(c, numero_ticket, total_tvac, methode_ticket):
+    """[(classe, libellé, montant)] : règlements d'un ticket, tous montants positifs.
+
+    Relus dans le journal de caisse signé (un par moyen réellement utilisé), puis ramenés au total
+    du ticket : le rendu de monnaie et l'arrondi légal de 5 centimes sont portés par les espèces,
+    à défaut par le règlement le plus gros. L'export lisait seulement `Tickets.methode_paiement`,
+    qui ne garde que le PREMIER moyen : un ticket réglé 30 € CB + 41,10 € espèces passait en entier
+    en carte, et un règlement par bon (avoir) était posté sur la banque."""
+    cible = _arrondi(abs(Decimal(str(total_tvac or 0))))
+    c.execute(
+        "SELECT methode_paiement, montant FROM Ledger_Caisse "
+        "WHERE reference = ? AND type_mouvement IN ('VENTE', 'REMBOURSEMENT') ORDER BY id",
+        (numero_ticket,),
+    )
+    lignes = []
+    for methode, montant in c.fetchall():
+        m = _arrondi(abs(Decimal(str(montant or 0))))
+        if m > 0:
+            lignes.append([_classe_reglement(methode), _methode_lue(methode) or "Inconnu", m])
+
+    def _repli():
+        return [[_classe_reglement(methode_ticket), _methode_lue(methode_ticket) or "Inconnu", cible]]
+
+    if not lignes:
+        lignes = _repli()
+    ecart = cible - sum((m for _c, _l, m in lignes), Decimal("0.00"))
+    if ecart != 0:
+        indice = next((i for i, ligne in enumerate(lignes) if ligne[0] == "especes"), None)
+        if indice is None:
+            indice = max(range(len(lignes)), key=lambda i: lignes[i][2])
+        lignes[indice][2] += ecart
+        if lignes[indice][2] <= 0:
+            lignes = _repli()
+
+    regroupees = {}
+    for classe, libelle, m in lignes:
+        regroupees[(classe, libelle)] = regroupees.get((classe, libelle), Decimal("0.00")) + m
+    return [(classe, libelle, m) for (classe, libelle), m in regroupees.items() if m > 0]
+
+
+def _ventiler_tva_ticket(c, ticket_id, total_tvac, total_htva):
+    """[(taux, htva, tva, tvac)] par taux de TVA ; la somme égale EXACTEMENT les totaux du ticket.
+
+    `Ventes_Details.prix_unitaire_tvac` garde le prix AVANT remise globale : chaque taux est pondéré
+    par le rapport total net / total brut du ticket (même méthode que la clôture Z), puis le résidu
+    d'arrondi est reporté sur le taux le plus important, jamais l'inverse (le ticket scellé fait foi)."""
+    total_tvac = Decimal(str(total_tvac or 0))
+    total_htva = Decimal(str(total_htva or 0))
+    c.execute(
+        """
+        SELECT p.taux_tva, SUM(vd.quantite * vd.prix_unitaire_tvac)
+        FROM Ventes_Details vd
+        LEFT JOIN Stocks s ON s.id = vd.id_stock
+        LEFT JOIN Produits p ON p.id = s.id_produit
+        WHERE vd.id_ticket = ?
+        GROUP BY p.taux_tva
+        """,
+        (ticket_id,),
+    )
+    bruts = {}
+    for taux, brut in c.fetchall():
+        taux_dec = Decimal(str(taux)) if taux is not None else Decimal("0.21")
+        bruts[taux_dec] = bruts.get(taux_dec, Decimal("0")) + Decimal(str(brut or 0))
+    somme_brute = sum(bruts.values(), Decimal("0"))
+
+    if not bruts or somme_brute == 0:
+        # Ticket sans ligne exploitable : un seul groupe, au taux usuel le plus proche des totaux.
+        taux = Decimal("0.21")
+        if total_htva != 0:
+            implicite = (total_tvac - total_htva) / total_htva
+            taux = min(TAUX_TVA_USUELS, key=lambda t: abs(t - implicite))
+        htva = _arrondi(total_htva) if total_htva != 0 else _arrondi(total_tvac / (Decimal("1") + taux))
+        tvac = _arrondi(total_tvac)
+        return [(taux, htva, tvac - htva, tvac)]
+
+    rapport = total_tvac / somme_brute
+    groupes = {taux: _arrondi(brut * rapport) for taux, brut in bruts.items()}
+    plus_gros = max(groupes, key=lambda t: abs(groupes[t]))
+    groupes[plus_gros] += _arrondi(total_tvac) - sum(groupes.values(), Decimal("0"))
+
+    htvas = {taux: _arrondi(tvac / (Decimal("1") + taux)) for taux, tvac in groupes.items()}
+    if total_htva != 0 or total_tvac == 0:
+        plus_gros_h = max(htvas, key=lambda t: abs(groupes[t]))
+        htvas[plus_gros_h] += _arrondi(total_htva) - sum(htvas.values(), Decimal("0"))
+    return [(taux, htvas[taux], groupes[taux] - htvas[taux], groupes[taux]) for taux in sorted(groupes)]
+
+
 def export_comptable_belge():
     """
-    Exporte un CSV normé comptabilité belge.
+    Exporte un CSV normé comptabilité belge, une ligne par article vendu ou remboursé.
     Colonnes : Date, Numéro Ticket, Code Article, Nom Article,
                Montant TVAC, Base HTVA, Montant TVA, Moyen de Paiement.
     Retourne le chemin du fichier créé ou lève une exception.
-    """
+
+    Les montants sont ceux réellement payés : `prix_unitaire_tvac` garde le prix avant remise
+    globale, chaque ligne est donc pondérée par le rapport total net / total brut de son ticket
+    (un retour sur un ticket remisé se lit ainsi au prix rendu, pas au prix affiché)."""
     conn = get_connection()
     c = conn.cursor()
     # Jointure Tickets × Ventes_Details × Produits via Stocks
@@ -76,7 +235,9 @@ def export_comptable_belge():
             COALESCE(vd.quantite, 1),
             vd.prix_unitaire_tvac,
             COALESCE(p.taux_tva, 0.21),
-            t.methode_paiement
+            t.methode_paiement,
+            t.id,
+            t.total_tvac
         FROM Tickets t
         JOIN Ventes_Details vd ON vd.id_ticket = t.id
         JOIN Stocks s          ON s.id = vd.id_stock
@@ -84,13 +245,28 @@ def export_comptable_belge():
         ORDER BY t.date_heure DESC
     """)
     rows = c.fetchall()
-    conn.close()
+
+    brut_par_ticket = {}
+    for _d, _n, _c, _nom, qte, pu_tvac, _taux, _m, t_id, _tot in rows:
+        brut_par_ticket[t_id] = brut_par_ticket.get(t_id, Decimal("0")) + (
+            Decimal(str(pu_tvac or 0)) * Decimal(str(qte or 1)))
+
+    moyens = {}
+
+    def _moyen_de_paiement(t_id, numero, total, methode):
+        if numero not in moyens:
+            libelles = [libelle for _classe, libelle, _m in _lignes_reglement(c, numero, total, methode)]
+            texte = " + ".join(libelles) if libelles else str(methode or "")
+            moyens[numero] = f"REMB ({texte})" if Decimal(str(total or 0)) < 0 else texte
+        return moyens[numero]
 
     records = []
-    for date_heure, ticket, code, nom, qte, pu_tvac, taux, methode in rows:
+    for date_heure, ticket, code, nom, qte, pu_tvac, taux, methode, t_id, total_net in rows:
         qte_d  = Decimal(str(qte or 1))
         pu_d   = Decimal(str(pu_tvac or 0))
-        tvac_d = (pu_d * qte_d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        brut   = brut_par_ticket.get(t_id, Decimal("0"))
+        rapport = (Decimal(str(total_net)) / brut) if (total_net is not None and brut != 0) else Decimal("1")
+        tvac_d = (pu_d * qte_d * rapport).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         taux_d = Decimal(str(taux or 0.21))
         htva   = (tvac_d / (Decimal("1") + taux_d)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         tva    = (tvac_d - htva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -105,8 +281,9 @@ def export_comptable_belge():
             "Base HTVA (€)":     str(htva).replace(".", ","),
             "Montant TVA (€)":   str(tva).replace(".", ","),
             "Taux TVA":          f"{float(taux_d)*100:.0f}%",
-            "Moyen de Paiement": methode,
+            "Moyen de Paiement": _moyen_de_paiement(t_id, ticket, total_net, methode),
         })
+    conn.close()
 
     _ensure_dir()
     ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -125,79 +302,94 @@ def export_comptable_belge():
 def export_winbooks_csv(mois=None, annee=None):
     """
     Exporte un CSV formaté pour les logiciels comptables belges (ex: WinBooks, Exact).
-    Génère des écritures en partie double (Débit/Crédit) avec des comptes généraux par défaut.
-    """
+    Écritures en partie double (Débit/Crédit), comptes par défaut dans `COMPTES_DEFAUT`.
+
+    - Vente : débit des règlements (espèces -> caisse, carte/QR/web -> banque, bon ou avoir utilisé ->
+      dette « bons »), crédit des ventes HTVA et de la TVA, UNE ligne par taux (code TVA = le taux).
+    - Retour / avoir : écriture inverse, en montants POSITIFS (débit des ventes et de la TVA à
+      régulariser, crédit du moyen de remboursement : caisse, banque, ou dette « bons » pour un avoir).
+    - Bon cadeau vendu : débit caisse/banque, crédit dette « bons », sans TVA (elle est due à
+      l'utilisation du bon, sur le ticket qui le consomme).
+    L'arrondi légal de 5 centimes n'est pas ventilé : les règlements sont ramenés au total du ticket."""
     conn = get_connection()
     c = conn.cursor()
-    
-    query = """
-        SELECT
-            numero_ticket,
-            date_heure,
-            total_tvac,
-            total_htva,
-            total_tva,
-            methode_paiement
-        FROM Tickets
-    """
-    params = []
-    if mois and annee:
-        query += " WHERE strftime('%m', date_heure) = ? AND strftime('%Y', date_heure) = ?"
-        params.extend([f"{int(mois):02d}", str(annee)])
-        
-    query += " ORDER BY date_heure DESC"
-    
-    c.execute(query, params)
-    rows = c.fetchall()
-    conn.close()
+    comptes = _comptes_export(c)
 
-    records = []
-    for num, date_heure, tvac, htva, tva, methode in rows:
+    filtre, params = "", []
+    if mois and annee:
+        filtre = "strftime('%m', date_heure) = ? AND strftime('%Y', date_heure) = ?"
+        params = [f"{int(mois):02d}", str(annee)]
+
+    c.execute(
+        "SELECT id, numero_ticket, date_heure, total_tvac, total_htva, total_tva, methode_paiement FROM Tickets"
+        + (" WHERE " + filtre if filtre else "") + " ORDER BY date_heure ASC, id ASC",
+        params,
+    )
+    tickets = c.fetchall()
+
+    c.execute(
+        "SELECT id, date_heure, methode_paiement, montant, reference FROM Ledger_Caisse "
+        "WHERE type_mouvement = 'VENTE_BON'" + (" AND " + filtre if filtre else "") + " ORDER BY date_heure ASC, id ASC",
+        params,
+    )
+    bons = c.fetchall()
+
+    ecritures = []  # (date_heure, ordre, enregistrement)
+
+    def ecrire(ordre, date_heure, document, compte, libelle, sens, montant, code_tva=""):
+        montant = _arrondi(montant)
+        if montant == 0:
+            return
         date_str = str(date_heure)[:10]
-        periode = date_str[:7].replace("-", "")
-        date_format = date_str[8:10] + "/" + date_str[5:7] + "/" + date_str[:4]
-        
-        # 1. Ligne Débit (Paiement)
-        # 580000 pour virement/carte, 570000 pour caisse espèces
-        compte_debit = "570000" if methode == "Espèces" else "580000"
-        records.append({
+        ecritures.append((str(date_heure), ordre, {
             "Code Journal": "VEN",
-            "Période": periode,
-            "Date": date_format,
-            "Document": num,
-            "Compte": compte_debit,
-            "Libellé": f"Recette {methode}",
-            "Sens": "D",
-            "Montant": str(Decimal(str(tvac))).replace(".", ","),
-            "Code TVA": ""
-        })
-        
-        # 2. Ligne Crédit (Vente HTVA)
-        records.append({
-            "Code Journal": "VEN",
-            "Période": periode,
-            "Date": date_format,
-            "Document": num,
-            "Compte": "700000",
-            "Libellé": "Vente Marchandises",
-            "Sens": "C",
-            "Montant": str(Decimal(str(htva))).replace(".", ","),
-            "Code TVA": "21" if abs(Decimal(str(tva))) > 0 else "00"
-        })
-        
-        # 3. Ligne Crédit (TVA Due / A Régulariser)
-        if abs(Decimal(str(tva))) > Decimal("0.00"):
-            records.append({
-                "Code Journal": "VEN",
-                "Période": periode,
-                "Date": date_format,
-                "Document": num,
-                "Compte": "451000",
-                "Libellé": "TVA à payer" if Decimal(str(tva)) >= 0 else "TVA à régulariser (Avoir)",
-                "Sens": "C",
-                "Montant": str(Decimal(str(tva))).replace(".", ","),
-                "Code TVA": ""
-            })
+            "Période": date_str[:7].replace("-", ""),
+            "Date": date_str[8:10] + "/" + date_str[5:7] + "/" + date_str[:4],
+            "Document": document,
+            "Compte": compte,
+            "Libellé": libelle,
+            "Sens": sens,
+            "Montant": _montant_csv(montant),
+            "Code TVA": code_tva,
+        }))
+
+    for t_id, numero, date_heure, tvac, htva, tva, methode in tickets:
+        total = Decimal(str(tvac or 0))
+        if total == 0:
+            continue
+        ordre = (0, t_id)
+        vente = total > 0
+        for classe, libelle, montant in _lignes_reglement(c, numero, total, methode):
+            compte = _compte_reglement(classe, comptes)
+            if vente:
+                texte = "Règlement par bon / avoir (dette)" if classe == "avoir" else f"Recette {libelle}"
+                ecrire(ordre, date_heure, numero, compte, texte, "D", montant)
+            else:
+                texte = "Avoir remis à la cliente (dette)" if classe == "avoir" else f"Remboursement {libelle}"
+                ecrire(ordre, date_heure, numero, compte, texte, "C", montant)
+        for taux, htva_g, tva_g, _tvac_g in _ventiler_tva_ticket(c, t_id, total, htva):
+            code = _code_tva(taux) if abs(tva_g) > 0 or abs(htva_g) > 0 else "00"
+            pourcent = (Decimal(str(taux)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            if vente:
+                ecrire(ordre, date_heure, numero, comptes["ventes"], "Vente Marchandises", "C", abs(htva_g), code)
+                ecrire(ordre, date_heure, numero, comptes["tva"], f"TVA à payer {pourcent}%", "C", abs(tva_g))
+            else:
+                ecrire(ordre, date_heure, numero, comptes["ventes"], "Retour marchandises (avoir client)",
+                       "D", abs(htva_g), code)
+                ecrire(ordre, date_heure, numero, comptes["tva"], f"TVA à régulariser (avoir) {pourcent}%",
+                       "D", abs(tva_g))
+
+    for b_id, date_heure, methode, montant, code_bon in bons:
+        classe = _classe_reglement(methode)
+        ordre = (1, b_id)
+        ecrire(ordre, date_heure, code_bon, _compte_reglement(classe, comptes),
+               f"Bon cadeau vendu ({_methode_lue(methode) or 'Inconnu'})", "D", abs(Decimal(str(montant or 0))))
+        ecrire(ordre, date_heure, code_bon, comptes["bons"],
+               "Bon cadeau vendu (dette envers la cliente)", "C", abs(Decimal(str(montant or 0))))
+
+    conn.close()
+    ecritures.sort(key=lambda e: (e[0], e[1]))
+    records = [e[2] for e in ecritures]
 
     _ensure_dir()
     ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -210,7 +402,6 @@ def export_winbooks_csv(mois=None, annee=None):
         writer.writeheader()
         writer.writerows(records)
     return path
-
 
 
 def export_synthese_gerant(comptage_details=None):

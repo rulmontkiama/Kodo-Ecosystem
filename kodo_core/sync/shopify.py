@@ -328,6 +328,24 @@ def _ouvrir_ecriture(conn):
     return c
 
 
+def _sceller_tickets(conn, numeros):
+    """Scelle dans le journal fiscal les tickets (commande web, remboursement) qui viennent d'être commités.
+
+    Ces tickets étaient signés dans la chaîne des tickets mais absents du journal fiscal inaltérable,
+    qui ne recevait que les ventes de caisse. Ne lève jamais : un incident de scellement ne doit ni
+    défaire une commande importée ni bloquer la synchronisation (le ticket est alors journalisé et
+    rescellé au prochain démarrage, cf. `fiscal_service.sceller_ticket`)."""
+    try:
+        from kodo_core.services.fiscal_service import sceller_ticket
+    except Exception:
+        return
+    for numero in numeros or ():
+        try:
+            sceller_ticket(conn, numero)
+        except Exception as e:  # pragma: no cover - sceller_ticket ne lève pas
+            logger.warning(f"[FISCAL LEDGER] Scellement du ticket {numero} impossible : {e}")
+
+
 def _assurer_tables_sync(cursor):
     """
     Tables de travail de la synchronisation Shopify.
@@ -2448,6 +2466,7 @@ class ShopifySync:
                     """, (total_price, num_ticket, date_heure, sig_ledger, hash_ledger))
 
                     conn.commit()
+                    _sceller_tickets(conn, [num_ticket])
                     imported_orders += 1
                     logger.info(f"Commande #{order_number} synchronisée avec succès.")
 
@@ -2757,6 +2776,7 @@ class ShopifySync:
                  ",".join(tickets_crees), str(montant_total), date_heure),
             )
             conn.commit()
+            _sceller_tickets(conn, tickets_crees)
             if tickets_crees:
                 logger.info(
                     f"Remboursement Shopify {remb.get('id')} (commande #{order_number}) enregistré : "

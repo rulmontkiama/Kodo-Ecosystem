@@ -707,6 +707,15 @@ def process_return_transaction(
         except Exception:
             pass
 
+        # Le retour est un ticket négatif : il entre dans le journal fiscal scellé comme une vente
+        # (sinon la somme scellée dépasse le chiffre d'affaires réel du montant des retours).
+        # Après le commit, et sans jamais défaire un remboursement déjà rendu à la cliente.
+        try:
+            from kodo_core.services.fiscal_service import sceller_ticket
+            sceller_ticket(conn, new_ref)
+        except Exception as fe:
+            print(f"[FISCAL LEDGER WARNING] Retour {new_ref} non scellé : {fe}")
+
         res = {
             "success": True,
             "refund_ticket_number": new_ref,

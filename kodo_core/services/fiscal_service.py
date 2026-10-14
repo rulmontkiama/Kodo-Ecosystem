@@ -146,6 +146,51 @@ def _next_sequence_number(cursor: sqlite3.Cursor, year: int) -> str:
     return format_sequence_number(last_index + 1, year)
 
 
+def sceller_ticket(conn: sqlite3.Connection, numero_ticket: str):
+    """Scelle dans le journal fiscal un ticket DÉJÀ enregistré (retour, commande web), montants relus en base.
+
+    Le journal ne recevait que les ventes de caisse : un retour (ticket REF, montants négatifs) et une
+    commande web n'y figuraient pas, donc la somme scellée ne rejoignait pas le chiffre d'affaires réel.
+    Appelé APRÈS le commit du ticket, comme pour une vente : si le scellement échoue, le ticket est
+    journalisé dans `fiscal_unsealed_sales` et rescellé au prochain démarrage.
+
+    Idempotent (un ticket déjà scellé ou déjà en attente est ignoré). Ne lève jamais : un incident de
+    scellement ne doit pas défaire un remboursement déjà rendu à la cliente. Retourne l'entrée scellée
+    (dict de `seal_sale`) ou None."""
+    try:
+        ensure_schema(conn)
+        row = conn.execute(
+            "SELECT id, total_tvac, total_htva, total_tva FROM Tickets WHERE numero_ticket = ?",
+            (numero_ticket,),
+        ).fetchone()
+        if not row:
+            return None
+        ticket_id, tvac, htva, tva = row
+        if conn.execute("SELECT 1 FROM fiscal_ledger WHERE sale_id = ?", (ticket_id,)).fetchone():
+            return None
+        if conn.execute("SELECT 1 FROM fiscal_unsealed_sales WHERE sale_id = ?", (ticket_id,)).fetchone():
+            return None
+        totals = {
+            "total_ttc": Decimal(str(tvac or "0")),
+            "total_ht": Decimal(str(htva or "0")),
+            "total_tva": Decimal(str(tva or "0")),
+        }
+        try:
+            return seal_sale(conn, ticket_id, totals)
+        except Exception as erreur:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                record_unsealed_sale(conn, ticket_id, totals, str(erreur))
+            except Exception:
+                pass
+            return None
+    except Exception:
+        return None
+
+
 def seal_sale(db_conn: sqlite3.Connection, sale_id: int, totals: dict) -> dict:
     """
     Enregistre une vente dans le journal fiscal inaltérable, de manière atomique.
