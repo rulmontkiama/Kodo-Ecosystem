@@ -6,6 +6,7 @@ de la chaîne complète. Aucune dépendance UI.
 """
 
 import hashlib
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,6 +19,9 @@ from kodo_core.domain.accounting.ledger import GENESIS_HASH, build_hash_payload,
 from kodo_core.domain.sales.models import quantize_money
 
 TWO_DECIMALS = Decimal("0.01")
+
+logger = logging.getLogger(__name__)
+_unique_index_warned = False
 
 
 class FiscalTamperDetectedError(Exception):
@@ -72,8 +76,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # 1 ticket = 1 scellement (garantie d'unicité NF525)
     try:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_fiscal_ledger_sale ON fiscal_ledger(sale_id)")
-    except (sqlite3.OperationalError, sqlite3.IntegrityError):
-        pass
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        # Doublons déjà présents (ou base en lecture seule) : l'unicité n'est PAS imposée.
+        # On ne bloque pas l'encaissement, mais on le signale (une seule fois par processus,
+        # `ensure_schema` étant appelé à chaque vente).
+        global _unique_index_warned
+        if not _unique_index_warned:
+            _unique_index_warned = True
+            logger.error(
+                "[FISCAL LEDGER] ux_fiscal_ledger_sale non créé (%s) : un ticket peut être scellé "
+                "plusieurs fois. Corriger les doublons de fiscal_ledger.sale_id puis relancer.", exc
+            )
 
     if not conn.in_transaction:
         conn.commit()

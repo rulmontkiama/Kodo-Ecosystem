@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import sqlite3
+import threading
 import unittest
 from unittest.mock import patch
 from decimal import Decimal
@@ -268,6 +269,76 @@ class TestFiscalSaleAtomicity(unittest.TestCase):
             self.assertEqual(Decimal(str(c.fetchone()[0])), Decimal("100.00"))
 
             self.assertTrue(audit_ledger_integrity(conn))
+        finally:
+            conn.close()
+
+    def test_concurrent_sales_produce_one_contiguous_unforked_chain(self):
+        """N caisses simultanées : une seule chaîne SHA-256 (previous_hash unique), séquence sans trou ni doublon."""
+        n_threads, ventes_par_fil = 4, 2
+        depart = threading.Barrier(n_threads)
+        incidents = []
+
+        def encaisser():
+            conn = database_manager.get_connection()
+            try:
+                depart.wait(timeout=10)
+                for _ in range(ventes_par_fil):
+                    process_sale_transaction(
+                        cart_items=[{"stock_id": self.stock_id, "quantite": 1}],
+                        payments=[("CB", 100.00)],
+                        total_tvac=100.00,
+                        conn=conn,
+                    )
+            except Exception as exc:  # noqa: BLE001 - motif exact dans le rapport
+                incidents.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                conn.close()
+
+        fils = [threading.Thread(target=encaisser) for _ in range(n_threads)]
+        for f in fils:
+            f.start()
+        for f in fils:
+            f.join(timeout=60)
+
+        total = n_threads * ventes_par_fil
+        self.assertEqual(incidents, [], "aucun encaissement ne doit échouer sous contention")
+
+        conn = database_manager.get_connection()
+        try:
+            c = conn.cursor()
+            rows = c.execute(
+                "SELECT sequence_number, sale_id, previous_hash, current_hash FROM fiscal_ledger ORDER BY id"
+            ).fetchall()
+            self.assertEqual(len(rows), total)
+            # Pas de fork : chaque previous_hash est unique et égal au current_hash de la ligne précédente.
+            self.assertEqual(len({r[2] for r in rows}), total, "fork de chaîne : previous_hash dupliqué")
+            for prev, cur in zip(rows, rows[1:]):
+                self.assertEqual(cur[2], prev[3])
+            # Séquence contiguë 1..N, un scellement par ticket.
+            self.assertEqual(
+                [int(r[0].rsplit("-", 1)[1]) for r in rows], list(range(1, total + 1))
+            )
+            self.assertEqual(len({r[1] for r in rows}), total)
+            self.assertTrue(audit_ledger_integrity(conn))
+            stock = c.execute("SELECT quantite_actuelle FROM Stocks WHERE id = ?", (self.stock_id,)).fetchone()[0]
+            self.assertEqual(stock, 10 - total)
+        finally:
+            conn.close()
+
+    def test_duplicate_seal_of_same_ticket_is_rejected(self):
+        """L'index UNIQUE sur sale_id interdit de sceller deux fois le même ticket."""
+        from kodo_core.services.fiscal_service import seal_sale
+        res = process_sale_transaction(
+            cart_items=[{"stock_id": self.stock_id, "quantite": 1}],
+            payments=[("CB", 100.00)], total_tvac=100.00,
+        )
+        conn = database_manager.get_connection()
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                seal_sale(conn, res["ticket_id"], {"total_ttc": "100.00", "total_ht": "82.64", "total_tva": "17.36"})
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM fiscal_ledger WHERE sale_id = ?", (res["ticket_id"],)).fetchone()[0], 1
+            )
         finally:
             conn.close()
 
