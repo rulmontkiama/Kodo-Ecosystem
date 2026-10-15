@@ -1,6 +1,9 @@
 """
-Kōdo POS - Queue de Synchronisation Hors-Ligne & Moteur Réseau Résilient
-Détection automatique de la reconnexion, résolution LWW et réémission des transactions.
+Kōdo POS - Moteur Hors-Ligne : détection de la reconnexion, résolution LWW et audit de stock.
+
+La file des mouvements de stock vers Shopify est `sync_queue` (kodo_core/db/shopify_file.py) ;
+l'ancienne table `OfflineQueue` et la file générique `offline_queue.py` étaient inutilisées en
+production (consommateur factice) et ont été retirées.
 """
 
 import time
@@ -49,25 +52,13 @@ class OfflineSyncEngine:
 
     @classmethod
     def init_db_schema(cls, conn=None):
-        """Initialise la table OfflineQueue et les colonnes de sync si nécessaire."""
+        """Ajoute les colonnes de synchronisation hors-ligne (Tickets, Stocks, Produits) si absentes."""
         close_conn = False
         if conn is None:
             conn = get_connection()
             close_conn = True
         try:
             c = conn.cursor()
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS OfflineQueue (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    action_type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    retry_count INTEGER DEFAULT 0,
-                    status TEXT DEFAULT 'pending',
-                    error_message TEXT
-                )
-            """)
-
             # Ajouter colonnes manquantes dans Tickets le cas échéant
             c.execute("PRAGMA table_info(Tickets)")
             cols = [r[1] for r in c.fetchall()]
@@ -91,7 +82,7 @@ class OfflineSyncEngine:
 
             conn.commit()
         except Exception as e:
-            logger.error(f"Erreur d'initialisation du schéma OfflineQueue: {e}")
+            logger.error(f"Erreur d'initialisation du schéma hors-ligne: {e}")
         finally:
             if close_conn:
                 conn.close()
@@ -129,29 +120,6 @@ class OfflineSyncEngine:
                 conn.close()
 
     @classmethod
-    def enqueue_action(cls, action_type: str, payload_dict: dict, conn=None) -> int:
-        """Ajoute une action arbitraire à la file d'attente hors-ligne."""
-        close_conn = False
-        if conn is None:
-            conn = get_connection()
-            close_conn = True
-        try:
-            c = conn.cursor()
-            now_iso = datetime.datetime.now(timezone.utc).isoformat()
-            payload_str = json.dumps(payload_dict)
-            c.execute("""
-                INSERT INTO OfflineQueue (action_type, payload_json, created_at, status)
-                VALUES (?, ?, ?, 'pending')
-            """, (action_type, payload_str, now_iso))
-            queue_id = c.lastrowid
-            conn.commit()
-            logger.info(f"Action '{action_type}' ajoutée à OfflineQueue (ID {queue_id}).")
-            return queue_id
-        finally:
-            if close_conn:
-                conn.close()
-
-    @classmethod
     def _sync_loop(cls):
         """Boucle d'arrière-plan surveillant la reconnexion et réémettant la queue."""
         backoff = 2
@@ -172,7 +140,6 @@ class OfflineSyncEngine:
 
             try:
                 cls.process_pending_tickets()
-                cls.process_offline_queue()
                 backoff = 2
             except Exception as e:
                 logger.error(f"Erreur durant la synchronisation de la queue hors-ligne: {e}")
@@ -238,49 +205,6 @@ class OfflineSyncEngine:
             if synced_count > 0:
                 logger.info(f"{synced_count} ticket(s) hors-ligne synchronisé(s) avec succès.")
             return synced_count
-        finally:
-            if close_conn:
-                conn.close()
-
-    @classmethod
-    def process_offline_queue(cls, conn=None) -> int:
-        """Réémet l'ensemble des actions en attente dans la table OfflineQueue."""
-        close_conn = False
-        if conn is None:
-            conn = get_connection()
-            close_conn = True
-
-        processed_count = 0
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, action_type, payload_json, retry_count 
-                FROM OfflineQueue 
-                WHERE status='pending' 
-                ORDER BY id ASC
-            """)
-            pending_actions = cursor.fetchall()
-
-            for q_id, action_type, payload_json, retries in pending_actions:
-                try:
-                    payload = json.loads(payload_json)
-                    logger.info(f"Réémission de l'action hors-ligne ID {q_id} ({action_type})...")
-
-                    # Actions spécifiques
-                    cursor.execute("UPDATE OfflineQueue SET status='processed' WHERE id=?", (q_id,))
-                    processed_count += 1
-                except Exception as ex:
-                    new_retries = retries + 1
-                    status = "failed" if new_retries >= 5 else "pending"
-                    cursor.execute("""
-                        UPDATE OfflineQueue 
-                        SET retry_count=?, status=?, error_message=? 
-                        WHERE id=?
-                    """, (new_retries, status, str(ex), q_id))
-                    logger.error(f"Échec de réémission de l'action ID {q_id}: {ex}")
-
-            conn.commit()
-            return processed_count
         finally:
             if close_conn:
                 conn.close()

@@ -62,6 +62,9 @@ class TestFileAttente(BaseTemporaire):
         self.assertEqual(self.rows("SELECT synced_shopify FROM Tickets"), [(0,)])
 
         etat["panne"] = False                      # retour de la connexion
+        self.assertEqual(moteur.sync_tickets_to_shopify(), 0, "la ligne attend son délai de recul")
+        self.assertEqual(envoyes, [])
+        self.ecrire("UPDATE sync_queue SET prochaine_tentative = '2000-01-01 00:00:00'")  # délai écoulé
         self.assertEqual(moteur.sync_tickets_to_shopify(), 1)
         self.assertEqual(envoyes, [-2], "la vente ne part qu'une seule fois")
         self.assertEqual(self.rows("SELECT statut FROM sync_queue"), [("DONE",)])

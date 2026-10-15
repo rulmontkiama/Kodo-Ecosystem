@@ -1101,6 +1101,10 @@ def enregistrer_vente(cursor, numero_ticket, total_tvac, total_htva, total_tva, 
             VALUES (?, 'VENTE', ?, ?, ?, ?, ?, ?, ?)
         """, (vendeur_nom, float(montant_reel), methode, numero_ticket, date_heure, sig_ledger, hash_ledger, caisse_id))
 
+    # Mouvements de stock à pousser vers Shopify : inscrits DANS cette transaction (jamais bloquant).
+    from kodo_core.db import shopify_file
+    shopify_file.inscrire_ticket(cursor, ticket_id)
+
     return ticket_id
 
 
@@ -1260,6 +1264,10 @@ def enregistrer_remboursement(cursor, ticket_origine, vd_id, stock_id, prix, mod
         INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent, caisse_id)
         VALUES (?, 'REMBOURSEMENT', ?, ?, ?, ?, ?, ?, ?)
     """, (vendeur_nom, float(total_tvac), mode, new_tk, date_heure, sig_ledger, hash_ledger, caisse_id))
+
+    # Le recrédit de stock part vers Shopify dans la même transaction que le retour.
+    from kodo_core.db import shopify_file
+    shopify_file.inscrire_ticket(cursor, ticket_id)
 
     return new_tk, total_tvac
 

@@ -6,6 +6,7 @@ de la chaîne complète. Aucune dépendance UI.
 """
 
 import hashlib
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,6 +19,9 @@ from kodo_core.domain.accounting.ledger import GENESIS_HASH, build_hash_payload,
 from kodo_core.domain.sales.models import quantize_money
 
 TWO_DECIMALS = Decimal("0.01")
+
+logger = logging.getLogger(__name__)
+_unique_index_warned = False
 
 
 class FiscalTamperDetectedError(Exception):
@@ -69,7 +73,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.commit()
+    # 1 ticket = 1 scellement (garantie d'unicité NF525)
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_fiscal_ledger_sale ON fiscal_ledger(sale_id)")
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        # Doublons déjà présents (ou base en lecture seule) : l'unicité n'est PAS imposée.
+        # On ne bloque pas l'encaissement, mais on le signale (une seule fois par processus,
+        # `ensure_schema` étant appelé à chaque vente).
+        global _unique_index_warned
+        if not _unique_index_warned:
+            _unique_index_warned = True
+            logger.error(
+                "[FISCAL LEDGER] ux_fiscal_ledger_sale non créé (%s) : un ticket peut être scellé "
+                "plusieurs fois. Corriger les doublons de fiscal_ledger.sale_id puis relancer.", exc
+            )
+
+    if not conn.in_transaction:
+        conn.commit()
 
 
 def record_unsealed_sale(conn: sqlite3.Connection, sale_id: int, totals: dict, reason: str) -> None:
@@ -204,8 +224,10 @@ def seal_sale(db_conn: sqlite3.Connection, sale_id: int, totals: dict) -> dict:
     year = datetime.fromisoformat(timestamp_utc).year
 
     cursor = db_conn.cursor()
+    owns_tx = not db_conn.in_transaction
     try:
-        cursor.execute("BEGIN IMMEDIATE")
+        if owns_tx:
+            cursor.execute("BEGIN IMMEDIATE")
 
         sequence_number = _next_sequence_number(cursor, year)
 
@@ -236,9 +258,11 @@ def seal_sale(db_conn: sqlite3.Connection, sale_id: int, totals: dict) -> dict:
                 signature,
             ),
         )
-        db_conn.commit()
+        if owns_tx:
+            db_conn.commit()
     except Exception:
-        db_conn.rollback()
+        if owns_tx:
+            db_conn.rollback()
         raise
 
     return {

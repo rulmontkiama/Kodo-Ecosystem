@@ -98,6 +98,12 @@ class MigrationError(Exception):
     """Exception levée en cas d'erreur critique de migration de schéma."""
     pass
 
+def _ajouter_prochaine_tentative(conn):
+    """Migration 2.1.2 : ajoute `sync_queue.prochaine_tentative` (additif, idempotent)."""
+    from kodo_core.db.shopify_file import assurer_table
+    assurer_table(conn.cursor())
+
+
 def _executer_conversion_shpf(conn):
     """Exécute la conversion des codes SHPF- en EAN-13 via InventoryManager."""
     try:
@@ -660,6 +666,14 @@ class MigrationManager:
                 "ALTER TABLE Cartes_Cadeaux ADD COLUMN ticket_origine TEXT DEFAULT NULL",
                 "ALTER TABLE Cartes_Cadeaux ADD COLUMN ticket_remboursement TEXT DEFAULT NULL",
             ],
+        },
+        {
+            "version": "2.1.2",
+            "description": "File d'attente Shopify : recul exponentiel par ligne (`prochaine_tentative`). "
+                           "Colonne ajoutée sans toucher aux lignes existantes (NULL = à tenter tout de "
+                           "suite) ; aucune table créée ni supprimée.",
+            "sql": [],
+            "python": lambda conn: _ajouter_prochaine_tentative(conn),
         }
     ]
 

@@ -725,6 +725,7 @@ class TestBalayageRestUneFoisParPasse(BaseTemporaire):
         self.assertEqual(self.appels["products"], 1, "un seul téléchargement du catalogue pour trois lignes")
         self.assertEqual(self.appels["graphql"], 3, "chaque ligne retente tout de même GraphQL")
         self.assertEqual(self.rows("SELECT COUNT(*) FROM sync_queue WHERE statut = 'PENDING'"), [(3,)])
+        self.ecrire("UPDATE sync_queue SET prochaine_tentative = '2000-01-01 00:00:00'")  # délai de recul écoulé
         moteur.sync_tickets_to_shopify()
         self.assertEqual(self.appels["products"], 2, "la passe suivante, elle, retente le balayage")
 
