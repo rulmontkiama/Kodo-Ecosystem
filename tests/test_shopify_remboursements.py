@@ -39,6 +39,11 @@ class BaseRemboursements(BaseTemporaire):
     def setUp(self):
         super().setUp()
         self.regler_shopify("boutique.myshopify.com", "jeton")
+        # Ces tests exercent le chemin « commande importée comme TICKET » (versions <= 2.1.2) : il reste
+        # en service pour les commandes historiques et pour le réglage de repli. Le chemin hors caisse
+        # (défaut depuis 2.1.3) a son propre fichier : test_shopify_hors_caisse.py.
+        self.ecrire("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, '1')",
+                    (shopify_sync.CLE_COMMANDES_EN_CAISSE,))
         self.pid = self.creer_produit(self.SKU, "Robe", [("S", 4), ("M", 6), ("L", 2)])
         self.stocks = dict((t, i) for i, t in self.rows(
             "SELECT id, taille FROM Stocks WHERE id_produit = ?", (self.pid,)))

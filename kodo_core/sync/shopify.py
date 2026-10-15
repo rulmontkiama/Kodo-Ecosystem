@@ -61,6 +61,10 @@ CLE_URL = "shopify_store_url"
 CLE_TOKEN = "shopify_access_token"
 CLE_AUTO_SYNC = "shopify_auto_sync"
 CLE_SYNC_ORDERS = "shopify_sync_orders"
+# Repli : « 1 » rétablit l'ancien comportement (une commande en ligne devient un ticket de caisse + une
+# écriture au journal de caisse). Par défaut, une commande en ligne ne passe PAS par la caisse : sa
+# comptabilité se fait dans Shopify, celle du magasin dans Kōdo (décision du 2026-10-15).
+CLE_COMMANDES_EN_CAISSE = "shopify_commandes_en_caisse"
 
 # Authentification « application récente » (Dev Dashboard). Depuis le 1er janvier 2026 Shopify ne
 # permet plus de créer d'application personnalisée depuis l'admin : les nouvelles applications
@@ -398,6 +402,32 @@ def _assurer_tables_sync(cursor):
     """)
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_shopify_remboursements_order ON Shopify_Remboursements(order_id)"
+    )
+    # Commandes en ligne importées HORS caisse : ni ticket, ni écriture au journal de caisse, ni Z.
+    # `order_id` est la clé d'idempotence ; les lignes disent ce qui a été retiré de quel stock, pour
+    # qu'un remboursement ne puisse rendre que ce qui a réellement été décompté. Les colonnes
+    # s'appellent `stock_id` / `produit_id` (et non `id_stock` / `id_produit`) : voir `stock_journal`.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Shopify_Commandes (
+            order_id TEXT PRIMARY KEY,
+            order_number TEXT,
+            date_import TEXT NOT NULL,
+            total TEXT,
+            nb_lignes INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Shopify_Commandes_Lignes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id TEXT NOT NULL,
+            stock_id INTEGER NOT NULL,
+            produit_id INTEGER,
+            quantite INTEGER NOT NULL,
+            restituee INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shopify_commandes_lignes_order ON Shopify_Commandes_Lignes(order_id)"
     )
     # File d'attente locale des mouvements de stock (voir FILE_PENDING). Même définition que la
     # migration 2.0.9 : toute évolution doit être portée aux DEUX endroits.
@@ -2371,9 +2401,26 @@ class ShopifySync:
             since_id = last_id
         return commandes
 
+    @staticmethod
+    def _commandes_en_caisse(conn) -> bool:
+        """Repli : le réglage `shopify_commandes_en_caisse` = 1 rétablit l'ancien import en tickets de caisse."""
+        try:
+            c = conn.cursor()
+            c.execute("SELECT valeur FROM Parametres WHERE cle = ?", (CLE_COMMANDES_EN_CAISSE,))
+            row = c.fetchone()
+        except Exception:
+            return False
+        return bool(row) and str(row[0] or "").strip().lower() in ("1", "true", "oui")
+
     def sync_orders_from_shopify(self) -> int:
         """
-        Rapatrie les commandes Shopify payées et non traitées, puis génère des tickets conformes localement.
+        Rapatrie les commandes Shopify payées et non traitées.
+
+        Une commande en ligne n'est PAS une vente de caisse : la comptabilité du web se tient dans
+        Shopify, celle du magasin dans Kōdo. L'import ne fait donc que décompter le stock (avec le
+        même garde-fou et la même trace des surventes) et mémoriser la commande
+        (`Shopify_Commandes`) : aucun ticket, aucune écriture au journal de caisse, rien au Z.
+        Le réglage `shopify_commandes_en_caisse` = 1 rétablit l'ancien comportement (tickets signés).
         """
         orders = self._fetch_all_orders()
         if not orders:
@@ -2388,6 +2435,7 @@ class ShopifySync:
             _assurer_tables_sync(_ouvrir_ecriture(conn))
             conn.commit()
             c = conn.cursor()
+            en_caisse = self._commandes_en_caisse(conn)
 
             for order in orders:
                 order_id = str(order["id"])
@@ -2401,8 +2449,14 @@ class ShopifySync:
 
                 try:
                     c2 = _ouvrir_ecriture(conn)
+                    # Deux registres : une commande déjà importée comme ticket par une version
+                    # précédente ne doit JAMAIS être décomptée une seconde fois.
                     c2.execute("SELECT id FROM Tickets WHERE shopify_order_id = ?", (order_id,))
-                    if c2.fetchone():
+                    deja = c2.fetchone()
+                    if not deja:
+                        c2.execute("SELECT 1 FROM Shopify_Commandes WHERE order_id = ?", (order_id,))
+                        deja = c2.fetchone()
+                    if deja:
                         conn.rollback()
                         continue
 
@@ -2457,41 +2511,65 @@ class ShopifySync:
                                     f"demandé={qty}) — stock plafonné à 0."
                                 )
 
-                        stock_changes.append({"stock_id": sid, "qty": qty, "prix_unitaire_tvac": prix_unitaire})
+                        stock_changes.append({"stock_id": sid, "produit_id": pid, "qty": qty,
+                                              "prix_unitaire_tvac": prix_unitaire})
 
-                    total_price = Decimal(str(order.get("total_price", "0.00")))
-                    total_tax = Decimal(str(order.get("total_tax", "0.00")))
-                    total_htva = total_price - total_tax
+                    if en_caisse:
+                        total_price = Decimal(str(order.get("total_price", "0.00")))
+                        total_tax = Decimal(str(order.get("total_tax", "0.00")))
+                        total_htva = total_price - total_tax
 
-                    safe_order_num = "".join(char for char in str(order_number) if char.isalnum() or char in "-_")
-                    num_ticket = f"SHPF-{safe_order_num}"
-                    date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        safe_order_num = "".join(char for char in str(order_number) if char.isalnum() or char in "-_")
+                        num_ticket = f"SHPF-{safe_order_num}"
+                        date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    sig_ticket, hash_prec_ticket = signer_ticket(c2, num_ticket, total_price, date_heure)
+                        sig_ticket, hash_prec_ticket = signer_ticket(c2, num_ticket, total_price, date_heure)
 
-                    c2.execute("""
-                        INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, total_tva, methode_paiement, signature, hash_precedent, shopify_order_id, synced_shopify)
-                        VALUES (?, ?, ?, ?, ?, 'Shopify', ?, ?, ?, 1)
-                    """, (num_ticket, date_heure, total_price, total_htva, total_tax, sig_ticket, hash_prec_ticket, order_id))
-
-                    ticket_id = c2.lastrowid
-
-                    for sc in stock_changes:
                         c2.execute("""
-                            INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac)
-                            VALUES (?, ?, ?, ?)
-                        """, (ticket_id, sc["stock_id"], sc["qty"], sc["prix_unitaire_tvac"]))
+                            INSERT INTO Tickets (numero_ticket, date_heure, total_tvac, total_htva, total_tva, methode_paiement, signature, hash_precedent, shopify_order_id, synced_shopify)
+                            VALUES (?, ?, ?, ?, ?, 'Shopify', ?, ?, ?, 1)
+                        """, (num_ticket, date_heure, total_price, total_htva, total_tax, sig_ticket, hash_prec_ticket, order_id))
 
-                    sig_ledger, hash_ledger = signer_ledger(c2, "VENTE", total_price, "Shopify", num_ticket, date_heure)
-                    c2.execute("""
-                        INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent)
-                        VALUES ('Shopify Sync', 'VENTE', ?, 'Shopify', ?, ?, ?, ?)
-                    """, (total_price, num_ticket, date_heure, sig_ledger, hash_ledger))
+                        ticket_id = c2.lastrowid
 
-                    conn.commit()
-                    _sceller_tickets(conn, [num_ticket])
-                    imported_orders += 1
-                    logger.info(f"Commande #{order_number} synchronisée avec succès.")
+                        for sc in stock_changes:
+                            c2.execute("""
+                                INSERT INTO Ventes_Details (id_ticket, id_stock, quantite, prix_unitaire_tvac)
+                                VALUES (?, ?, ?, ?)
+                            """, (ticket_id, sc["stock_id"], sc["qty"], sc["prix_unitaire_tvac"]))
+
+                        sig_ledger, hash_ledger = signer_ledger(c2, "VENTE", total_price, "Shopify", num_ticket, date_heure)
+                        c2.execute("""
+                            INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure, signature, hash_precedent)
+                            VALUES ('Shopify Sync', 'VENTE', ?, 'Shopify', ?, ?, ?, ?)
+                        """, (total_price, num_ticket, date_heure, sig_ledger, hash_ledger))
+
+                        conn.commit()
+                        _sceller_tickets(conn, [num_ticket])
+                        imported_orders += 1
+                        logger.info(f"Commande #{order_number} synchronisée avec succès.")
+                    else:
+                        total_price = Decimal(str(order.get("total_price", "0.00")))
+                        date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # Le décompte de stock est déjà fait (ci-dessus, avec garde-fou et audit des
+                        # surventes). Il ne reste qu'à se souvenir de la commande : sans elle, la
+                        # passe suivante la décompterait une seconde fois.
+                        c2.execute(
+                            "INSERT INTO Shopify_Commandes (order_id, order_number, date_import, total, nb_lignes) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (order_id, str(order_number), date_heure, str(total_price), len(stock_changes)),
+                        )
+                        for sc in stock_changes:
+                            if not sc["stock_id"]:
+                                continue
+                            c2.execute(
+                                "INSERT INTO Shopify_Commandes_Lignes (order_id, stock_id, produit_id, quantite) "
+                                "VALUES (?, ?, ?, ?)",
+                                (order_id, sc["stock_id"], sc.get("produit_id"), sc["qty"]),
+                            )
+                        conn.commit()
+                        imported_orders += 1
+                        logger.info(f"Commande #{order_number} importée hors caisse : stock décompté, comptabilité tenue dans Shopify.")
 
                 except Exception as ex_order:
                     if conn:
@@ -2698,6 +2776,9 @@ class ShopifySync:
         )
         row = c.fetchone()
         if not row:
+            c.execute("SELECT 1 FROM Shopify_Commandes WHERE order_id = ?", (order_id,))
+            if c.fetchone():
+                return self._appliquer_remboursements_hors_caisse(conn, order, order_id, remboursements, annulee)
             # Commande jamais importée localement : il n'y a aucune vente à corriger.
             return 0
         ticket_id, numero_ticket, caisse_id = row
@@ -2852,6 +2933,140 @@ class ShopifySync:
                 "INSERT INTO Shopify_Remboursements (cle, order_id, refund_id, tickets, montant, date_traitement) "
                 "VALUES (?, ?, NULL, ?, '0.00', ?)",
                 (cle, str(order.get("id")), numero_ticket, date_heure),
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+
+    # --- Commandes en ligne hors caisse : stock seulement ------------------------------------
+
+    def _appliquer_remboursements_hors_caisse(self, conn, order, order_id, remboursements, annulee) -> int:
+        """
+        Remboursements d'une commande importée HORS caisse : aucune écriture financière (la
+        comptabilité du web est dans Shopify), seulement le stock — rendu ou non selon `restock_type`,
+        et jamais au-delà de ce que l'import avait décompté.
+        """
+        c = conn.cursor()
+        traites = 0
+        for remb in remboursements:
+            cle = f"refund:{remb.get('id')}"
+            c.execute("SELECT 1 FROM Shopify_Remboursements WHERE cle = ?", (cle,))
+            if c.fetchone():
+                continue
+            if self._traiter_remboursement_hors_caisse(conn, order, remb, cle, order_id):
+                traites += 1
+
+        if annulee:
+            cle = f"annulation:{order_id}"
+            c.execute("SELECT 1 FROM Shopify_Remboursements WHERE cle = ?", (cle,))
+            if not c.fetchone():
+                self._signaler_annulation_hors_caisse(conn, order, cle, order_id, bool(remboursements))
+        return traites
+
+    def _traiter_remboursement_hors_caisse(self, conn, order, remb, cle, order_id) -> bool:
+        order_number = order.get("order_number", order.get("id"))
+        c = _ouvrir_ecriture(conn)
+        try:
+            c.execute("SELECT 1 FROM Shopify_Remboursements WHERE cle = ?", (cle,))
+            if c.fetchone():
+                conn.rollback()
+                return False
+
+            date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            rendues = 0
+            for rli in remb.get("refund_line_items") or []:
+                quantite = int(rli.get("quantity") or 0)
+                if quantite <= 0:
+                    continue
+                li = rli.get("line_item") or {}
+                recrediter = str(rli.get("restock_type") or "").strip().lower() != "no_restock"
+
+                sid, pid, motif = self._resoudre_ligne_stock(
+                    c, li.get("sku"), li.get("title"), self._extraire_taille(li),
+                    variant_id=li.get("variant_id"), barcode=li.get("barcode"),
+                )
+                if not sid:
+                    logger.warning(
+                        f"[REMBOURSEMENT] Commande #{order_number} : ligne « {li.get('title')} » "
+                        f"non rattachée à une déclinaison locale ({motif or 'INTROUVABLE'}) — "
+                        f"stock non rendu pour cette ligne, à traiter à la main."
+                    )
+                    self._marquer_audit(c, None, pid)
+                    continue
+
+                reste = quantite
+                c.execute(
+                    "SELECT id, quantite - restituee FROM Shopify_Commandes_Lignes "
+                    "WHERE order_id = ? AND stock_id = ? AND quantite - restituee > 0 ORDER BY id ASC",
+                    (order_id, sid),
+                )
+                for ligne_id, disponible in c.fetchall():
+                    if reste <= 0:
+                        break
+                    part = min(reste, int(disponible))
+                    c.execute("UPDATE Shopify_Commandes_Lignes SET restituee = restituee + ? WHERE id = ?",
+                              (part, ligne_id))
+                    # `no_restock` : la cliente est remboursée mais l'article ne revient pas au stock
+                    # vendable (une unité fantôme serait ensuite poussée vers Shopify et revendue).
+                    if recrediter:
+                        c.execute("UPDATE Stocks SET quantite_actuelle = quantite_actuelle + ? WHERE id = ?",
+                                  (part, sid))
+                        rendues += part
+                    reste -= part
+
+                if reste > 0:
+                    logger.warning(
+                        f"[REMBOURSEMENT] Commande #{order_number} : {reste} unité(s) de "
+                        f"« {li.get('title')} » non rendables localement (déjà rendues ou jamais "
+                        f"décomptées) — écart à vérifier."
+                    )
+                    self._marquer_audit(c, sid, pid)
+
+            c.execute(
+                "INSERT INTO Shopify_Remboursements (cle, order_id, refund_id, tickets, montant, date_traitement) "
+                "VALUES (?, ?, ?, '', '0.00', ?)",
+                (cle, str(order.get("id")), str(remb.get("id")), date_heure),
+            )
+            conn.commit()
+            logger.info(f"Remboursement Shopify {remb.get('id')} (commande #{order_number}, hors caisse) : "
+                        f"{rendues} unité(s) remise(s) en stock.")
+            return True
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+
+    def _signaler_annulation_hors_caisse(self, conn, order, cle, order_id, a_des_remboursements):
+        """Annulation d'une commande hors caisse : jamais d'écriture inventée, articles à vérifier si rien n'a été rendu."""
+        order_number = order.get("order_number", order.get("id"))
+        c = _ouvrir_ecriture(conn)
+        try:
+            c.execute("SELECT 1 FROM Shopify_Remboursements WHERE cle = ?", (cle,))
+            if c.fetchone():
+                conn.rollback()
+                return
+            date_heure = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if not a_des_remboursements:
+                c.execute(
+                    "SELECT DISTINCT l.stock_id, l.produit_id FROM Shopify_Commandes_Lignes l WHERE l.order_id = ?",
+                    (order_id,),
+                )
+                for sid, pid in c.fetchall():
+                    self._marquer_audit(c, sid, pid)
+                logger.warning(
+                    f"[ANNULATION] Commande Shopify #{order_number} annulée sans remboursement : "
+                    f"le stock décompté n'est pas rendu d'office, ses articles sont marqués à vérifier."
+                )
+            c.execute(
+                "INSERT INTO Shopify_Remboursements (cle, order_id, refund_id, tickets, montant, date_traitement) "
+                "VALUES (?, ?, NULL, '', '0.00', ?)",
+                (cle, str(order.get("id")), date_heure),
             )
             conn.commit()
         except Exception:

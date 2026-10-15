@@ -662,11 +662,16 @@ class TestCommandesEntrantes(BaseTemporaire):
     def test_une_commande_deja_importee_ne_l_est_pas_deux_fois(self):
         self.moteur([self.commande()]).sync_orders_from_shopify()
         self.moteur([self.commande()]).sync_orders_from_shopify()
-        self.assertEqual(self.rows("SELECT COUNT(*) FROM Tickets"), [(1,)])
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM Shopify_Commandes"), [(1,)])
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM Tickets"), [(0,)],
+                         "une commande en ligne n'est pas un ticket de caisse")
         stocks = dict(self.rows("SELECT taille, quantite_actuelle FROM Stocks WHERE id_produit = ?", (self.pid,)))
         self.assertEqual(stocks["M"], 5, "le stock a été décrémenté deux fois pour une seule commande")
 
     def test_le_prix_de_la_ligne_est_celui_paye_pas_celui_du_catalogue_local(self):
+        # Le détail de ligne n'existe qu'en mode « ticket de caisse » (réglage de repli).
+        self.ecrire("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES (?, '1')",
+                    ("shopify_commandes_en_caisse",))
         cmd = self.commande(line_items=[{"sku": "CB-ROBE", "title": "Robe", "quantity": 1,
                                          "variant_title": "M", "price": "24.00"}])
         self.moteur([cmd]).sync_orders_from_shopify()
@@ -1036,13 +1041,16 @@ class TestBoutEnBoutSansBoutique(BaseTemporaire):
         self.assertEqual(self.rows("SELECT quantite_actuelle FROM Stocks s JOIN Produits p ON p.id = s.id_produit "
                                    "WHERE s.taille = 'M'"), [(5,)],
                          "l'article rendu n'est pas revenu au stock de la caisse")
-        remboursements = self.rows("SELECT numero_ticket, total_tvac FROM Tickets WHERE total_tvac < 0")
-        self.assertEqual(len(remboursements), 1, "la vente reste comptée en entier dans le Z")
-        self.assertEqual(remboursements[0][1], Decimal("-49.00"))
+        # Une commande en ligne n'a jamais été une vente de caisse : le remboursement ne rend que le stock.
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM Tickets"), [(1,)],
+                         "seule la vente de caisse (étape 3) est un ticket : ni la commande en ligne, "
+                         "ni son remboursement n'en créent")
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM Tickets WHERE total_tvac < 0"), [(0,)])
 
-        # Et la passe suivante n'y revient pas : on ne rembourse pas deux fois.
+        # Et la passe suivante n'y revient pas : on ne rend pas deux fois.
         self.assertEqual(moteur.sync_refunds_from_shopify(), 0)
-        self.assertEqual(len(self.rows("SELECT id FROM Tickets WHERE total_tvac < 0")), 1)
+        self.assertEqual(self.rows("SELECT quantite_actuelle FROM Stocks s JOIN Produits p ON p.id = s.id_produit "
+                                   "WHERE s.taille = 'M'"), [(5,)])
 
         # 7. Les deux stocks sont d'accord, et toutes les requêtes portaient le bon jeton.
         self.assertEqual(self.etat["stock"][9002], 5)

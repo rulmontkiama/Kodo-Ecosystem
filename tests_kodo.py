@@ -197,12 +197,14 @@ def run_tests():
     assert stock_restant == 8, f"Le stock local devrait être de 8 après déduction de 2 articles, obtenu: {stock_restant}"
     print("✅ Pull (Shopify -> POS) : Commande importée et stock local déduit (-2).")
     
-    # Vérifier que le ticket de la commande a été créé et signé
-    c.execute("SELECT total_tvac, methode_paiement, shopify_order_id FROM Tickets WHERE shopify_order_id = '99999'")
+    # Une commande en ligne n'est PAS une vente de caisse (2.1.3) : elle est mémorisée, sans ticket.
+    c.execute("SELECT COUNT(*) FROM Tickets WHERE shopify_order_id = '99999'")
+    assert c.fetchone()[0] == 0, "Une commande en ligne ne doit plus créer de ticket de caisse"
+    c.execute("SELECT order_id, total FROM Shopify_Commandes WHERE order_id = '99999'")
     order_row = c.fetchone()
-    assert order_row is not None, "Le ticket Shopify n'a pas été créé"
-    assert float(order_row[0]) == 48.40, f"Le total du ticket devrait être 48.40, obtenu: {order_row[0]}"
-    print("✅ Pull (Shopify -> POS) : Ticket de caisse conforme créé pour la commande.")
+    assert order_row is not None, "La commande Shopify n'a pas été mémorisée"
+    assert float(order_row[1]) == 48.40, f"Le total de la commande devrait être 48.40, obtenu: {order_row[1]}"
+    print("✅ Pull (Shopify -> POS) : commande mémorisée hors caisse, stock décompté.")
 
     # 7. Audit Trail NF525
     print("\n--- Validation Cryptographique (Audit Trail) ---")
