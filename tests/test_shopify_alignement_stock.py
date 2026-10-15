@@ -378,6 +378,7 @@ class TestAlignement(BaseAlignement):
         self.etat["echecs_ajustement"] = 1                 # le 1er ajustement (la vente) est refusé
         self.passe()
         self.assertEqual(self.etat["niveaux"][101], 8, "caisse 7 + 1 vente pas encore reçue")
+        self.ecrire("UPDATE sync_queue SET prochaine_tentative = '2000-01-01 00:00:00'")  # délai de recul écoulé
         self.passe()                                       # la vente part, l'alignement est déjà fait
         self.assertEqual(self.etat["niveaux"][101], 7)
         self.assertEqual(self.quantite("M"), 7)
@@ -391,6 +392,7 @@ class TestAlignement(BaseAlignement):
         self.saisir(M=6, L=2)                              # réassort de M seulement (caisse 4 → 6)
         self.passe()
         self.assertEqual(self.etat["niveaux"][101], 6, "ni 7 (ligne M recomptée) ni 5")
+        self.ecrire("UPDATE sync_queue SET prochaine_tentative = '2000-01-01 00:00:00'")  # délai de recul écoulé
         self.passe()                                       # la ligne L part à son tour
         self.assertEqual(self.etat["niveaux"], {101: 6, 102: 2})
 
