@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import database_manager
 from kodo_core.domain.sales.models import FinancialReceipt
-from kodo_core.services.fiscal_service import ensure_schema, seal_sale
+import kodo_core.services.fiscal_service as fiscal_service
 
 
 @dataclass
@@ -39,26 +39,41 @@ def persist_receipt(cursor: sqlite3.Cursor, receipt: FinancialReceipt, ctx: Sale
     if not conn.in_transaction:
         raise RuntimeError("persist_receipt exige une transaction BEGIN IMMEDIATE ouverte par l'appelant.")
 
-    ticket_id = database_manager.enregistrer_vente(
-        cursor=cursor,
-        numero_ticket=ctx.numero_ticket,
-        date_heure=ctx.now_local,
-        total_tvac=float(receipt.total_tvac),
-        total_htva=float(receipt.total_htva),
-        total_tva=float(receipt.total_tva),
-        remise=float(receipt.remise),
-        rendu_monnaie=float(receipt.rendu),
-        ecart_arrondi_cash=float(receipt.ecart_arrondi_cash),
-        paiements=[(m, float(a)) for m, a in receipt.payments],
-        panier=ctx.lines,
-        methode_paiement=ctx.main_method,
-        id_client=ctx.client_id,
-        vendeur_nom=ctx.cashier,
-        caisse_id=ctx.caisse_id,
-    )
+    num_ticket = ctx.numero_ticket
+    ticket_id = None
+    last_integrity_error = None
+    for _attempt in range(5):
+        try:
+            ticket_id = database_manager.enregistrer_vente(
+                cursor=cursor,
+                numero_ticket=num_ticket,
+                date_heure=ctx.now_local,
+                total_tvac=float(receipt.total_tvac),
+                total_htva=float(receipt.total_htva),
+                total_tva=float(receipt.total_tva),
+                remise=float(receipt.remise),
+                rendu_monnaie=float(receipt.rendu),
+                ecart_arrondi_cash=float(receipt.ecart_arrondi_cash),
+                paiements=[(m, float(a)) for m, a in receipt.payments],
+                panier=ctx.lines,
+                methode_paiement=ctx.main_method,
+                id_client=ctx.client_id,
+                vendeur_nom=ctx.cashier,
+                caisse_id=ctx.caisse_id,
+            )
+            break
+        except sqlite3.IntegrityError as ie:
+            if "numero_ticket" not in str(ie):
+                raise
+            last_integrity_error = ie
+            num_ticket = database_manager.generer_numero_ticket(cursor)
+            ctx.numero_ticket = num_ticket
 
-    ensure_schema(conn)
-    seal_sale(
+    if ticket_id is None:
+        raise last_integrity_error
+
+    fiscal_service.ensure_schema(conn)
+    fiscal_service.seal_sale(
         conn,
         ticket_id,
         {

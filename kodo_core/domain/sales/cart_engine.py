@@ -546,55 +546,37 @@ def process_sale_transaction(
         paiements_payload = [(p[0], float(p[1])) for p in paiements_dec]
         main_payment_method = paiements_payload[0][0] if paiements_payload else "CB"
 
-        # Retry borné sur collision de numero_ticket (contrainte UNIQUE). Le serveur HTTP est
-        # MULTI-THREADÉ : la collision peut survenir entre deux encaissements du même
-        # processus comme entre deux caisses partageant le fichier SQLite. Plutôt que de faire
-        # échouer une vente réellement payée par le client sur cette course, on régénère un
-        # numéro et on retente (la contrainte UNIQUE garantit qu'aucun doublon ne peut jamais
-        # être inséré silencieusement).
-        ticket_id = None
-        last_integrity_error = None
-        for _attempt in range(5):
-            try:
-                ticket_id = database_manager.enregistrer_vente(
-                    cursor=cursor,
-                    numero_ticket=num_ticket,
-                    total_tvac=float(tot_tvac_dec),
-                    total_htva=float(tot_htva_dec),
-                    total_tva=float(tot_tva_dec),
-                    remise=float(remise_montant_dec),
-                    methode_paiement=main_payment_method,
-                    id_client=client_id,
-                    rendu_monnaie=float(rendu_dec),
-                    panier=panier_formatted,
-                    vendeur_nom=cashier_name,
-                    date_heure=now_str,
-                    paiements=paiements_payload,
-                    caisse_id=caisse_id,
-                    ecart_arrondi_cash=float(ecart_arrondi_cash)
-                )
-                break
-            except sqlite3.IntegrityError as ie:
-                if "numero_ticket" not in str(ie):
-                    raise
-                last_integrity_error = ie
-                num_ticket = database_manager.generer_numero_ticket(cursor)
-        if ticket_id is None:
-            raise last_integrity_error
-
-        # Scellement fiscal inaltérable (Conformité NF525 / Loi Anti-fraude TVA) DANS LA MÊME TRANSACTION ATOMIQUE.
+        # Persistance du reçu financier et de son scellement fiscal (NF525) via le port de domaine.
         # En joignant la transaction active (BEGIN IMMEDIATE), l'écriture du ticket et son scellement
         # sont indivisibles : un échec ou un crash annule TOUT (conn.rollback()), interdisant
         # structurellement tout ticket orphelin non scellé.
-        from kodo_core.services.fiscal_service import ensure_schema as ensure_fiscal_schema, seal_sale
-        ensure_fiscal_schema(conn)
-        seal_sale(conn, ticket_id, {
-            "total_ttc": tot_tvac_dec,
-            "total_ht": tot_htva_dec,
-            "total_tva": tot_tva_dec,
-            "timestamp_utc": datetime.datetime.strptime(now_str, "%Y-%m-%d %H:%M:%S")
-                             .astimezone(datetime.timezone.utc).isoformat(),
-        })
+        from kodo_core.domain.sales.models import FinancialReceipt
+        from kodo_core.domain.sales.persistence import SalePersistenceContext, persist_receipt
+
+        receipt = FinancialReceipt(
+            total_tvac=tot_tvac_dec,
+            total_htva=tot_htva_dec,
+            total_tva=tot_tva_dec,
+            remise=remise_montant_dec,
+            rendu=rendu_dec,
+            ecart_arrondi_cash=ecart_arrondi_cash,
+            payments=paiements_dec,
+        )
+
+        ctx = SalePersistenceContext(
+            numero_ticket=num_ticket,
+            now_local=now_str,
+            now_utc_iso=datetime.datetime.strptime(now_str, "%Y-%m-%d %H:%M:%S")
+                        .astimezone(datetime.timezone.utc).isoformat(),
+            lines=panier_formatted,
+            main_method=main_payment_method,
+            cashier=cashier_name,
+            client_id=client_id,
+            caisse_id=caisse_id,
+        )
+
+        ticket_id = persist_receipt(cursor, receipt, ctx)
+        num_ticket = ctx.numero_ticket
 
         conn.commit()
 
