@@ -13,8 +13,8 @@ RÈGLES D'OR DE L'IMMUNITÉ FISCALE :
    - Strictement restreint au solde payé en ESPÈCES.
    - Si paiement 100% non-espèces (CB, Virement, Avoir, etc.) : ecart_arrondi_cash == Decimal('0.00').
    - L'écart d'arrondi espèces est une opération de caisse isolée ; il ne modifie JAMAIS la base fiscale (HTVA/TVA).
-4. Ventilation multi-taux (Largest Remainder Method) :
-   - Réconciliation déterministe des centimes d'arrondi sur la ventilation de TVA.
+4. Ventilation multi-taux :
+   - Le résidu d'arrondi (quelques centimes) est affecté au taux au TVAC le plus lourd (déterministe).
    - La somme des TVAC ventilées est STRICTEMENT égale au total_tvac facturé.
 """
 
@@ -39,9 +39,27 @@ FIVE_CENTS = Decimal("0.05")
 
 
 def is_cash_payment(method: str) -> bool:
-    """Détermine si un moyen de paiement relève des espèces physiques soumises à l'arrondi belge."""
-    m = (method or "").strip().lower()
-    return m in ("cash", "especes", "espèces", "liquide", "cash_chf", "cash_usd")
+    """Détermine si un moyen de paiement relève des espèces physiques soumises à l'arrondi belge.
+
+    Délègue à `database_manager.classer_moyen_paiement` (source d'autorité unique du projet :
+    les anciennes versions écrivent « QR_Code » / « Bancontact », une liste locale divergeait).
+    Import différé : le module reste importable sans base de données.
+    """
+    from database_manager import classer_moyen_paiement
+    return classer_moyen_paiement(method) == "especes"
+
+
+def _first_present(source: Dict[str, Any], keys: Sequence[str], default: Any) -> Any:
+    """Première clé présente ET non None. Un `0` explicite (taux de TVA 0 %, remise 0) est une
+    valeur, pas une absence : l'ancien `a or b or défaut` le remplaçait par le défaut (21 %)."""
+    for key in keys:
+        if source.get(key) is not None:
+            return source[key]
+    return default
+
+
+def _clamp_percent(value: Decimal) -> Decimal:
+    return max(ZERO, min(ONE_HUNDRED, value))
 
 
 def apply_belgian_cash_rounding(amount: Union[Decimal, str, int, float]) -> Tuple[Decimal, Decimal]:
@@ -99,12 +117,12 @@ class FinancialEngine:
                     elif it.discount.type == DiscountType.AMOUNT:
                         px_unit = max(ZERO, quantize_money(px_unit - it.discount.value))
             elif isinstance(it, dict):
-                px_raw = it.get("prix_vente_tvac") or it.get("unit_price_tvac") or it.get("unit_price_ttc") or 0
+                px_raw = _first_present(it, ("prix_vente_tvac", "unit_price_tvac", "unit_price_ttc"), 0)
                 px_unit = quantize_money(to_decimal(px_raw, "dict.prix"))
-                qty = int(it.get("quantite") or it.get("quantity") or 1)
-                rate = to_decimal(it.get("taux_tva") or it.get("vat_rate") or Decimal("0.21"), "dict.rate")
-                # Remises ligne éventuelles
-                disc_pct = to_decimal(it.get("discount_percent") or 0, "disc_pct")
+                qty = int(_first_present(it, ("quantite", "quantity"), 1))
+                rate = to_decimal(_first_present(it, ("taux_tva", "vat_rate"), Decimal("0.21")), "dict.rate")
+                # Remises ligne éventuelles (pourcentage borné [0, 100] : 150 % donnait un prix négatif)
+                disc_pct = _clamp_percent(to_decimal(it.get("discount_percent") or 0, "disc_pct"))
                 disc_amt = to_decimal(it.get("discount_amount") or 0, "disc_amt")
                 if disc_pct > ZERO:
                     px_unit = quantize_money(px_unit * (Decimal("1.00") - (disc_pct / ONE_HUNDRED)))
@@ -121,16 +139,13 @@ class FinancialEngine:
             parsed_items.append((line_tvac, qty, rate))
 
         # Remise globale
-        disc_pct_dec = to_decimal(global_discount_percent, "global_discount_percent")
-        disc_amt_dec = to_decimal(global_discount_amount, "global_discount_amount")
-        total_discount = ZERO
-        if disc_pct_dec > ZERO:
-            total_discount += quantize_money(subtotal_brut * (disc_pct_dec / ONE_HUNDRED))
-        if disc_amt_dec > ZERO:
-            total_discount += disc_amt_dec
-        total_discount = min(subtotal_brut, quantize_money(total_discount))
-
-        final_tvac = max(ZERO, subtotal_brut - total_discount)
+        disc_pct_dec = _clamp_percent(to_decimal(global_discount_percent, "global_discount_percent"))
+        disc_amt_dec = max(ZERO, to_decimal(global_discount_amount, "global_discount_amount"))
+        # Pourcentage appliqué au sous-total EN UNE FOIS puis arrondi (identique à la production :
+        # `quantize(sous_total * (1 - pct/100))`), puis remise en montant ; remise = sous-total - final.
+        final_tvac = quantize_money(subtotal_brut * (Decimal("1.00") - disc_pct_dec / ONE_HUNDRED))
+        final_tvac = max(ZERO, quantize_money(final_tvac - disc_amt_dec))
+        total_discount = quantize_money(subtotal_brut - final_tvac)
         ratio = (final_tvac / subtotal_brut) if subtotal_brut > ZERO else Decimal("1.00")
 
         # Ventilation par taux de TVA
@@ -149,7 +164,7 @@ class FinancialEngine:
 
         total_tva = quantize_money(final_tvac - total_htva)
 
-        # Réconciliation de l'arrondi au centime sur la ventilation TVAC (Largest Remainder Method)
+        # Réconciliation de l'arrondi au centime sur la ventilation TVAC (résidu au taux le plus lourd)
         if vat_buckets:
             sum_bucket_tvac = sum((b["tvac"] for b in vat_buckets.values()), ZERO)
             residu = quantize_money(final_tvac - sum_bucket_tvac)
@@ -234,7 +249,8 @@ class FinancialEngine:
                 f"Paiement insuffisant : {reste_du} restant dû sur un total effectif de {effective_total_due}."
             )
 
-        rendu = max(ZERO, quantize_money(total_paid - effective_total_due))
+        # On ne rend que des espèces : un trop-perçu carte/QR/avoir ne produit pas de rendu.
+        rendu = min(cash_tendered, max(ZERO, quantize_money(total_paid - effective_total_due)))
 
         return FinancialReceipt(
             total_tvac=cart_total.total_ttc,

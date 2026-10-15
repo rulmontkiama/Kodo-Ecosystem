@@ -168,5 +168,72 @@ class TestFinancialEngine(unittest.TestCase):
         self.assertEqual(receipt.total_htva + receipt.total_tva, receipt.total_tvac)
 
 
+class TestFinancialEngineRegressions(unittest.TestCase):
+    """Défauts relevés à l'audit CTO du 2026-10-15 (chacun reproduit avant correction)."""
+
+    D21 = Decimal("0.21")
+
+    def test_zero_vat_rate_is_respected_not_replaced_by_21(self):
+        """`taux_tva=0` (article exonéré) était remplacé par 21 % par un `or` falsy."""
+        t = FinancialEngine.compute_cart_totals([{"prix_vente_tvac": "10.00", "quantite": 1, "taux_tva": 0}])
+        self.assertEqual((t.total_ht, t.total_tva, t.total_ttc), (Decimal("10.00"), Decimal("0.00"), Decimal("10.00")))
+        t = FinancialEngine.compute_cart_totals([{"prix_vente_tvac": "10.00", "quantite": 1, "vat_rate": "0.06"}])
+        self.assertEqual(t.total_tva, Decimal("0.57"))
+
+    def test_zero_or_negative_quantity_is_refused(self):
+        for qty in (0, -1):
+            with self.assertRaises(ValueError):
+                FinancialEngine.compute_cart_totals([{"prix_vente_tvac": "10.00", "quantite": qty, "taux_tva": self.D21}])
+
+    def test_line_discount_percent_is_clamped_to_100(self):
+        """150 % rendait le prix négatif et diminuait le total des autres lignes."""
+        t = FinancialEngine.compute_cart_totals([
+            {"prix_vente_tvac": "10.00", "quantite": 1, "taux_tva": self.D21, "discount_percent": "150"},
+            {"prix_vente_tvac": "20.00", "quantite": 1, "taux_tva": self.D21},
+        ])
+        self.assertEqual(t.total_ttc, Decimal("20.00"))
+
+    def test_global_discount_rounding_matches_production(self):
+        """10 % sur 10.05 : production = 9.05 (arrondi du total remisé), pas 9.04."""
+        t = FinancialEngine.compute_cart_totals(
+            [{"prix_vente_tvac": "10.05", "quantite": 1, "taux_tva": self.D21}], global_discount_percent=Decimal("10")
+        )
+        self.assertEqual(t.total_ttc, Decimal("9.05"))
+        self.assertEqual(t.total_discount_ttc, Decimal("1.00"))
+
+    def test_cash_classification_follows_the_project_authority(self):
+        """Mêmes réponses que `classer_moyen_paiement` : plus de liste locale divergente."""
+        import database_manager
+        for m in ("Espèces", "ESPECES", "Cash", "Liquide", "cash_usd", "Espece", "CB", "QR_Code", "Bancontact", "Avoir"):
+            self.assertEqual(is_cash_payment(m), database_manager.classer_moyen_paiement(m) == "especes", m)
+
+    def test_change_is_only_given_from_cash(self):
+        """Un trop-perçu carte ne produit pas de rendu (la caisse n'a pas de monnaie à rendre dessus)."""
+        r = FinancialEngine.compute_financial_receipt(
+            [{"prix_vente_tvac": "10.00", "quantite": 1, "taux_tva": self.D21}], [("CB", Decimal("15.00"))]
+        )
+        self.assertEqual(r.rendu, Decimal("0.00"))
+        r = FinancialEngine.compute_financial_receipt(
+            [{"prix_vente_tvac": "10.00", "quantite": 1, "taux_tva": self.D21}], [("Espèces", Decimal("20.00"))]
+        )
+        self.assertEqual(r.rendu, Decimal("10.00"))
+
+    def test_vat_invariant_over_random_baskets(self):
+        """∑ TVAC ventilée == total TVAC et HT + TVA == TVAC, sur des paniers multi-taux pseudo-aléatoires."""
+        import random
+        rnd = random.Random(20261015)
+        rates = [Decimal("0.21"), Decimal("0.12"), Decimal("0.06"), Decimal("0")]
+        for _ in range(300):
+            items = [
+                {"prix_vente_tvac": f"{rnd.randint(1, 20000) / 100:.2f}", "quantite": rnd.randint(1, 5),
+                 "taux_tva": rnd.choice(rates)}
+                for _ in range(rnd.randint(1, 8))
+            ]
+            t = FinancialEngine.compute_cart_totals(
+                items, global_discount_percent=Decimal(rnd.choice([0, 5, 10, 33, 50]))
+            )
+            self.assertEqual(t.total_ht + t.total_tva, t.total_ttc)
+            self.assertEqual(sum((b.montant_ttc for b in t.vat_breakdown), Decimal("0.00")), t.total_ttc)
+
 if __name__ == "__main__":
     unittest.main()

@@ -457,7 +457,33 @@ def process_sale_transaction(
                     f"Stock insuffisant pour l'article (stock_id={sid}) : disponible={dispo}, demandé={qty_totale}"
                 )
 
-        tot_tvac_dec = quantize_money(subtotal_brut_dec * (Decimal('1.00') - discount_dec / Decimal('100.00')))
+        # Totaux, ventilation TVA, arrondi belge (espèces uniquement) et rendu : délégués au
+        # moteur financier pur (`FinancialEngine`, zéro I/O). Les prix et taux passés ici sont
+        # ceux relus en base ci-dessus, jamais ceux du client.
+        from kodo_core.domain.sales.financial_engine import FinancialEngine
+        receipt = FinancialEngine.compute_financial_receipt(
+            items=[
+                {
+                    "prix_vente_tvac": Decimal(str(l["prix_vente_tvac"])),
+                    "quantite": l["quantite"],
+                    "taux_tva": Decimal(str(l["taux_tva"])),
+                }
+                for l in lignes_brutes
+            ],
+            payments=[(p[0], Decimal(str(p[1]))) for p in payments],
+            global_discount_percent=discount_dec,
+        )
+        tot_tvac_dec = receipt.total_tvac
+        tot_htva_dec = receipt.total_htva
+        tot_tva_dec = receipt.total_tva
+        # Remise réellement accordée en EUROS (et non le pourcentage brut) : le pourcentage
+        # seul, stocké tel quel dans Tickets.remise, faisait additionner des "10" (pour 10%)
+        # comme des euros dans le total_remises du bilan Z et des exports comptables.
+        remise_montant_dec = receipt.remise
+        paiements_dec = list(receipt.payments)
+        ecart_arrondi_cash = receipt.ecart_arrondi_cash
+        rendu_dec = receipt.rendu
+        effective_total_due = quantize_money(sum((m for _, m in paiements_dec), Decimal('0.00')) - rendu_dec)
 
         try:
             total_annonce_dec = quantize_money(Decimal(str(total_tvac)))
@@ -469,69 +495,10 @@ def process_sale_transaction(
         except Exception:
             pass
 
-        ratio_remise = (
-            (tot_tvac_dec / subtotal_brut_dec) if subtotal_brut_dec > Decimal('0.00') else Decimal('1.00')
-        )
-
-        tot_htva_dec = Decimal('0.00')
         panier_formatted = []
         for ligne in lignes_brutes:
-            taux = Decimal(str(ligne.pop("taux_tva")))
-            ligne_tvac_brute = ligne.pop("ligne_tvac_brute")
-            ligne_tvac_remisee = quantize_money(ligne_tvac_brute * ratio_remise)
-            ligne_htva = quantize_money(ligne_tvac_remisee / (Decimal('1.00') + taux))
-            tot_htva_dec += ligne_htva
-
-            ligne["taux_tva"] = float(taux)
+            ligne.pop("ligne_tvac_brute", None)
             panier_formatted.append(ligne)
-
-        tot_tva_dec = tot_tvac_dec - tot_htva_dec
-
-        # Remise réellement accordée en EUROS (et non le pourcentage brut) : le pourcentage
-        # seul, stocké tel quel dans Tickets.remise, faisait additionner des "10" (pour 10%)
-        # comme des euros dans le total_remises du bilan Z et des exports comptables.
-        remise_montant_dec = quantize_money(subtotal_brut_dec - tot_tvac_dec)
-
-        paiements_dec = []
-        for p in payments:
-            montant_p = quantize_money(Decimal(str(p[1])))
-            if montant_p <= Decimal('0.00'):
-                raise ValueError(f"Montant de paiement invalide ({montant_p}) pour le mode {p[0]!r}.")
-            paiements_dec.append((p[0], montant_p))
-
-        # Arrondi légal belge à 5 centimes sur le solde espèces (Loi du 01/12/2019).
-        # IMMUNITÉ TVA : tot_tvac_dec, tot_htva_dec et tot_tva_dec restent strictement intouchés.
-        # La classification passe par la source d'autorité unique du projet : un libellé
-        # hérité ("CASH", "especes") ne doit jamais échapper à l'arrondi.
-        def _is_cash(m):
-            return database_manager.classer_moyen_paiement(m) == "especes"
-
-        cash_tendered = sum((p[1] for p in paiements_dec if _is_cash(p[0])), Decimal('0.00'))
-        non_cash_total = sum((p[1] for p in paiements_dec if not _is_cash(p[0])), Decimal('0.00'))
-        ecart_arrondi_cash = Decimal('0.00')
-        effective_total_due = tot_tvac_dec
-
-        if cash_tendered > Decimal('0.00'):
-            due_in_cash_raw = max(Decimal('0.00'), tot_tvac_dec - non_cash_total)
-            if due_in_cash_raw > Decimal('0.00'):
-                due_in_cash, ecart_arrondi_cash = apply_belgian_cash_rounding(due_in_cash_raw)
-                # Une caisse pas encore alignée sur l'arrondi (ou un solde mixte saisi au
-                # centime) transmet le montant BRUT : refuser la vente immobiliserait le
-                # comptoir client devant soi. On enregistre alors l'encaissement RÉEL —
-                # le tiroir contient ce que le client a effectivement remis — et on
-                # recalcule l'écart d'arrondi sur cette réalité, jamais sur une hypothèse.
-                manque = due_in_cash - cash_tendered
-                if (Decimal('0.00') < manque <= Decimal('0.02') and cash_tendered >= due_in_cash_raw):
-                    due_in_cash = quantize_money(cash_tendered)
-                    ecart_arrondi_cash = quantize_money(due_in_cash - due_in_cash_raw)
-                effective_total_due = quantize_money(non_cash_total + due_in_cash)
-
-        # Rendu de monnaie recalculé serveur sur la base du montant dû effectif (arrondi si espèces)
-        rendu_dec, reste_du_dec = CartEngine.calculate_change_due(effective_total_due, paiements_dec)
-        if reste_du_dec > Decimal('0.00'):
-            raise ValueError(
-                f"Paiement insuffisant : {reste_du_dec} restant dû sur un total de {effective_total_due}."
-            )
 
         # Redemption réelle de carte cadeau/avoir : sans ce contrôle serveur, choisir
         # "Avoir" comme moyen de paiement validait la vente pour n'importe quel code
