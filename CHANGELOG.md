@@ -4,6 +4,28 @@ Toutes les modifications notables apportées au projet Kōdo POS sont documenté
 
 ---
 
+## [2.2.0] - 2026-10-15
+
+### 🛡️ Traçabilité Fiscale NF525 & Atomicité
+- **Commit unique indivisible (`BEGIN IMMEDIATE`)** : L'écriture du ticket de vente et son scellement SHA-256 dans le journal fiscal sont désormais garantis atomiques. Tout échec ou crash annule l'ensemble de la transaction (`conn.rollback()`), interdisant structurellement tout ticket payé orphelin sans sceau.
+- **Concurrence sans fork** : Élimination de toute bifurcation de la chaîne de hachage lors d'encaissements simultanés multi-caisses.
+- **Moteur financier pur (`FinancialEngine`)** : Moteur de calcul financier isolé et mathématiquement vérifié, garantissant l'invariant fiscal TVA (`total_htva + total_tva == total_tvac`).
+- **Arrondi légal belge à 5 centimes (Loi du 01/12/2019)** : Isolation stricte de l'arrondi sur les seuls règlements en espèces (`ecart_arrondi_cash == 0.00` sur tout règlement sans espèces).
+- **Plafonnement des avoirs et cartes cadeaux** : Le débit d'une carte cadeau ou d'un bon d'avoir est strictement borné au reste dû pour éviter toute perte de solde client.
+
+### 🌐 Synchronisation Shopify (Outbox Transactionnelle)
+- **Outbox transactionnelle** : La file d'attente `sync_queue` est inscrite dans la même transaction que la vente.
+- **Recul exponentiel** : En cas de panne réseau, chaque ligne décompte ses essais et temporise ses retentatives (30s, 1min, 2min... jusqu'à 15min) via `prochaine_tentative`.
+- **Idempotence GraphQL** : Clé d'idempotence unique par ajustement d'inventaire (`kodo-vd-{vd_id}-{inv_item_id}`).
+- **Isolation des commandes web** : Les commandes passées sur Shopify décomptent le stock physique sans générer de vente ou de ticket en caisse locale.
+
+### ⚡ Matériel & Ergonomie
+- **Protection anti-double scan 800ms** : Verrouillage matériel anti-rebond sur douchette code-barres évitant les sur-ajouts accidentels au comptoir.
+- **Clôture Z v2** : Scellement cryptographique complet de l'ensemble des montants et de la période couverte.
+- **Contrôle d'intégrité au lancement** : Diagnostic automatique à l'ouverture de l'application avec bandeau préventif.
+
+---
+
 ## [2.1.2] - 2026-10-14
 
 > Les versions 2.0.x → 2.1.1 sont documentées dans les messages de commit et dans `public/latest.json`.
