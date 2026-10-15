@@ -503,6 +503,23 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
         if not str(mode_paiement or "").strip():
             return 400, {"error": "Moyen de paiement requis : Espèces, CB, QR, ou « Offert » (aucun encaissement)."}
 
+        # Un bon OFFERT n'encaisse rien : c'est un geste commercial sans trace de caisse. L'API n'ayant pas
+        # d'authentification, la garantie est une CONFIRMATION explicite et un MOTIF, tous deux inscrits dans
+        # la piste d'audit signée (qui l'a offert, pour combien, pourquoi).
+        motif = str(data.get("reason") or data.get("motif") or "").strip()
+        try:
+            classe_paiement = database_manager.classer_encaissement_bon(mode_paiement)
+        except ValueError as ve:
+            return 400, {"error": str(ve)}
+        if classe_paiement == "offert":
+            confirme = data.get("confirmOffert")
+            if not (confirme is True or str(confirme).strip().lower() in ("true", "1", "oui")):
+                return 400, {"error": "Un bon offert doit être confirmé : aucun encaissement ne sera enregistré.",
+                             "code": "OFFERT_CONFIRMATION_REQUISE"}
+            if len(motif) < 3:
+                return 400, {"error": "Indiquez le motif de ce bon offert (au moins 3 caractères).",
+                             "code": "OFFERT_MOTIF_REQUIS"}
+
         conn = database_manager.get_connection()
         try:
             cursor = conn.cursor()
@@ -519,6 +536,7 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
                 notes=data.get("notes"),
                 emis_par=data.get("userName") or data.get("cashierName") or "Admin",
                 prefix=(data.get("prefix") or "AVOIR"),
+                motif=motif or None,
             )
             conn.commit()
         except ValueError as ve:
@@ -558,17 +576,30 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
 
     elif method == "POST" and path == "/api/gift-cards/void":
         code = data.get("code")
+        rembourser = data.get("refund")
+        if rembourser is None:
+            rembourser = data.get("rembourser")
+        rembourser = rembourser is True or str(rembourser).strip().lower() in ("true", "1", "oui")
         conn = database_manager.get_connection()
         try:
             cursor = conn.cursor()
-            database_manager.annuler_carte_cadeau(cursor, code, user_name=data.get("userName") or data.get("cashierName"))
+            if not conn.in_transaction:
+                # Écriture exclusive : un remboursement signe une ligne du journal de caisse.
+                cursor.execute("BEGIN IMMEDIATE")
+            bilan = database_manager.annuler_carte_cadeau(
+                cursor, code, user_name=data.get("userName") or data.get("cashierName"),
+                rembourser=rembourser, motif=data.get("reason") or data.get("motif"))
             conn.commit()
         except ValueError as ve:
             conn.rollback()
             return 400, {"error": str(ve)}
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
-        return 200, {"success": True}
+        return 200, {"success": True, "voidedAmount": float(bilan["solde_annule"]),
+                     "refunded": float(bilan["rembourse"]), "refundMethod": bilan["methode"]}
 
     # 10. Crash Recovery : Sauvegarde / Récupération du panier actif
     elif method == "POST" and path == "/api/cart/session":

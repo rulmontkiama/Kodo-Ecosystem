@@ -1470,7 +1470,7 @@ def classer_encaissement_bon(mode):
 
 
 def vendre_carte_cadeau(cursor, montant, mode_paiement, code=None, client_id=None, client_nom=None, notes=None,
-                        emis_par=None, prefix="AVOIR", date_heure=None, caisse_id="POS-01"):
+                        emis_par=None, prefix="AVOIR", date_heure=None, caisse_id="POS-01", motif=None):
     """Vend un bon cadeau : émet la carte ET inscrit l'encaissement dans le journal de caisse signé.
 
     Jusqu'ici l'écran « Cartes cadeaux » émettait la carte sans aucune écriture : l'argent encaissé
@@ -1486,8 +1486,11 @@ def vendre_carte_cadeau(cursor, montant, mode_paiement, code=None, client_id=Non
 
     from kodo_core.db.audit_trail import record_audit_event
     if classe == "offert":
+        detail = f"Bon de {carte['initialAmount']} EUR offert, aucun encaissement"
+        if str(motif or "").strip():
+            detail += f" — motif : {str(motif).strip()[:120]}"
         record_audit_event(cursor, "CARTE_CADEAU_OFFERTE", "Cartes_Cadeaux", carte["code"], emis_par or "",
-                           "OFFRE", f"Bon de {carte['initialAmount']} EUR offert, aucun encaissement")
+                           "OFFRE", detail)
         carte.update({"paymentMode": "Offert", "encaisse": False})
         return carte
 
@@ -1519,8 +1522,22 @@ def lister_cartes_cadeaux(conn=None):
                    ticket_origine, ticket_remboursement
             FROM Cartes_Cadeaux ORDER BY id DESC
         """)
-        return [
-            {
+        lignes = c.fetchall()
+        # Encaissement NET de chaque bon au journal de caisse (ventes moins remboursements d'annulation) :
+        # c'est lui qui dit si une annulation peut donner lieu à un remboursement en caisse.
+        encaisse = {}
+        c.execute("""
+            SELECT reference, methode_paiement, montant FROM Ledger_Caisse
+            WHERE type_mouvement = 'VENTE_BON' ORDER BY id ASC
+        """)
+        for reference, methode, montant in c.fetchall():
+            net, mode = encaisse.get(reference, (Decimal("0.00"), None))
+            montant_dec = Decimal(str(montant or "0"))
+            encaisse[reference] = (net + montant_dec, mode or (methode if montant_dec > 0 else None))
+        resultat = []
+        for r in lignes:
+            net, mode = encaisse.get(r[1], (Decimal("0.00"), None))
+            resultat.append({
                 "id": str(r[0]),
                 "code": r[1],
                 "initialAmount": float(r[2]),
@@ -1532,9 +1549,10 @@ def lister_cartes_cadeaux(conn=None):
                 "status": r[8] or "active",
                 "originTicket": r[9],
                 "refundTicket": r[10],
-            }
-            for r in c.fetchall()
-        ]
+                "cashCollected": float(net) if net > 0 else 0.0,
+                "cashMethod": mode if net > 0 else None,
+            })
+        return resultat
     finally:
         if should_close:
             conn.close()
@@ -1588,23 +1606,75 @@ def utiliser_carte_cadeau(cursor, code, montant_a_utiliser, user_name=None):
     return montant_dec
 
 
-def annuler_carte_cadeau(cursor, code, user_name=None):
+def annuler_carte_cadeau(cursor, code, user_name=None, rembourser=False, motif=None,
+                         caisse_id="POS-01", date_heure=None):
     """Invalide une carte cadeau/avoir (mise à solde 0, statut 'annulee') sans jamais
     supprimer la ligne : une carte cadeau émise reste une pièce comptable, comme un
     ticket ou un mouvement de caisse.
 
     Le solde détruit et l'auteur sont inscrits dans la chaîne d'audit : annuler un bon
-    revient à faire disparaître une dette envers la cliente, ça doit laisser une trace."""
+    revient à faire disparaître une dette envers la cliente, ça doit laisser une trace.
+
+    Deux annulations très différentes se cachaient derrière le même geste :
+    - SANS remboursement (bon perdu, périmé, geste annulé) : l'argent reste dans la boutique, aucun
+      mouvement de caisse n'est dû. C'est le comportement historique, conservé par défaut.
+    - AVEC remboursement (bon vendu par erreur) : l'argent REPART vers la cliente, et la caisse doit le
+      savoir. `rembourser=True` inscrit une écriture NÉGATIVE de type VENTE_BON, dans le moyen qui avait
+      encaissé le bon, pour le solde restant — jamais plus que l'encaissement net du bon. Elle se range
+      toute seule au Z (règlements ET bons vendus diminuent du même montant : l'équation tient).
+
+    Refuse un remboursement pour un bon qui n'a rien encaissé en caisse (offert, ou avoir issu d'un
+    retour) : on ne fabrique pas un mouvement d'argent qui n'a pas eu lieu.
+
+    Retourne {"solde_annule", "rembourse", "methode"} (Decimal / Decimal / str ou None)."""
     code_norm = str(code or "").strip().upper()
     cursor.execute("SELECT id, solde_actuel, status FROM Cartes_Cadeaux WHERE code = ?", (code_norm,))
     row = cursor.fetchone()
     if not row:
         raise ValueError(f"Carte cadeau/avoir introuvable : {code_norm}")
+    if (row[2] or "active") == "annulee":
+        raise ValueError(f"Carte cadeau/avoir {code_norm} déjà annulée.")
     solde = Decimal(str(row[1] or 0)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    rembourse = Decimal("0.00")
+    methode = None
+    if rembourser:
+        if solde <= Decimal("0.00"):
+            raise ValueError(f"Carte cadeau/avoir {code_norm} : aucun solde à rembourser.")
+        cursor.execute(
+            "SELECT methode_paiement, montant FROM Ledger_Caisse "
+            "WHERE type_mouvement = 'VENTE_BON' AND reference = ? ORDER BY id ASC", (code_norm,))
+        ecritures = [(m, Decimal(str(mt or "0"))) for m, mt in cursor.fetchall()]
+        encaissements = [m for m, mt in ecritures if mt > Decimal("0.00")]
+        if not encaissements:
+            raise ValueError(
+                f"Le bon {code_norm} n'a pas été encaissé en caisse (offert, ou avoir issu d'un retour) : "
+                f"il n'y a rien à rembourser en caisse. Annulez-le sans remboursement.")
+        net = sum((mt for _m, mt in ecritures), Decimal("0.00"))
+        rembourse = min(solde, net).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if rembourse <= Decimal("0.00"):
+            raise ValueError(f"Le bon {code_norm} a déjà été remboursé en caisse.")
+        methode = encaissements[0]
+        date_heure = date_heure or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        signature, hash_prec = signer_ledger(cursor, 'VENTE_BON', -rembourse, methode, code_norm, date_heure)
+        cursor.execute("""
+            INSERT INTO Ledger_Caisse (vendeur, type_mouvement, montant, methode_paiement, reference, date_heure,
+                                       signature, hash_precedent, caisse_id)
+            VALUES (?, 'VENTE_BON', ?, ?, ?, ?, ?, ?, ?)
+        """, (user_name, float(-rembourse), methode, code_norm, date_heure, signature, hash_prec, caisse_id))
+
     cursor.execute("UPDATE Cartes_Cadeaux SET solde_actuel = 0, status = 'annulee' WHERE id = ?", (row[0],))
     from kodo_core.db.audit_trail import record_audit_event
+    detail = f"Solde annulé {solde} EUR (statut précédent : {row[2] or 'active'})"
+    if rembourse > Decimal("0.00"):
+        detail += f" ; remboursé en caisse {rembourse} EUR ({methode})"
+    else:
+        detail += " ; sans remboursement en caisse"
+    if str(motif or "").strip():
+        detail += f" ; motif : {str(motif).strip()[:120]}"
     record_audit_event(cursor, "CARTE_CADEAU_ANNULEE", "Cartes_Cadeaux", code_norm, user_name or "", "ANNULATION",
-                       f"Solde annulé {solde} EUR (statut précédent : {row[2] or 'active'})")
+                       detail)
+    return {"solde_annule": solde, "rembourse": rembourse, "methode": methode}
 
 
 def sauvegarder_panier_en_attente(panier, total_tvac, client_id=None, client_nom=None, remise=Decimal('0.00'), note="", conn=None):

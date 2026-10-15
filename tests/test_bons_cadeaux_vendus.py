@@ -182,7 +182,9 @@ class TestRoute(_BaseDB):
             [("VENTE_BON", "CB", 50.0, corps["code"])])
 
     def test_bon_offert_par_la_route(self):
-        statut, corps = self._appel({"amount": 15, "paymentMethod": "Offert", "userName": "Julie"})
+        # Depuis 2.1.3 un bon offert est confirmé et motivé (voir test_bon_annule_et_offert.py).
+        statut, corps = self._appel({"amount": 15, "paymentMethod": "Offert", "userName": "Julie",
+                                     "confirmOffert": True, "reason": "Geste commercial"})
         self.assertEqual(statut, 200)
         self.assertFalse(corps["encaisse"])
         self.assertEqual(self._q("SELECT COUNT(*) FROM Ledger_Caisse"), [(0,)])
