@@ -7,7 +7,7 @@ Aucune dépendance UI ni BDD. Toute valeur monétaire est un decimal.Decimal.
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 TWO_DECIMALS = Decimal("0.01")
 
@@ -201,3 +201,30 @@ class Cart:
                 else None
             ),
         )
+
+
+@dataclass
+class FinancialReceipt:
+    """Reçu financier immuable validé par le domaine de caisse (NF525).
+
+    Garantit l'immunité fiscale absolue : tot_tvac, tot_htva et tot_tva sont
+    rigoureusement quantifiés, et l'écart d'arrondi espèces est strictement isolé.
+    """
+
+    total_tvac: Decimal
+    total_htva: Decimal
+    total_tva: Decimal
+    remise: Decimal
+    rendu: Decimal
+    ecart_arrondi_cash: Decimal
+    payments: List[Tuple[str, Decimal]]
+    vat_breakdown: List[VatBreakdownLine] = field(default_factory=list)
+
+    def __post_init__(self):
+        self.total_tvac = quantize_money(self.total_tvac)
+        self.total_htva = quantize_money(self.total_htva)
+        self.total_tva = quantize_money(self.total_tva)
+        self.remise = quantize_money(self.remise)
+        self.rendu = quantize_money(self.rendu)
+        self.ecart_arrondi_cash = quantize_money(self.ecart_arrondi_cash)
+

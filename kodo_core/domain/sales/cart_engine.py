@@ -582,6 +582,20 @@ def process_sale_transaction(
         if ticket_id is None:
             raise last_integrity_error
 
+        # Scellement fiscal inaltérable (Conformité NF525 / Loi Anti-fraude TVA) DANS LA MÊME TRANSACTION ATOMIQUE.
+        # En joignant la transaction active (BEGIN IMMEDIATE), l'écriture du ticket et son scellement
+        # sont indivisibles : un échec ou un crash annule TOUT (conn.rollback()), interdisant
+        # structurellement tout ticket orphelin non scellé.
+        from kodo_core.services.fiscal_service import ensure_schema as ensure_fiscal_schema, seal_sale
+        ensure_fiscal_schema(conn)
+        seal_sale(conn, ticket_id, {
+            "total_ttc": tot_tvac_dec,
+            "total_ht": tot_htva_dec,
+            "total_tva": tot_tva_dec,
+            "timestamp_utc": datetime.datetime.strptime(now_str, "%Y-%m-%d %H:%M:%S")
+                             .astimezone(datetime.timezone.utc).isoformat(),
+        })
+
         conn.commit()
 
         # Réveil immédiat de la synchronisation Shopify (temps réel < 2s pour pièces uniques)
@@ -590,29 +604,6 @@ def process_sale_transaction(
             reveiller_sync()
         except Exception:
             pass
-
-        # Scellement fiscal inaltérable (Conformité Loi Anti-fraude TVA)
-        fiscal_totals = {
-            "total_ttc": tot_tvac_dec,
-            "total_ht": tot_htva_dec,
-            "total_tva": tot_tva_dec,
-        }
-        try:
-            from kodo_core.services.fiscal_service import ensure_schema as ensure_fiscal_schema, seal_sale
-            ensure_fiscal_schema(conn)
-            seal_sale(conn, ticket_id, fiscal_totals)
-        except Exception as fe:
-            # Le scellement peut échouer après le commit de la vente : on journalise la
-            # vente dans fiscal_unsealed_sales pour qu'elle soit rescellée au prochain
-            # démarrage (reseal_pending_sales) au lieu de disparaître silencieusement
-            # du journal fiscal.
-            print(f"[FISCAL LEDGER WARNING] Impossible de sceller la vente {ticket_id}: {fe}")
-            try:
-                from kodo_core.services.fiscal_service import ensure_schema as ensure_fiscal_schema, record_unsealed_sale
-                ensure_fiscal_schema(conn)
-                record_unsealed_sale(conn, ticket_id, fiscal_totals, str(fe))
-            except Exception as fe2:
-                print(f"[FISCAL LEDGER WARNING] Impossible de journaliser l'échec de scellement pour {ticket_id}: {fe2}")
 
         # Nettoyage de la session Crash Recovery (panier validé avec succès)
         try:

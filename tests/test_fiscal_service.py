@@ -126,3 +126,27 @@ def test_seal_sale_is_atomic_on_failure(conn):
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM fiscal_ledger")
     assert cursor.fetchone()[0] == 1
+
+
+def test_seal_sale_joins_caller_transaction_and_rolls_back(conn):
+    """Vérifie que seal_sale ne commite pas si l'appelant détient la transaction, permettant un rollback total."""
+    cursor = conn.cursor()
+    cursor.execute("BEGIN IMMEDIATE")
+    entry = seal_sale(conn, sale_id=1, totals=_totals("12.00", "10.00", "2.00"))
+    assert entry["sequence_number"] == "TCK-2026-0001"
+    # La transaction doit être toujours active (non commitée par seal_sale)
+    assert conn.in_transaction is True
+
+    # Le rollback de l'appelant doit annuler le scellement
+    conn.rollback()
+    assert conn.in_transaction is False
+
+    cursor.execute("SELECT COUNT(*) FROM fiscal_ledger")
+    assert cursor.fetchone()[0] == 0
+
+
+def test_seal_sale_unique_sale_id_constraint(conn):
+    """Vérifie qu'une même vente (sale_id) ne peut jamais être scellée deux fois (index unique)."""
+    seal_sale(conn, sale_id=42, totals=_totals("12.00", "10.00", "2.00"))
+    with pytest.raises(sqlite3.IntegrityError):
+        seal_sale(conn, sale_id=42, totals=_totals("12.00", "10.00", "2.00"))

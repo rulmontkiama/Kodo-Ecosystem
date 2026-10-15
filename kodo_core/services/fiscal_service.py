@@ -69,7 +69,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.commit()
+    # 1 ticket = 1 scellement (garantie d'unicité NF525)
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_fiscal_ledger_sale ON fiscal_ledger(sale_id)")
+    except (sqlite3.OperationalError, sqlite3.IntegrityError):
+        pass
+
+    if not conn.in_transaction:
+        conn.commit()
 
 
 def record_unsealed_sale(conn: sqlite3.Connection, sale_id: int, totals: dict, reason: str) -> None:
@@ -204,8 +211,10 @@ def seal_sale(db_conn: sqlite3.Connection, sale_id: int, totals: dict) -> dict:
     year = datetime.fromisoformat(timestamp_utc).year
 
     cursor = db_conn.cursor()
+    owns_tx = not db_conn.in_transaction
     try:
-        cursor.execute("BEGIN IMMEDIATE")
+        if owns_tx:
+            cursor.execute("BEGIN IMMEDIATE")
 
         sequence_number = _next_sequence_number(cursor, year)
 
@@ -236,9 +245,11 @@ def seal_sale(db_conn: sqlite3.Connection, sale_id: int, totals: dict) -> dict:
                 signature,
             ),
         )
-        db_conn.commit()
+        if owns_tx:
+            db_conn.commit()
     except Exception:
-        db_conn.rollback()
+        if owns_tx:
+            db_conn.rollback()
         raise
 
     return {
