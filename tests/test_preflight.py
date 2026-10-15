@@ -312,7 +312,7 @@ class TestVersionEtDepot(Depot):
         self._git("add", "-A")
         self.assertEqual(pf.g_secrets(self.ctx()).statut, pf.PASS)
         r = pf.g_donnees_suivies(self.ctx())
-        self.assertEqual(r.statut, pf.WARN)
+        self.assertEqual(r.statut, pf.FAIL)
         self.assertIn("Exports_Client/ventes.csv", r.lignes)
 
         self.ecrire("config.py", 'TOKEN = "shpat_' + "a" * 32 + '"\n')
@@ -326,6 +326,13 @@ class TestVersionEtDepot(Depot):
         self.assertIn("jeton Shopify dans config.py", texte)
         self.assertIn("clé privée dans cle.txt", texte)
         self.assertIn("firebase-adminsdk-abc.json", texte)
+
+    def test_gitignore_du_depot_ferme_la_porte_aux_donnees(self):
+        """Le .gitignore réel doit ignorer exports, cache de licence et CSV : le dépôt GitHub est public."""
+        racine = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        regles = {l.strip() for l in open(os.path.join(racine, ".gitignore"), encoding="utf-8")}
+        for regle in ("Exports_*/", "license_cache.json", "*.csv", "*.bak", ".npm-cache/", "*.db"):
+            self.assertIn(regle, regles, f"{regle} absent du .gitignore")
 
     def test_secret_non_suivi_par_git_n_est_pas_signale(self):
         self._git("init", "-q")

@@ -851,8 +851,8 @@ def g_donnees_suivies(ctx) -> Resultat:
     motif = re.compile(r"(^|/)(Exports?_[^/]*/|license_cache\.json$)|\.(db|sqlite|sqlite3|csv|xlsx)$", re.I)
     trouves = [f for f in suivis if motif.search(f) and not f.startswith(("tests/", "docs/")) and "/fixtures/" not in f]
     if trouves:
-        return Resultat(WARN, f"{len(trouves)} fichier(s) de données suivi(s) par git (dépôt public ?)",
-                        trouves[:15])
+        return Resultat(FAIL, f"{len(trouves)} fichier(s) de données suivi(s) par git (le dépôt est PUBLIC)",
+                        trouves[:15] + ["Retirer du suivi : git rm --cached <fichier> (le fichier reste sur le disque)"])
     return Resultat(PASS, "aucun export, base ni cache de licence suivi par git")
 
 

@@ -21,3 +21,10 @@ zih5Ix5L
 kodo-pos-firebase-adminsdk-*.json
 test_res.txt
 Exports_Kodo_POS/
+
+# Données commerciales : le dépôt est PUBLIC, rien de ceci ne doit jamais y être suivi (porte `donnees_suivies` du preflight)
+Exports_*/
+license_cache.json
+*.csv
+!tests/**/*.csv
+*.bak
