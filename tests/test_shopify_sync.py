@@ -499,6 +499,12 @@ class TestPousseeDesVentes(BaseTemporaire):
         self.assertEqual(sorted(ajustements), [(1001, -1), (1003, -3)])
         self.assertEqual(self.rows("SELECT synced_shopify FROM Tickets"), [(0,)])
 
+        # Recul exponentiel : la ligne 2 est en attente de son heure, une passe immédiate n'y touche pas.
+        moteur_tot, ajustements_tot = self.moteur_trois_lignes()
+        moteur_tot.sync_tickets_to_shopify()
+        self.assertEqual(ajustements_tot, [], "la ligne en recul a été rejouée avant son heure")
+        self.ecrire("UPDATE sync_queue SET prochaine_tentative = '2000-01-01 00:00:00'")  # délai écoulé
+
         # Deuxième passe, cette fois sans panne : SEULE la ligne 2 doit repartir.
         moteur2, ajustements2 = self.moteur_trois_lignes()
         moteur2.sync_tickets_to_shopify()

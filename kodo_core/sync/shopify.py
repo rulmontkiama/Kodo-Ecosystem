@@ -303,10 +303,12 @@ STATUT_INDETERMINE = "INDETERMINE"      # réponse jamais reçue : à vérifier 
 # suivante, au rythme (recul exponentiel jusqu'à 15 min) de la boucle de synchronisation.
 # Cette table ÉCLAIRE la file (compteur « en attente », prochaine tentative) ; la garantie de
 # non-double-décompte reste tenue par la clé primaire de `Shopify_Sync_Lignes`, inchangée.
-FILE_PENDING = "PENDING"
-FILE_DONE = "DONE"
-FILE_INDETERMINE = "INDETERMINE"
-FILE_IGNORE = "IGNORE"
+from kodo_core.db.shopify_file import (  # noqa: E402 - définitions uniques de la file
+    FILE_PENDING, FILE_DONE, FILE_INDETERMINE, FILE_IGNORE,
+    PARAM_SEUIL_TICKETS,
+    assurer_table as _assurer_table_file,
+    delai_backoff, est_due, prochaine_tentative,
+)
 FILE_CONSERVATION_JOURS = 14  # les lignes terminées sont purgées au-delà
 
 # `urlopen` d'origine : tant qu'il n'est pas substitué (tests, outils), les appels passent par
@@ -399,23 +401,9 @@ def _assurer_tables_sync(cursor):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_shopify_remboursements_order ON Shopify_Remboursements(order_id)"
     )
-    # File d'attente locale des mouvements de stock (voir FILE_PENDING). Même définition que la
-    # migration 2.0.9 : toute évolution doit être portée aux DEUX endroits.
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_vente_detail INTEGER NOT NULL UNIQUE,
-            id_ticket INTEGER NOT NULL,
-            code_barre TEXT,
-            delta INTEGER NOT NULL,
-            statut TEXT NOT NULL DEFAULT 'PENDING',
-            tentatives INTEGER NOT NULL DEFAULT 0,
-            derniere_erreur TEXT,
-            date_creation TEXT NOT NULL,
-            date_maj TEXT NOT NULL
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_statut ON sync_queue(statut)")
+    # File d'attente locale des mouvements de stock (voir FILE_PENDING) : définition unique dans
+    # `kodo_core.db.shopify_file` (la migration 2.1.2 y ajoute `prochaine_tentative`).
+    _assurer_table_file(cursor)
     # Lignes de stock saisies à la main, à aligner sur la boutique en ligne (voir
     # `kodo_core.db.shopify_alignement` ; créée aussi à la demande, sans migration).
     shopify_alignement.assurer_table(cursor)
@@ -426,7 +414,8 @@ def _assurer_tables_sync(cursor):
 # Tout ticket naît avec `synced_shopify = 0`. Sans point de départ, la première passe poussait
 # TOUT l'historique de la caisse vers une boutique dont le stock (importé du CSV de Kōdo, ou copié
 # depuis Shopify) en tenait déjà compte : chaque vente passée était décomptée une seconde fois.
-PARAM_SEUIL_TICKETS = "shopify_seuil_ticket"          # on ne pousse que les tickets d'id > seuil
+# PARAM_SEUIL_TICKETS ("shopify_seuil_ticket") : importé de `kodo_core.db.shopify_file`.
+# On ne pousse que les tickets d'id > seuil.
 PARAM_ALIGNEMENT_TICKETS = "shopify_ticket_alignement"  # dernier ticket au dernier alignement des stocks
 
 
@@ -1354,13 +1343,69 @@ class ShopifySync:
         """ID de l'item d'inventaire Shopify pour un SKU/code-barres, ou None."""
         return self._resoudre_inventory_item(sku)[0]
 
-    def adjust_shopify_stock(self, inventory_item_id: int, location_id: str, qty_change: int) -> bool:
+    _MUTATION_AJUSTEMENT = """
+    mutation AjusterInventaire($input: InventoryAdjustQuantitiesInput!, $key: String!) {
+      inventoryAdjustQuantities(input: $input) @idempotent(key: $key) {
+        userErrors { field message }
+        inventoryAdjustmentGroup { createdAt }
+      }
+    }
+    """
+
+    def _ajuster_graphql(self, inventory_item_id, location_id, qty_change, cle):
+        """
+        Ajustement relatif par mutation GraphQL `@idempotent` (facultative depuis l'API 2026-01,
+        obligatoire dès 2026-04 : sans elle, la poussée cesserait de fonctionner à la montée de version).
+
+        Retourne True (appliqué), False (refusé, ou aucune réponse : `dernier_echec` le dit) ou None
+        si GraphQL n'a RIEN exécuté (erreur de validation, portée absente, directive inconnue) : seul
+        cas où le repli REST est permis. Après une coupure réseau on ne retombe JAMAIS sur REST : la
+        mutation a pu être appliquée, REST la rejouerait sans clé et décompterait deux fois. On ne
+        s'appuie pas non plus sur la clé pour rejouer une ligne indéterminée : sa rétention et son
+        effet sur un doublon ne sont pas documentés (et un doublon aurait été constaté en 2026-04).
+        """
+        gid_item = (str(inventory_item_id) if str(inventory_item_id).startswith("gid://")
+                    else f"gid://shopify/InventoryItem/{inventory_item_id}")
+        gid_lieu = (str(location_id) if str(location_id).startswith("gid://")
+                    else f"gid://shopify/Location/{location_id}")
+        corps = {
+            "query": self._MUTATION_AJUSTEMENT,
+            "variables": {
+                "key": str(cle),
+                "input": {"reason": "correction", "name": "available",
+                          "changes": [{"inventoryItemId": gid_item, "locationId": gid_lieu,
+                                       "delta": int(qty_change)}]},
+            },
+        }
+        res = self.make_request("graphql.json", method="POST", data=corps, rejouable=False)
+        if res is None:
+            # « reseau » : réponse jamais reçue ; autre (429, 5xx, 4xx) : Shopify a répondu, rien appliqué.
+            return False if self.dernier_echec == "reseau" else None
+        data = res.get("data") if isinstance(res, dict) else None
+        resultat = data.get("inventoryAdjustQuantities") if isinstance(data, dict) else None
+        if not isinstance(resultat, dict):
+            return None
+        erreurs = resultat.get("userErrors") or []
+        if erreurs:
+            self._noter_echec("http", "GraphQL : " + " ; ".join(
+                str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in erreurs))
+            return False
+        self._effacer_echec()
+        return True
+
+    def adjust_shopify_stock(self, inventory_item_id: int, location_id: str, qty_change: int,
+                             idempotency_key: str = None) -> bool:
         """Ajuste (en relatif) le niveau d'inventaire sur Shopify pour un article donné."""
         # Remise à zéro AVANT le refus d'office : sans appel, aucune cause d'un échec passé ne doit
         # se coller à celui-ci.
         self._effacer_echec()
         if not location_id or not inventory_item_id:
             return False
+        if idempotency_key:
+            resultat = self._ajuster_graphql(inventory_item_id, location_id, qty_change, idempotency_key)
+            if resultat is not None:
+                return resultat
+            self._effacer_echec()  # GraphQL n'a rien exécuté : le repli REST est une opération neuve
         data = {
             "location_id": location_id,
             "inventory_item_id": inventory_item_id,
@@ -1422,31 +1467,52 @@ class ShopifySync:
             c = _ouvrir_ecriture(conn)
             maintenant = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             c.execute("""
-                INSERT OR IGNORE INTO sync_queue
+                INSERT INTO sync_queue
                     (id_vente_detail, id_ticket, code_barre, delta, statut, tentatives, date_creation, date_maj)
                 VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-            """, (vd_id, t_id, code_barre, int(delta), FILE_PENDING, maintenant, maintenant))
+                ON CONFLICT(id_vente_detail) DO UPDATE SET code_barre = excluded.code_barre
+                WHERE sync_queue.statut = ?
+            """, (vd_id, t_id, code_barre, int(delta), FILE_PENDING, maintenant, maintenant, FILE_PENDING))
             conn.commit()
         except Exception as e:
             self._file_abandon(conn, e)
+
+    @staticmethod
+    def _file_est_due(c, vd_id) -> bool:
+        """Vrai si la ligne n'est pas en attente d'un délai de recul (lecture seule, jamais bloquante)."""
+        try:
+            c.execute("SELECT prochaine_tentative FROM sync_queue "
+                      "WHERE id_vente_detail = ? AND statut = ?", (vd_id, FILE_PENDING))
+            ligne = c.fetchone()
+            return est_due(ligne[0] if ligne else None)
+        except Exception:
+            return True
 
     def _file_marquer(self, conn, vd_id, statut, erreur=None):
         try:
             c = _ouvrir_ecriture(conn)
             c.execute("UPDATE sync_queue SET statut = ?, derniere_erreur = ?, "
-                      "date_maj = ? WHERE id_vente_detail = ?",
+                      "date_maj = ?, prochaine_tentative = NULL WHERE id_vente_detail = ?",
                       (statut, erreur, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), vd_id))
             conn.commit()
         except Exception as e:
             self._file_abandon(conn, e)
 
     def _file_echec(self, conn, vd_id, erreur):
-        """Reste PENDING : compte l'essai et garde la cause. Le rythme des rejeux est celui des passes."""
+        """
+        Reste PENDING : compte l'essai, garde la cause et pose `prochaine_tentative` (recul exponentiel
+        par ligne : 30 s, 1 min, 2 min… plafonné à 15 min). La passe suivante saute la ligne tant que
+        le délai court ; les autres lignes ne sont pas retardées.
+        """
         try:
             c = _ouvrir_ecriture(conn)
-            c.execute("UPDATE sync_queue SET tentatives = tentatives + 1, derniere_erreur = ?, date_maj = ? "
-                      "WHERE id_vente_detail = ?",
-                      (erreur, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), vd_id))
+            c.execute("SELECT tentatives FROM sync_queue WHERE id_vente_detail = ?", (vd_id,))
+            ligne = c.fetchone()
+            essais = int(ligne[0] or 0) + 1 if ligne else 1
+            c.execute("UPDATE sync_queue SET tentatives = ?, derniere_erreur = ?, date_maj = ?, "
+                      "prochaine_tentative = ? WHERE id_vente_detail = ?",
+                      (essais, erreur, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                       prochaine_tentative(essais), vd_id))
             conn.commit()
         except Exception as e:
             self._file_abandon(conn, e)
@@ -1555,6 +1621,10 @@ class ShopifySync:
                     code_barre = candidats[0] if candidats else code_produit
                     qte = int(quantite or 0)
                     self._file_inscrire(conn, vd_id, t_id, code_barre, -qte)
+                    if not self._file_est_due(c, vd_id):
+                        # Recul exponentiel par ligne : en échec récent, pas rejouée avant son heure.
+                        tout_pousse = False
+                        continue
                     if qte == 0:
                         self._journaliser(conn, vd_id, t_id, code_barre, None, 0, STATUT_SANS_OBJET)
                         self._file_marquer(conn, vd_id, FILE_IGNORE, "quantité nulle")
@@ -1582,7 +1652,9 @@ class ShopifySync:
                     # est retrouvée « en vol » au démarrage suivant et ne sera pas rejouée à l'aveugle.
                     self._journaliser(conn, vd_id, t_id, code_barre, inv_item_id, -qte, STATUT_EN_VOL)
                     try:
-                        applique = self.adjust_shopify_stock(inv_item_id, location_id, -qte)
+                        applique = self.adjust_shopify_stock(
+                            inv_item_id, location_id, -qte,
+                            idempotency_key=f"kodo-vd-{vd_id}-{inv_item_id}")
                     except Exception as exc:
                         logger.error(f"Exception lors de l'ajustement du stock Shopify pour SKU {code_barre}: {exc}")
                         applique = False
@@ -3685,6 +3757,21 @@ def compter_file_attente() -> dict:
     except Exception:
         pass  # table absente (base ancienne) ou illisible : rien à signaler
     return resultat
+
+
+def prochaine_tentative_file():
+    """Plus proche horodatage de rejeu d'une ligne PENDING en recul exponentiel, ou None."""
+    try:
+        conn = get_connection()
+        try:
+            ligne = conn.cursor().execute(
+                "SELECT MIN(prochaine_tentative) FROM sync_queue "
+                "WHERE statut = ? AND prochaine_tentative IS NOT NULL", (FILE_PENDING,)).fetchone()
+            return ligne[0] if ligne and ligne[0] else None
+        finally:
+            conn.close()
+    except Exception:
+        return None  # base d'avant la 2.1.2 (colonne absente) ou illisible
 
 
 _etat_rafraichissement = {"en_cours": False, "debut": None, "fin": None, "ok": None, "message": ""}
