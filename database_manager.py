@@ -1905,8 +1905,8 @@ def generer_bilan_z_journalier(caisse_id="POS-01", conn=None, jusqu_au=None):
 def _assurer_colonne_periode_z(cursor):
     """Ajoute à Clotures_Caisse les colonnes récentes si absentes : periode_jusqu_au (dernier jour
     couvert par le Z), total_qr, total_avoir, total_arrondi_cash et total_bons_vendus (bons cadeaux
-    encaissés, inclus dans les règlements mais pas dans le chiffre d'affaires). Ces colonnes ne font
-    pas partie du hash de la chaîne NF525."""
+    encaissés, inclus dans les règlements mais pas dans le chiffre d'affaires). Les Z historiques (v1) ne
+    les scellent pas ; les Z scellés par `hash_version` = 2 les scellent tous (cf. calculer_hash_cloture_v2)."""
     cursor.execute("PRAGMA table_info(Clotures_Caisse)")
     existantes = [row[1] for row in cursor.fetchall()]
     for col, ddl in (
@@ -1914,7 +1914,9 @@ def _assurer_colonne_periode_z(cursor):
         ("total_qr", "DECIMAL DEFAULT '0.00'"),
         ("total_avoir", "DECIMAL DEFAULT '0.00'"),
         ("total_arrondi_cash", "DECIMAL DEFAULT '0.00'"),
-        ("total_bons_vendus", "DECIMAL DEFAULT '0.00'")
+        ("total_bons_vendus", "DECIMAL DEFAULT '0.00'"),
+        # Version de la formule de scellement : NULL = v1 (Z historiques), 2 = tous les champs scellés.
+        ("hash_version", "INTEGER")
     ):
         if col not in existantes:
             cursor.execute(f"ALTER TABLE Clotures_Caisse ADD COLUMN {col} {ddl}")
@@ -1926,7 +1928,7 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
     `fond_caisse_reel=None` = pas de comptage physique (rattrapage d'un ancien jour) : l'écart
     n'est alors pas applicable et vaut 0.
     """
-    from audit_trail import calculer_hash_cloture
+    from audit_trail import calculer_hash_cloture_v2
 
     should_close = False
     if conn is None:
@@ -1958,26 +1960,34 @@ def enregistrer_cloture_caisse(caisse_id="POS-01", fond_caisse_reel=Decimal("0.0
             fond_reel_dec = Decimal(str(fond_caisse_reel))
         ecart = (fond_reel_dec - theorique_especes).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        curr_hash = calculer_hash_cloture(
-            hash_prec, now_str, caisse_id,
-            bilan["total_tvac"], bilan["total_especes"], bilan["total_carte"]
-        )
-
         tot_arrondi = Decimal(str(bilan.get("total_arrondi_cash", "0.00")))
+        # Les valeurs scellées sont EXACTEMENT celles écrites ci-dessous (mêmes float) : la vérification
+        # relira les colonnes et retombera sur le même hash. v2 = tous les montants du Z + la période.
+        valeurs_z = {
+            "total_ventes_tvac": float(bilan["total_tvac"]), "total_htva": float(bilan["total_htva"]),
+            "total_tva": float(bilan["total_tva"]), "total_remises": float(bilan["total_remises"]),
+            "total_especes": float(bilan["total_especes"]), "total_carte": float(bilan["total_carte"]),
+            "total_qr": float(bilan["total_qr"]), "total_avoir": float(bilan["total_avoir"]),
+            "total_arrondi_cash": float(tot_arrondi),
+            "total_bons_vendus": float(bilan.get("total_bons_vendus", Decimal("0.00"))),
+            "total_tickets": bilan["nb_tickets"], "fond_caisse_reel": float(fond_reel_dec),
+            "ecart": float(ecart),
+        }
+        curr_hash = calculer_hash_cloture_v2(hash_prec, now_str, caisse_id, jusqu_au, valeurs_z)
         c.execute("""
             INSERT INTO Clotures_Caisse (
                 date_cloture, caisse_id, total_ventes_tvac, total_htva, total_tva,
                 total_especes, total_carte, total_remises, total_tickets,
                 fond_caisse_reel, ecart, vendeur, hash_precedent, current_hash, signature, created_at_utc,
-                periode_jusqu_au, total_qr, total_avoir, total_arrondi_cash, total_bons_vendus
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                periode_jusqu_au, total_qr, total_avoir, total_arrondi_cash, total_bons_vendus, hash_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             now_str, caisse_id, float(bilan["total_tvac"]), float(bilan["total_htva"]), float(bilan["total_tva"]),
             float(bilan["total_especes"]), float(bilan["total_carte"]), float(bilan["total_remises"]),
             bilan["nb_tickets"], float(fond_reel_dec), float(ecart), vendeur,
             hash_prec, curr_hash, curr_hash, now_utc, jusqu_au,
             float(bilan["total_qr"]), float(bilan["total_avoir"]), float(tot_arrondi),
-            float(bilan.get("total_bons_vendus", Decimal("0.00")))
+            float(bilan.get("total_bons_vendus", Decimal("0.00"))), 2
         ))
         z_id = c.lastrowid
 

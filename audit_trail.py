@@ -7,6 +7,7 @@ from kodo_core.db.audit_trail import (
     verify_database_integrity,
     audit_complet,
     calculer_hash_cloture,
+    calculer_hash_cloture_v2,
     calculer_hash_transaction,
     signer_ticket,
     signer_ledger,
