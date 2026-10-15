@@ -604,7 +604,7 @@ class TestDonnees(Depot):
         self.assertEqual(p.returncode, 0, p.stderr)
         conn = sqlite3.connect(db)
         conn.execute("DROP TABLE sync_queue")
-        conn.execute("DELETE FROM schema_version WHERE version IN ('2.0.9', '2.1.0')")
+        conn.execute("DELETE FROM schema_version WHERE version >= '2.0.9'")
         conn.execute("INSERT INTO Produits (nom, prix_vente_tvac) VALUES ('Robe', 59.9)")
         conn.commit()
         conn.close()

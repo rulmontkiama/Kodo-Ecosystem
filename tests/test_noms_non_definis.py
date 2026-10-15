@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 RACINE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 EXCLURE = {".git", "node_modules", "__pycache__", ".claude", "tests", "dist", "build", "venv", ".venv",
-           "scripts", "snapshots", "public", "assets"}
+           "scripts", "snapshots", "public", "assets", "Installation_Pack"}
 BUILTINS = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__path__", "__builtins__", "__spec__",
                                  "__package__", "__class__", "__loader__"}
 
