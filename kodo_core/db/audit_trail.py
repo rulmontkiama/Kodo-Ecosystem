@@ -86,6 +86,33 @@ def calculer_hash_cloture(hash_prec: str, date_cloture: str, caisse_id: str, tot
     payload = f"{h_prec}|{date_cloture}|{caisse_id}|{tvac_str}|{esp_str}|{carte_str}"
     return compute_sha256(payload)
 
+# --- Scellement des Z : version 2 ----------------------------------------------------------------
+# La v1 ne scelle que total TVAC, espèces et carte : les rubriques ajoutées ensuite (QR, avoirs, arrondi
+# espèces, bons vendus), la TVA, les remises, le fond compté et l'écart pouvaient être retouchés après
+# coup sans que la chaîne le voie. La v2 les scelle toutes, plus la période couverte.
+#
+# Déploiement en DEUX temps, pour qu'un retour arrière ne produise jamais de fausse alerte :
+#   1. ce vérificateur sait lire v1 ET v2 (et ne condamne pas une version qu'il ne connaît pas) ;
+#   2. seulement ensuite, une version suivante ÉCRIT en v2 (`Clotures_Caisse.hash_version` = 2).
+# Les Z déjà scellés restent en v1, vérifiés avec leur formule d'origine : on ne réécrit jamais le passé.
+HASH_Z_V1 = 1
+HASH_Z_V2 = 2
+CHAMPS_MONTANTS_HASH_Z_V2 = (
+    "total_ventes_tvac", "total_htva", "total_tva", "total_remises", "total_especes", "total_carte",
+    "total_qr", "total_avoir", "total_arrondi_cash", "total_bons_vendus", "fond_caisse_reel", "ecart",
+)
+
+
+def calculer_hash_cloture_v2(hash_prec, date_cloture, caisse_id, periode_jusqu_au, valeurs) -> str:
+    """Hash SHA-256 v2 d'un Z. `valeurs` : mapping portant les CHAMPS_MONTANTS_HASH_Z_V2 et `total_tickets`
+    (une ligne de `Clotures_Caisse`, ou les valeurs qu'on s'apprête à y écrire : la même fonction sert à
+    sceller et à vérifier, donc aucune divergence possible)."""
+    h_prec = hash_prec or "GENESIS_Z_00000000000000000000000000000000"
+    montants = "|".join(f"{Decimal(str(valeurs.get(champ) or 0)):.2f}" for champ in CHAMPS_MONTANTS_HASH_Z_V2)
+    nb = int(valeurs.get("total_tickets") or 0)
+    payload = (f"Z2|{h_prec}|{date_cloture}|{caisse_id}|{periode_jusqu_au or ''}|{montants}|{nb}")
+    return compute_sha256(payload)
+
 def record_audit_event(conn_or_cursor, event_type: str, entity_name: str, entity_id: str = "", user_name: str = "", action: str = "", details: str = ""):
     """
     Enregistre un événement de sécurité dans la table Audit_Trail, scellé par chaînage SHA-256
@@ -375,6 +402,7 @@ def verifier_clotures(conn=None) -> bool:
             return False
         derniere: dict = {}
         erreurs = 0
+        non_jugees = 0
         for row in lignes:
             r = dict(zip(cols, row))
             courant = r.get("current_hash") or r.get("signature")
@@ -386,8 +414,24 @@ def verifier_clotures(conn=None) -> bool:
                 print(f"[ALERTE] Rupture de chaîne des Z (caisse {caisse}) à l'ID {r['id']}.")
                 erreurs += 1
             try:
-                attendu = calculer_hash_cloture(prec, r["date_cloture"], caisse, r["total_ventes_tvac"],
-                                                r["total_especes"], r["total_carte"])
+                version = int(r.get("hash_version") or HASH_Z_V1)
+            except (TypeError, ValueError):
+                version = -1
+            if version not in (HASH_Z_V1, HASH_Z_V2):
+                # Scellé par une version PLUS RÉCENTE de Kōdo que ce code (retour arrière) : on ne peut pas
+                # juger ce Z, et on ne l'accuse pas. Le chaînage (hash_precedent) est tout de même vérifié.
+                print(f"[INFO] Clôture Z {r['id']} scellée en version {r.get('hash_version')!r} : formule inconnue "
+                      f"de cette version, non jugée.")
+                non_jugees += 1
+                derniere[caisse] = courant
+                continue
+            try:
+                if version == HASH_Z_V2:
+                    attendu = calculer_hash_cloture_v2(prec, r["date_cloture"], caisse,
+                                                       r.get("periode_jusqu_au"), r)
+                else:
+                    attendu = calculer_hash_cloture(prec, r["date_cloture"], caisse, r["total_ventes_tvac"],
+                                                    r["total_especes"], r["total_carte"])
             except Exception as e:  # noqa: BLE001 — montant illisible = clôture altérée
                 print(f"[ALERTE] Clôture Z illisible à l'ID {r['id']} ({type(e).__name__}).")
                 erreurs += 1
