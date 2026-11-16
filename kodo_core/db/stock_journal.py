@@ -12,9 +12,16 @@ seul », la base ne pouvait répondre ni *quand*, ni *depuis quelle valeur*, ni 
 
 Ce que le journal contient
 --------------------------
-Une ligne par quantité qui CHANGE réellement (avant ≠ après) sous l'effet d'une de ces deux
-écritures. Rien n'est écrit quand la valeur est identique. Les ventes, retours et commandes
-Shopify n'y figurent pas : leurs propres tables les expliquent déjà.
+Une ligne par quantité qui CHANGE réellement (avant ≠ après) sous l'effet d'une de ces écritures :
+l'import Shopify, l'écran Stocks et, désormais les MOUVEMENTS DE STOCK saisis avec un motif
+(réception, casse, vol, inventaire…, voir `kodo_core/services/mouvements_stock.py`). Rien n'est
+écrit quand la valeur est identique (sauf un recomptage, qui confirme un stock exact). Les ventes,
+retours et commandes Shopify n'y figurent pas : leurs propres tables les expliquent déjà, et
+l'historique des mouvements les relit à la volée sans jamais les copier.
+
+Colonnes ajoutées pour les mouvements : `delta` (variation signée), `motif` (code court),
+`utilisateur` (qui a saisi) et `reference` (bon de livraison, ticket…). Elles sont ajoutées à la
+demande sur les bases existantes (`ALTER TABLE`), sans migration.
 
 Garanties
 ---------
@@ -45,6 +52,10 @@ TABLE = "Stock_Journal"
 
 ORIGINE_IMPORT_SHOPIFY = "import_shopify"   # `ShopifySync.import_catalog` : stock recopié depuis Shopify
 ORIGINE_FICHE_PRODUIT = "fiche_produit"     # écran Stocks : quantité saisie à la main
+ORIGINE_MOUVEMENT = "mouvement"             # mouvement de stock saisi avec un motif
+
+# Colonnes propres aux mouvements (absentes des bases créées avant les mouvements de stock).
+_COLONNES_MOUVEMENT = (("delta", "INTEGER"), ("motif", "TEXT"), ("utilisateur", "TEXT"), ("reference", "TEXT"))
 
 
 def assurer_table(cursor) -> None:
@@ -60,39 +71,58 @@ def assurer_table(cursor) -> None:
             avant INTEGER,
             apres INTEGER,
             origine TEXT NOT NULL,
-            detail TEXT
+            detail TEXT,
+            delta INTEGER,
+            motif TEXT,
+            utilisateur TEXT,
+            reference TEXT
         )
     """)
+    # Base créée avant les mouvements : on ajoute les colonnes manquantes, sans toucher aux lignes.
+    cursor.execute(f"PRAGMA table_info({TABLE})")
+    existantes = {ligne[1] for ligne in cursor.fetchall()}
+    for nom_col, type_col in _COLONNES_MOUVEMENT:
+        if nom_col not in existantes:
+            cursor.execute(f"ALTER TABLE {TABLE} ADD COLUMN {nom_col} {type_col}")
     cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_stock_journal_stock ON {TABLE}(stock_id)")
     cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_stock_journal_date ON {TABLE}(date_heure)")
 
 
 def _inserer(cursor, valeurs) -> None:
     cursor.execute(
-        f"INSERT INTO {TABLE} (date_heure, stock_id, produit_id, produit, taille, avant, apres, origine, detail) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", valeurs)
+        f"INSERT INTO {TABLE} (date_heure, stock_id, produit_id, produit, taille, avant, apres, origine, detail, "
+        "delta, motif, utilisateur, reference) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", valeurs)
 
 
 def noter(cursor, stock_id, avant, apres, origine, *, produit_id=None, produit=None,
-          taille=None, detail="") -> bool:
+          taille=None, detail="", motif=None, utilisateur=None, reference=None,
+          forcer=False) -> bool:
     """
     Inscrit un changement de quantité. Retourne True si une ligne a été écrite.
 
     `avant` vaut None pour une ligne de stock créée, `apres` pour une ligne supprimée. Rien n'est
-    écrit si les deux valeurs sont égales. N'échoue jamais : voir l'en-tête du module.
+    écrit si les deux valeurs sont égales, sauf avec `forcer=True` (recomptage qui CONFIRME le stock :
+    la trace d'un inventaire sans écart reste utile). N'échoue jamais : voir l'en-tête du module.
     """
     try:
-        if avant == apres:
+        if avant == apres and not forcer:
             return False
+        delta = (apres or 0) - (avant or 0)
         valeurs = (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), stock_id, produit_id,
                    None if produit is None else str(produit), None if taille is None else str(taille),
-                   avant, apres, origine, str(detail or "")[:200])
+                   avant, apres, origine, str(detail or "")[:200],
+                   delta, None if motif is None else str(motif)[:40],
+                   None if utilisateur is None else str(utilisateur)[:80],
+                   None if reference is None else str(reference)[:80])
         try:
             _inserer(cursor, valeurs)
         except sqlite3.OperationalError as exc:
-            # Cas courant : la table n'existe pas encore (première trace de cette base). On ne la
-            # (re)déclare qu'alors, pas à chaque ligne : un import écrit des centaines de traces.
-            if "no such table" not in str(exc).lower():
+            # Cas courant : la table (ou ses colonnes de mouvement) n'existe pas encore sur cette
+            # base. On ne la (re)déclare qu'alors, pas à chaque ligne : un import écrit des
+            # centaines de traces.
+            message = str(exc).lower()
+            if "no such table" not in message and "no column named" not in message and "has no column" not in message:
                 raise
             assurer_table(cursor)
             _inserer(cursor, valeurs)

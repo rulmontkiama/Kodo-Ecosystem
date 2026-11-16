@@ -30,7 +30,7 @@ class MandatoryUpdateOverlay(ctk.CTkToplevel):
         self.update_payload = update_payload
         self.on_complete_callback = on_complete_callback
         
-        self.version = update_payload.get("version", "2.2.0")
+        self.version = update_payload.get("version", "2.3.0")
         self.reason = update_payload.get("reason", "Mise en conformité de sécurité et correctif BDD.")
         self.est_duration = update_payload.get("estimated_duration_seconds", 15)
         self.countdown = 10

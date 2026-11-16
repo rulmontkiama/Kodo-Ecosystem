@@ -709,4 +709,30 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
         alerts = InventoryManager.get_low_stock_alerts()
         return 200, alerts
 
+    # 10. Mouvements de stock justifiés (motifs, saisie, historique)
+    elif method == "GET" and path == "/api/stock/motifs":
+        from kodo_core.services import mouvements_stock
+        return 200, mouvements_stock.liste_motifs()
+
+    elif method == "POST" and path == "/api/stock/mouvements":
+        from kodo_core.services import mouvements_stock
+        try:
+            return 200, mouvements_stock.enregistrer_mouvement(data if isinstance(data, dict) else {})
+        except mouvements_stock.MouvementError as exc:
+            return exc.code, {"error": exc.message}
+        except Exception as exc:  # noqa: BLE001 — jamais de trace SQL à l'écran
+            logger.error(f"[STOCK] Mouvement non enregistré : {exc}")
+            return 500, {"error": "Le mouvement n'a pas pu être enregistré."}
+
+    elif method == "GET" and path == "/api/stock/mouvements":
+        from kodo_core.services import mouvements_stock
+        filtres = {cle: (valeurs[0] if valeurs else None) for cle, valeurs in query.items()}
+        try:
+            return 200, mouvements_stock.lister_mouvements(filtres)
+        except mouvements_stock.MouvementError as exc:
+            return exc.code, {"error": exc.message}
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[STOCK] Historique illisible : {exc}")
+            return 500, {"error": "L'historique des mouvements n'a pas pu être chargé."}
+
     return None
