@@ -7,8 +7,42 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <script type="module" crossorigin src="/assets/index-DVl7ydcy.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-3EAPNBw3.css">
+    <meta name="theme-color" content="#f4f5f7" />
+    <!-- Écran de chargement : défini ICI (et non dans index.css) pour s'afficher avant même le
+         chargement du bundle JavaScript. Le composant React SplashScreen réutilise ces classes. -->
+    <style id="kodo-splash-css">
+      body { margin: 0; background: #f4f5f7; }
+      .kodo-splash { position: fixed; inset: 0; z-index: 9999; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden;
+        background: radial-gradient(1100px 700px at 50% 30%, #ffffff 0%, #eceef1 75%); color: #16181b;
+        font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; transition: opacity .5s ease, transform .5s ease; }
+      .kodo-splash.is-leaving { opacity: 0; transform: scale(1.03); pointer-events: none; }
+      .kodo-splash__glow { position: absolute; top: 50%; left: 50%; width: 620px; height: 620px; margin: -340px 0 0 -310px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(255,107,107,.16), transparent 65%); filter: blur(40px); animation: kodo-breathe 4s ease-in-out infinite; }
+      .kodo-splash__brand { position: relative; display: flex; align-items: center; gap: 16px; animation: kodo-rise .8s cubic-bezier(.16,1,.3,1) both; }
+      .kodo-splash__tile { width: 60px; height: 60px; border-radius: 18px; display: grid; place-items: center; font-weight: 900; font-size: 30px; color: #fff;
+        background: linear-gradient(145deg, #FF8787, #FF6B6B 55%, #F03E3E); box-shadow: 0 14px 30px -10px rgba(240,62,62,.55); }
+      .kodo-splash__word { font-weight: 900; font-size: 32px; letter-spacing: .02em; line-height: 1; }
+      .kodo-splash__tag { margin-top: 6px; font-size: 11px; font-weight: 600; letter-spacing: .28em; text-transform: uppercase; color: #8a8f98; }
+      .kodo-splash__mark { position: relative; margin-top: 64px; width: 136px; height: 136px; }
+      .kodo-splash__ring { position: absolute; inset: 0; border-radius: 50%; padding: 10px;
+        background: conic-gradient(from 0deg, rgba(255,107,107,0) 0%, #FF6B6B 100%);
+        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+        mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); filter: drop-shadow(0 0 10px rgba(255,107,107,.45)); animation: kodo-spin 1.3s linear infinite; }
+      .kodo-splash__title { margin-top: 44px; font-weight: 800; font-size: 24px; letter-spacing: -.01em; animation: kodo-rise .8s .15s cubic-bezier(.16,1,.3,1) both; }
+      .kodo-splash__status { margin-top: 8px; min-height: 20px; font-size: 16px; font-weight: 500; color: #6b7280; }
+      .kodo-splash__bar { margin-top: 30px; width: 260px; height: 4px; border-radius: 99px; background: rgba(22,24,27,.08); overflow: hidden; }
+      .kodo-splash__bar > i { display: block; height: 100%; width: 30%; border-radius: 99px; background: linear-gradient(90deg, #FF6B6B, #FFA8A8); transition: width .6s cubic-bezier(.16,1,.3,1); }
+      .kodo-splash__bar.is-indeterminate > i { animation: kodo-slide 1.4s ease-in-out infinite; }
+      .kodo-splash__version { position: absolute; bottom: 24px; font-size: 12px; letter-spacing: .12em; color: #9aa0a8; }
+      .kodo-splash.is-resumed .kodo-splash__brand, .kodo-splash.is-resumed .kodo-splash__title { animation: none; }
+      @keyframes kodo-spin { to { transform: rotate(360deg); } }
+      @keyframes kodo-breathe { 0%, 100% { opacity: .55; transform: scale(1); } 50% { opacity: .95; transform: scale(1.08); } }
+      @keyframes kodo-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+      @keyframes kodo-slide { 0% { margin-left: -35%; } 100% { margin-left: 105%; } }
+      @media (prefers-reduced-motion: reduce) { .kodo-splash *, .kodo-splash { animation: none !important; transition: none !important; } }
+    </style>
+    <script type="module" crossorigin src="/assets/index-BYQVs5uI.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DPC6S8TV.css">
   </head>
   <body>
     <!-- SVG Liquid Glass Optical Refraction Shader Defs (Apple WWDC 2025 Spec) -->
@@ -23,6 +57,19 @@
       </defs>
     </svg>
 
-    <div id="root"></div>
+    <div id="root">
+      <!-- Remplacé par React dès que le bundle est chargé (voir SplashScreen.tsx, même apparence). -->
+      <div class="kodo-splash" role="status" aria-live="polite">
+        <div class="kodo-splash__glow"></div>
+        <div class="kodo-splash__brand">
+          <div class="kodo-splash__tile">K</div>
+          <div><div class="kodo-splash__word">KŌDO POS</div><div class="kodo-splash__tag">Caisse &amp; Stocks</div></div>
+        </div>
+        <div class="kodo-splash__mark"><div class="kodo-splash__ring"></div></div>
+        <div class="kodo-splash__title">Chargement de votre Caisse…</div>
+        <div class="kodo-splash__status">Démarrage…</div>
+        <div class="kodo-splash__bar is-indeterminate"><i></i></div>
+      </div>
+    </div>
   </body>
 </html>
