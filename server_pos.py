@@ -88,6 +88,10 @@ def is_cache_dist_current(version_file: str) -> bool:
 
 
 def get_dist_dir():
+    # Mode API pure : le backend ne sert aucun frontend statique (séparation stricte).
+    if os.environ.get("KODO_API_ONLY", "").strip().lower() in ("1", "true", "yes"):
+        return None
+
     # 1. Priorité aux mises à jour dynamiques installées dans le cache utilisateur,
     #    à condition qu'elles ne soient pas plus anciennes que l'application installée
     cache_dist = os.path.expanduser("~/Library/Caches/KodoPOS/dist")
@@ -110,16 +114,18 @@ def get_dist_dir():
             return resources_dist
         return meipass_dist
 
-    # 3. En mode développement / source, prioriser le dist local ou Desktop
-    desktop_dist = os.path.expanduser("~/Desktop/kōdo-pos-3/dist")
-    if is_dist_valid(desktop_dist):
-        return desktop_dist
+    # 3. En mode développement : chemin frontend injectable via KODO_FRONTEND_DIST
+    env_dist = os.environ.get("KODO_FRONTEND_DIST", "").strip()
+    if env_dist:
+        expanded = os.path.expanduser(env_dist)
+        if is_dist_valid(expanded):
+            return expanded
 
     local_dist = os.path.join(BASE_DIR, "dist")
     if is_dist_valid(local_dist):
         return local_dist
 
-    return os.path.join(BASE_DIR, "dist")
+    return None
 
 
 def json_serial(obj):
@@ -338,6 +344,15 @@ class POSRequestHandler(BaseHTTPRequestHandler):
 
     def _serve_static(self, path):
         dist_dir = get_dist_dir()
+        if not dist_dir:
+            self._send_json({
+                "service": "Kōdo POS Backend API",
+                "mode": "api-only",
+                "api_base": "/api",
+                "status": "ok"
+            }, 200)
+            return
+
         if path == '/' or not path:
             file_path = os.path.join(dist_dir, 'index.html')
         else:
@@ -350,11 +365,12 @@ class POSRequestHandler(BaseHTTPRequestHandler):
             file_path = os.path.join(dist_dir, 'index.html')
 
         if not os.path.exists(file_path):
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self._set_cors_headers()
-            self.end_headers()
-            self.wfile.write(b"<h1>Kodo POS API Active</h1><p>Veuillez compiler le frontend React dans dist/.</p>")
+            self._send_json({
+                "service": "Kōdo POS Backend API",
+                "mode": "api-only",
+                "api_base": "/api",
+                "status": "ok"
+            }, 200)
             return
 
         ext = os.path.splitext(file_path)[1].lower()
