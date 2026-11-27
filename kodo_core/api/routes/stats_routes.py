@@ -8,6 +8,7 @@ import datetime
 from typing import Dict, Any, Tuple, Optional, Union
 
 from kodo_core.domain.accounting.z_report import ZReportEngine
+from kodo_core.api.session_manager import is_non_admin_session
 import pdf_generator
 import export_manager
 
@@ -17,6 +18,9 @@ def handle_stats_request(method: str, path: str, query: Dict[str, Any], data: Di
     Gestionnaire de requêtes pour les statistiques et les exports (PDF, CSV, Excel).
     Retourne (status_code, content, headers) ou (status_code, json_data, None).
     """
+    if path.startswith("/api/stats") or path.startswith("/api/export"):
+        if is_non_admin_session(headers):
+            return 403, {"success": False, "error": "Accès réservé au Gérant."}, None
 
     # 1. Statistiques du Tableau de Bord (Dashboard)
     if method == "GET" and path == "/api/stats/dashboard":

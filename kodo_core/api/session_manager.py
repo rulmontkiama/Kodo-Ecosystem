@@ -96,3 +96,12 @@ def get_current_user(headers: Optional[Dict[str, str]]) -> Optional[Dict[str, An
     if not token:
         return None
     return verify_session_token(token)
+
+
+def is_non_admin_session(headers: Optional[Dict[str, str]]) -> bool:
+    """
+    Retourne True uniquement lorsqu'un jeton de session valide appartient à un profil non-Gérant.
+    (Sans jeton, retourne False pour préserver la compatibilité des appels locaux/tests sans auth.)
+    """
+    user = get_current_user(headers)
+    return user is not None and user.get("role") != "Gérant"

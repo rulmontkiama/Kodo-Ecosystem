@@ -685,6 +685,11 @@ class InventoryManager:
             barcode_provided = ("barcode" in data) or ("code_barre" in data)
             barcode = cls.clean_barcode(data.get("barcode") or data.get("code_barre"))
             price = Decimal(str(data.get("price") or data.get("prix_vente_tvac") or 0.0))
+            cost_keys = ("purchase_price_htva", "prix_achat_htva", "costPrice", "cost_price")
+            cost_provided = any(
+                (k in data and data.get(k) is not None and str(data.get(k)).strip() != "")
+                for k in cost_keys
+            )
             purchase_price = Decimal(str(data.get("purchase_price_htva") or data.get("prix_achat_htva") or data.get("costPrice") or data.get("cost_price") or 0.0))
             # Un taux de 0 % est un VRAI taux (livres, exonérés) : `a or b or 0.21` l'enregistrait à 21 %.
             brut_tva = next((v for v in (data.get("vat_rate"), data.get("taux_tva"))
@@ -766,12 +771,18 @@ class InventoryManager:
                                 "barcode": barcode
                             }
                         )
+                effective_purchase = purchase_price
+                if not cost_provided:
+                    cursor.execute("SELECT prix_achat_htva FROM Produits WHERE id = ?", (existing_id,))
+                    row_cost = cursor.fetchone()
+                    if row_cost and row_cost[0] is not None:
+                        effective_purchase = Decimal(str(row_cost[0]))
                 cursor.execute("""
                     UPDATE Produits
                     SET nom=?, categorie=?, prix_achat_htva=?, 
                         prix_vente_tvac=?, taux_tva=?, en_solde=?, prix_solde_tvac=?, marque=?, seuil_alerte=?
                     WHERE id=?
-                """, (name, category, float(purchase_price), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, alert_threshold, existing_id))
+                """, (name, category, float(effective_purchase), float(price), float(vat_rate), is_sale, float(prix_solde) if prix_solde else None, brand, alert_threshold, existing_id))
                 prod_id = existing_id
             else:
                 cursor.execute("""

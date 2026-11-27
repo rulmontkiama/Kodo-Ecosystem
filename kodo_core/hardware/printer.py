@@ -4,6 +4,8 @@ Supporte CUPS, win32print, socket direct, découpe papier (GS V), ouverture tiro
 """
 import os
 import sys
+import json
+import textwrap
 import socket
 import tempfile
 import subprocess
@@ -362,7 +364,8 @@ def generer_ticket(numero, panier, total_tvac, remise,
                    is_gift=False,
                    ecart_arrondi_cash=None,
                    date_heure=None,
-                   duplicata=False):
+                   duplicata=False,
+                   footer_message=None):
     """
     Génère le contenu texte d'un ticket thermique de caisse standard.
 
@@ -526,10 +529,18 @@ def generer_ticket(numero, panier, total_tvac, remise,
         
         # Pied de page
         lines.append(_separator("-"))
-        lines.append(_center("MERCI DE VOTRE VISITE !"))
-        lines.append(_center("Échange sous 14 jours sur présentation"))
-        lines.append(_center("de ce ticket. Articles non portés et"))
-        lines.append(_center("dans leur emballage d'origine."))
+        custom_footer_lines = [
+            ln.strip() for ln in str(footer_message or "").replace("\r\n", "\n").split("\n") if ln.strip()
+        ]
+        if custom_footer_lines:
+            for raw_ln in custom_footer_lines:
+                for wrapped in (textwrap.wrap(raw_ln, width=COL) or [raw_ln]):
+                    lines.append(_center(wrapped))
+        else:
+            lines.append(_center("MERCI DE VOTRE VISITE !"))
+            lines.append(_center("Échange sous 14 jours sur présentation"))
+            lines.append(_center("de ce ticket. Articles non portés et"))
+            lines.append(_center("dans leur emballage d'origine."))
         lines.append(_separator("="))
     
     lines.append("")
@@ -885,6 +896,214 @@ def generate_social_qr_image(title=None, url=None, subtitle=None, header=None, w
     return img
 
 
+def _clean_link_label(url: str) -> str:
+    txt = str(url or "").strip()
+    if not txt:
+        return ""
+    if txt.upper().startswith("WIFI:"):
+        return "Scannez pour vous connecter"
+    for prefix in ("https://", "http://", "HTTPS://", "HTTP://"):
+        if txt.startswith(prefix):
+            txt = txt[len(prefix):]
+            break
+    return txt.rstrip("/")
+
+
+def generate_social_multi_image(links, header="", width=512, qr_size="large", qr_layout="grid"):
+    """
+    Génère un visuel thermique 80mm (512 dots) supportant plusieurs QR codes
+    (côte à côte en grille 2 colonnes ou empilés) ainsi que des liens texte seul.
+    """
+    import qrcode
+    from PIL import Image, ImageDraw
+
+    raw_links = links if isinstance(links, list) else []
+    visible = []
+    for item in raw_links:
+        if not isinstance(item, dict):
+            continue
+        if item.get("enabled", True) is False:
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        subtitle = str(item.get("subtitle") or "").strip()
+        if not (title or url or subtitle):
+            continue
+        display = "text" if item.get("display") == "text" else "qr"
+        if display == "qr" and not url:
+            display = "text"
+        visible.append({
+            "title": title,
+            "url": url,
+            "subtitle": subtitle,
+            "display": display,
+        })
+
+    qr_links = [it for it in visible if it["display"] == "qr"]
+    text_links = [it for it in visible if it["display"] == "text"]
+    header_text = str(header or "").strip()
+
+    if len(qr_links) == 1 and not text_links:
+        only = qr_links[0]
+        return generate_social_qr_image(
+            title=only["title"],
+            url=only["url"],
+            subtitle=only["subtitle"],
+            header=header_text,
+            width=width,
+            qr_size=qr_size,
+        )
+
+    if not qr_links and not text_links:
+        return Image.new("RGB", (width, 16), "white")
+
+    dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1), "white"))
+    header_lines = _fit_text_lines(
+        dummy_draw, header_text.upper(), 16, 11, True, width - 24, prefer_wrap_over_tiny=True
+    ) if header_text else []
+
+    use_grid = (qr_layout != "stack") and (len(qr_links) >= 2)
+    if use_grid:
+        qr_px = {"normal": 130, "large": 156, "extra_large": 180}.get(qr_size, 156)
+        col_w = 240
+    else:
+        qr_px = {"normal": 150, "large": 190, "extra_large": 230}.get(qr_size, 190)
+        col_w = width - 24
+
+    rendered_qr_cards = []
+    for it in qr_links:
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=4,
+            border=2,
+        )
+        qr.add_data(it["url"])
+        qr.make(fit=True)
+        qimg = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qimg = qimg.resize((qr_px, qr_px), Image.Resampling.NEAREST)
+
+        t_lines = _fit_text_lines(
+            dummy_draw,
+            it["title"].upper(),
+            17 if use_grid else 20,
+            11,
+            True,
+            col_w - 8,
+            prefer_wrap_over_tiny=True,
+        ) if it["title"] else []
+        sub_val = it["subtitle"] or _clean_link_label(it["url"])
+        s_lines = _fit_text_lines(
+            dummy_draw,
+            sub_val,
+            14 if use_grid else 16,
+            10,
+            False,
+            col_w - 8,
+            prefer_wrap_over_tiny=False,
+        ) if sub_val else []
+
+        t_h = sum(l[3] + 3 for l in t_lines)
+        s_h = sum(l[3] + 2 for l in s_lines)
+        card_h = t_h + (4 if t_lines else 0) + qr_px + (6 if s_lines else 0) + s_h
+        rendered_qr_cards.append({
+            "qimg": qimg,
+            "t_lines": t_lines,
+            "s_lines": s_lines,
+            "height": card_h,
+        })
+
+    rendered_text_items = []
+    for it in text_links:
+        t_lines = _fit_text_lines(
+            dummy_draw, it["title"].upper(), 15, 11, True, width - 32, prefer_wrap_over_tiny=True
+        ) if it["title"] else []
+        val = it["subtitle"] or _clean_link_label(it["url"])
+        v_lines = _fit_text_lines(
+            dummy_draw, val, 15, 10, False, width - 32, prefer_wrap_over_tiny=False
+        ) if val else []
+        item_h = sum(l[3] + 2 for l in t_lines) + sum(l[3] + 2 for l in v_lines)
+        rendered_text_items.append({"t_lines": t_lines, "v_lines": v_lines, "height": item_h})
+
+    pad_y = 14
+    total_h = pad_y
+    if header_lines:
+        total_h += sum(l[3] + 4 for l in header_lines) + 8
+
+    if rendered_qr_cards:
+        if use_grid:
+            for idx in range(0, len(rendered_qr_cards), 2):
+                pair = rendered_qr_cards[idx:idx + 2]
+                row_h = max(c["height"] for c in pair)
+                total_h += row_h + 14
+        else:
+            for c in rendered_qr_cards:
+                total_h += c["height"] + 14
+
+    if rendered_text_items:
+        if rendered_qr_cards:
+            total_h += 10
+        for ti in rendered_text_items:
+            total_h += ti["height"] + 8
+
+    total_h += pad_y
+    img = Image.new("RGB", (width, total_h), "white")
+    draw = ImageDraw.Draw(img)
+
+    cur_y = pad_y
+    if header_lines:
+        for txt, font, w, h in header_lines:
+            draw.text(((width - w) // 2, cur_y), txt, fill="black", font=font)
+            cur_y += h + 4
+        cur_y += 8
+
+    def _draw_qr_card(card, col_x, col_width, y0):
+        y = y0
+        for txt, font, w, h in card["t_lines"]:
+            draw.text((col_x + (col_width - w) // 2, y), txt, fill="black", font=font)
+            y += h + 3
+        if card["t_lines"]:
+            y += 4
+        img.paste(card["qimg"], (col_x + (col_width - qr_px) // 2, y))
+        y += qr_px
+        if card["s_lines"]:
+            y += 6
+            for txt, font, w, h in card["s_lines"]:
+                draw.text((col_x + (col_width - w) // 2, y), txt, fill="black", font=font)
+                y += h + 2
+
+    if rendered_qr_cards:
+        if use_grid:
+            col_positions = [12, 12 + col_w + 8]
+            for idx in range(0, len(rendered_qr_cards), 2):
+                pair = rendered_qr_cards[idx:idx + 2]
+                if len(pair) == 1:
+                    _draw_qr_card(pair[0], (width - col_w) // 2, col_w, cur_y)
+                else:
+                    _draw_qr_card(pair[0], col_positions[0], col_w, cur_y)
+                    _draw_qr_card(pair[1], col_positions[1], col_w, cur_y)
+                cur_y += max(c["height"] for c in pair) + 14
+        else:
+            for card in rendered_qr_cards:
+                _draw_qr_card(card, 12, col_w, cur_y)
+                cur_y += card["height"] + 14
+
+    if rendered_text_items:
+        if rendered_qr_cards:
+            draw.line([(48, cur_y), (width - 48, cur_y)], fill=(190, 190, 190), width=1)
+            cur_y += 10
+        for ti in rendered_text_items:
+            for txt, font, w, h in ti["t_lines"]:
+                draw.text(((width - w) // 2, cur_y), txt, fill="black", font=font)
+                cur_y += h + 2
+            for txt, font, w, h in ti["v_lines"]:
+                draw.text(((width - w) // 2, cur_y), txt, fill="black", font=font)
+                cur_y += h + 2
+            cur_y += 8
+
+    return img
+
+
 def get_ticket_social_path():
     """
     Retourne le chemin d'accès au bloc réseaux sociaux / communication du ticket de caisse.
@@ -914,7 +1133,24 @@ def get_ticket_social_path():
             url = params.get("receipt_social_url", "https://kōdo-solutions.com")
             subtitle = params.get("receipt_social_subtitle", "")
             qr_size = params.get("receipt_social_size", "large")
-            img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, header=header, width=512, qr_size=qr_size)
+            qr_layout = params.get("receipt_social_layout", "grid")
+            raw_links_json = params.get("receipt_social_links")
+            img = None
+            if raw_links_json:
+                try:
+                    parsed_links = json.loads(raw_links_json)
+                    if isinstance(parsed_links, list) and len(parsed_links) > 0:
+                        img = generate_social_multi_image(
+                            parsed_links,
+                            header=header,
+                            width=512,
+                            qr_size=qr_size,
+                            qr_layout=qr_layout,
+                        )
+                except Exception:
+                    img = None
+            if img is None:
+                img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, header=header, width=512, qr_size=qr_size)
             try:
                 os.makedirs(os.path.dirname(target_p), exist_ok=True)
                 img.save(target_p, format="PNG")
@@ -1308,13 +1544,18 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100, 
         shop_sub = "Boutique"
         shop_addr = ""
         shop_vat = TVA_NON_RENSEIGNEE
+        footer_message = None
         try:
-            c.execute("SELECT cle, valeur FROM Parametres WHERE cle LIKE 'shop_%' OR cle IN ('printer_ip', 'printer_name')")
+            c.execute(
+                "SELECT cle, valeur FROM Parametres "
+                "WHERE cle LIKE 'shop_%' OR cle IN ('printer_ip', 'printer_name', 'receipt_social_footer_message')"
+            )
             params = dict(c.fetchall())
             shop_name = params.get("shop_name", shop_name)
             shop_sub = params.get("shop_subtitle", shop_sub)
             shop_addr = params.get("shop_address", shop_addr)
             shop_vat = params.get("shop_vat", shop_vat)
+            footer_message = params.get("receipt_social_footer_message") or None
             if not host:
                 cfg_ip = (params.get("printer_ip") or "").strip()
                 if cfg_ip and cfg_ip != "192.168.1.150":
@@ -1344,6 +1585,7 @@ def imprimer_ticket_caisse(num_ticket, printer_name=None, host=None, port=9100, 
             ecart_arrondi_cash=Decimal(str(ecart_arrondi or 0)),
             date_heure=d_h,
             duplicata=duplicata,
+            footer_message=footer_message,
         )
 
         return bool(imprimer_ticket(contenu, num_ticket, printer_name=printer_name, host=host, port=port, return_status=True))

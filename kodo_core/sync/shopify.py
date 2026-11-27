@@ -1093,7 +1093,14 @@ class ShopifySync:
 
     @staticmethod
     def _resumer_exception(exc) -> str:
-        return f"{type(exc).__name__} : {exc}"[:200]
+        texte = " ".join(str(exc or "").split())
+        if "Caused by" in texte:
+            idx = texte.find("(Caused by")
+            if idx == -1:
+                idx = texte.find("Caused by")
+            cause = texte[idx:].strip()
+            return f"{type(exc).__name__} : {cause}"[:200]
+        return f"{type(exc).__name__} : {texte}"[:200]
 
     @staticmethod
     def _resumer_erreurs_graphql(erreurs) -> str:

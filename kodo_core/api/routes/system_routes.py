@@ -5,6 +5,7 @@ Routes API Système, Version, Licence et Utilisateurs/PIN - Kōdo POS Core
 
 import os
 import sys
+import json
 import time
 import datetime
 import sqlite3
@@ -15,7 +16,7 @@ import database_manager
 from database_manager import get_connection, hash_pin, verify_pin_hash
 import license_manager
 import services.update_checker as update_checker
-from kodo_core.api.session_manager import create_session_token
+from kodo_core.api.session_manager import create_session_token, is_non_admin_session
 
 # Mécanisme de Rate Limiting anti-bruteforce en mémoire pour les vérifications de PIN
 # Structure: { client_id: {"failures": int, "locked_until": float} }
@@ -352,6 +353,8 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
     # 8. Ajouter un utilisateur (vendeur)
     elif method == "POST" and path == "/api/users":
+        if is_non_admin_session(headers):
+            return 403, {"error": "Gestion des utilisateurs réservée au Gérant."}
         name = data.get('name') or data.get('nom')
         role = data.get('role', 'Caissier')
         pin = str(data.get('pinCode') or data.get('pin') or '').strip()
@@ -380,6 +383,8 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
 
     # 9. Supprimer un utilisateur
     elif method == "DELETE" and path == "/api/users":
+        if is_non_admin_session(headers):
+            return 403, {"error": "Gestion des utilisateurs réservée au Gérant."}
         uids = query.get('id', [])
         if not uids and 'id' in data:
             uids = [str(data['id'])]
@@ -1158,17 +1163,18 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
         except Exception as e:
             return 500, {"success": False, "error": str(e)}
 
-    # 18. Personnalisation du Ticket : Upload du bloc Réseaux Sociaux
-    # 18. Personnalisation du Ticket : Upload ou Génération du bloc Réseaux Sociaux / QR Code
+    # 18. Personnalisation du Ticket : Upload ou Génération du bloc Réseaux Sociaux / Liens / QR Code
     elif method == "POST" and path in ("/api/settings/social", "/settings/social"):
         try:
             import os
             import base64
             from io import BytesIO
             from PIL import Image
-            from kodo_core.hardware.printer import generate_social_qr_image
+            from kodo_core.hardware.printer import generate_social_qr_image, generate_social_multi_image
 
             mode = data.get("mode")
+            has_footer_msg = "footer_message" in data
+            footer_message = str(data.get("footer_message") or "") if has_footer_msg else None
 
             # Cas 1 : Désactivation explicite du bloc en bas de ticket
             if mode == "none":
@@ -1176,6 +1182,15 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_mode', 'none')")
                 cursor.execute("DELETE FROM Parametres WHERE cle IN ('receipt_social_custom', 'receipt_social_b64')")
+                if has_footer_msg:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_footer_message', ?)",
+                        (footer_message,)
+                    )
+                else:
+                    cursor.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_social_footer_message'")
+                    row_fm = cursor.fetchone()
+                    footer_message = row_fm[0] if row_fm else ""
                 conn.commit()
                 conn.close()
 
@@ -1190,18 +1205,55 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     "success": True,
                     "message": "Bloc en bas de ticket désactivé avec succès.",
                     "mode": "none",
-                    "has_social": False
+                    "has_social": False,
+                    "footer_message": footer_message or ""
                 }
 
-            # Cas 2 : Générateur QR Code dynamique et personnalisable (Réseaux / Web / Avis / etc.)
-            elif mode == "qr" or ("url" in data or "title" in data):
+            # Cas 2 : Générateur QR Code / Liens multiples personnalisables
+            elif mode == "qr" or ("links" in data or "url" in data or "title" in data):
                 header = (data.get("header") or "").strip()
-                title = (data.get("title") or "REJOIGNEZ-NOUS !").strip()
-                url = (data.get("url") or data.get("qr_data") or "https://kōdo-solutions.com").strip()
-                subtitle = (data.get("subtitle") or "").strip()
                 qr_size = data.get("qr_size") or "large"
+                qr_layout = "stack" if data.get("qr_layout") == "stack" else "grid"
+                raw_links = data.get("links")
+                clean_links = None
 
-                img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, header=header, width=512, qr_size=qr_size)
+                if isinstance(raw_links, list) and len(raw_links) > 0:
+                    clean_links = []
+                    for idx, item in enumerate(raw_links[:6]):
+                        if not isinstance(item, dict):
+                            continue
+                        clean_links.append({
+                            "id": str(item.get("id") or f"lnk-{idx + 1}"),
+                            "kind": str(item.get("kind") or "custom"),
+                            "title": str(item.get("title") or "").strip(),
+                            "url": str(item.get("url") or "").strip(),
+                            "subtitle": str(item.get("subtitle") or "").strip(),
+                            "display": "text" if item.get("display") == "text" else "qr",
+                            "enabled": item.get("enabled", True) is not False,
+                        })
+
+                primary_link = None
+                if clean_links:
+                    primary_link = (
+                        next((l for l in clean_links if l["enabled"] and l["display"] == "qr"), None)
+                        or next((l for l in clean_links if l["enabled"]), None)
+                        or clean_links[0]
+                    )
+
+                title = (data.get("title") or (primary_link["title"] if primary_link else "") or "REJOIGNEZ-NOUS !").strip()
+                url = (data.get("url") or data.get("qr_data") or (primary_link["url"] if primary_link else "") or "https://kōdo-solutions.com").strip()
+                subtitle = (data.get("subtitle") if "subtitle" in data else (primary_link["subtitle"] if primary_link else "") or "").strip()
+
+                if clean_links:
+                    img = generate_social_multi_image(
+                        clean_links,
+                        header=header,
+                        width=512,
+                        qr_size=qr_size,
+                        qr_layout=qr_layout,
+                    )
+                else:
+                    img = generate_social_qr_image(title=title, url=url, subtitle=subtitle, header=header, width=512, qr_size=qr_size)
 
                 buffer = BytesIO()
                 img.save(buffer, format="PNG")
@@ -1222,14 +1274,31 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_url', ?)", (url,))
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_subtitle', ?)", (subtitle,))
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_size', ?)", (qr_size,))
+                cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_layout', ?)", (qr_layout,))
+                if clean_links is not None:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_links', ?)",
+                        (json.dumps(clean_links, ensure_ascii=False),)
+                    )
+                else:
+                    cursor.execute("DELETE FROM Parametres WHERE cle = 'receipt_social_links'")
+                if has_footer_msg:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_footer_message', ?)",
+                        (footer_message,)
+                    )
+                else:
+                    cursor.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_social_footer_message'")
+                    row_fm = cursor.fetchone()
+                    footer_message = row_fm[0] if row_fm else ""
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_custom', '1')")
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_b64', ?)", (stored_b64,))
                 conn.commit()
                 conn.close()
 
-                return 200, {
+                resp_payload = {
                     "success": True,
-                    "message": "Bloc QR Code généré et enregistré avec succès !",
+                    "message": "Pied de ticket et liens enregistrés avec succès !",
                     "width": img.width,
                     "height": img.height,
                     "social_url": stored_b64,
@@ -1238,8 +1307,13 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     "title": title,
                     "url": url,
                     "subtitle": subtitle,
-                    "qr_size": qr_size
+                    "qr_size": qr_size,
+                    "qr_layout": qr_layout,
+                    "footer_message": footer_message or "",
                 }
+                if clean_links is not None:
+                    resp_payload["links"] = clean_links
+                return 200, resp_payload
 
             # Cas 3 : Image personnalisée uploadée directement en base64
             else:
@@ -1283,6 +1357,15 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_mode', 'custom_image')")
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_custom', '1')")
                 cursor.execute("INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_b64', ?)", (stored_b64,))
+                if has_footer_msg:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO Parametres (cle, valeur) VALUES ('receipt_social_footer_message', ?)",
+                        (footer_message,)
+                    )
+                else:
+                    cursor.execute("SELECT valeur FROM Parametres WHERE cle = 'receipt_social_footer_message'")
+                    row_fm = cursor.fetchone()
+                    footer_message = row_fm[0] if row_fm else ""
                 conn.commit()
                 conn.close()
 
@@ -1292,7 +1375,8 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     "width": img.width,
                     "height": img.height,
                     "social_url": stored_b64,
-                    "mode": "custom_image"
+                    "mode": "custom_image",
+                    "footer_message": footer_message or ""
                 }
         except Exception as e:
             return 500, {"success": False, "error": f"Erreur lors du traitement du bloc réseaux sociaux : {str(e)}"}
@@ -1315,10 +1399,27 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
             url = params.get("receipt_social_url", "")
             subtitle = params.get("receipt_social_subtitle", "")
             qr_size = params.get("receipt_social_size", "large")
+            qr_layout = params.get("receipt_social_layout", "grid")
+            footer_message = params.get("receipt_social_footer_message", "")
+            links_parsed = None
+            if params.get("receipt_social_links"):
+                try:
+                    cand = json.loads(params["receipt_social_links"])
+                    if isinstance(cand, list):
+                        links_parsed = cand
+                except Exception:
+                    links_parsed = None
             stored_b64 = params.get("receipt_social_b64")
 
+            def _with_extra(payload_dict):
+                payload_dict["qr_layout"] = qr_layout
+                payload_dict["footer_message"] = footer_message
+                if links_parsed is not None:
+                    payload_dict["links"] = links_parsed
+                return payload_dict
+
             if not mode or mode == "none":
-                return 200, {
+                return 200, _with_extra({
                     "has_social": False,
                     "mode": "none",
                     "header": header,
@@ -1326,10 +1427,10 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     "url": url,
                     "subtitle": subtitle,
                     "qr_size": qr_size
-                }
+                })
 
             if stored_b64 and len(stored_b64) > 50:
-                return 200, {
+                return 200, _with_extra({
                     "has_social": True,
                     "mode": mode or "custom_image",
                     "social_url": stored_b64,
@@ -1338,7 +1439,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                     "url": url,
                     "subtitle": subtitle,
                     "qr_size": qr_size
-                }
+                })
 
             candidate_paths = [
                 database_manager.data_path("social_ticket.png"),
@@ -1349,7 +1450,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 if os.path.exists(target_path) and os.path.getsize(target_path) > 100:
                     with open(target_path, "rb") as f:
                         b64 = base64.b64encode(f.read()).decode("utf-8")
-                    return 200, {
+                    return 200, _with_extra({
                         "has_social": True,
                         "mode": mode or "custom_image",
                         "social_url": f"data:image/png;base64,{b64}",
@@ -1358,9 +1459,9 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                         "url": url,
                         "subtitle": subtitle,
                         "qr_size": qr_size
-                    }
+                    })
 
-            return 200, {
+            return 200, _with_extra({
                 "has_social": False,
                 "mode": "none",
                 "header": header,
@@ -1368,7 +1469,7 @@ def handle_system_request(method: str, path: str, query: Dict[str, Any], data: D
                 "url": url,
                 "subtitle": subtitle,
                 "qr_size": qr_size
-            }
+            })
         except Exception as e:
             return 500, {"has_social": False, "error": str(e)}
 

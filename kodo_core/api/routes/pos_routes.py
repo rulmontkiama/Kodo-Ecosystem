@@ -19,6 +19,7 @@ from kodo_core.domain.sales.cart_engine import (
     delete_parked_cart
 )
 from kodo_core.domain.accounting.z_report import ZReportEngine
+from kodo_core.api.session_manager import is_non_admin_session
 import ticket_printer
 
 
@@ -397,6 +398,8 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
 
     # 8. Clôture Z de Caisse
     elif method == "POST" and path == "/api/cloture-z":
+        if is_non_admin_session(headers):
+            return 403, {"success": False, "error": "Clôture Z réservée au Gérant."}
         # fondCaisseReel absent/null = pas de comptage physique (rattrapage d'un ancien jour).
         raw_reel = data.get('fondCaisseReel', 0)
         fond_caisse = None if raw_reel is None else float(raw_reel)
@@ -416,6 +419,8 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
 
     # 8bis. Clôture Z séquentielle automatique des journées antérieures en retard
     elif method == "POST" and path == "/api/cloture-z/batch-pending":
+        if is_non_admin_session(headers):
+            return 403, {"success": False, "error": "Clôture Z réservée au Gérant."}
         vendeur = data.get('vendeur', 'Admin')
         results = ZReportEngine.close_all_pending_days_sequentially(
             caisse_id="POS-01",
@@ -429,6 +434,8 @@ def handle_pos_request(method: str, path: str, query: Dict[str, Any], data: Dict
 
     # 9. Résumé du Z non clôturé (optionnellement limité à un jour : ?jusqu_au=AAAA-MM-JJ)
     elif method == "GET" and path == "/api/cloture-z/summary":
+        if is_non_admin_session(headers):
+            return 403, {"success": False, "error": "Clôture Z réservée au Gérant."}
         jusqu_au = (query.get("jusqu_au") or [None])[0] if isinstance(query, dict) else None
         if jusqu_au is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(jusqu_au)):
             return 400, {"error": "Date invalide (attendu AAAA-MM-JJ)"}

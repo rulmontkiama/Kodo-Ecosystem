@@ -9,8 +9,11 @@ import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Tuple, Optional
 from kodo_core.domain.catalog.inventory_manager import InventoryManager
+from kodo_core.api.session_manager import is_non_admin_session
 
 logger = logging.getLogger("kodo_core.api.routes.products_routes")
+
+_COST_FIELDS = ("purchase_price_htva", "prix_achat_htva", "costPrice", "cost_price")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -307,6 +310,17 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
         brand = query.get("brand", [None])[0]
         search = query.get("search", [None])[0]
         products = InventoryManager.get_all_products(category=cat, brand=brand, search=search)
+        if is_non_admin_session(headers) and isinstance(products, list):
+            sanitized = []
+            for p in products:
+                if isinstance(p, dict):
+                    cleaned = dict(p)
+                    for k in _COST_FIELDS:
+                        cleaned.pop(k, None)
+                    sanitized.append(cleaned)
+                else:
+                    sanitized.append(p)
+            return 200, sanitized
         return 200, products
 
     # 1b. Export du catalogue au format CSV officiel Shopify
@@ -422,7 +436,10 @@ def handle_products_request(method: str, path: str, query: Dict[str, Any], data:
         # (la modification « disparaissait » sans explication — revue du 2026-10-14).
         try:
             from kodo_core.domain.catalog.inventory_manager import BarcodeConflictError
-            res = InventoryManager.save_product(data)
+            payload = data
+            if is_non_admin_session(headers) and isinstance(data, dict):
+                payload = {k: v for k, v in data.items() if k not in _COST_FIELDS}
+            res = InventoryManager.save_product(payload)
         except BarcodeConflictError as ce:
             return 409, {"success": False, "error": str(ce), "code": getattr(ce, "code", "BARCODE_CONFLICT"),
                          "conflict": getattr(ce, "details", None)}
