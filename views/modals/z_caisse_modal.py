@@ -1,5 +1,5 @@
 """
-Modale de Clôture de Caisse Quotidienne (Z de Caisse NF525).
+Modale de Clôture de Caisse Quotidienne (Z de Caisse).
 """
 import customtkinter as ctk
 from decimal import Decimal
@@ -30,7 +30,7 @@ class ZDeCaisseModal(ctk.CTkToplevel):
         lbl_title = ctk.CTkLabel(self, text="Clôture de Caisse (Z de Caisse)", font=ctk.CTkFont(FNT_TITLE, 20, "bold"), text_color=TEXT[0])
         lbl_title.pack(pady=(20, 5))
 
-        lbl_sub = ctk.CTkLabel(self, text=f"Bilan officiel certifié NF525 — {self.caisse_id}", font=ctk.CTkFont(FNT_BODY, 12), text_color=GRY[0])
+        lbl_sub = ctk.CTkLabel(self, text=f"Bilan officiel de clôture Z — {self.caisse_id}", font=ctk.CTkFont(FNT_BODY, 12), text_color=GRY[0])
         lbl_sub.pack(pady=(0, 15))
 
         # Carte de synthèse

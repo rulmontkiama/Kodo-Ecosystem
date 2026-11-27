@@ -399,7 +399,7 @@ class MainApp(ctk.CTk):
         bottom_nav = ctk.CTkFrame(self.nav_bar, fg_color="transparent")
         bottom_nav.pack(side="bottom", fill="x", padx=10, pady=14)
 
-        z_caisse_text = "🧾 Clôture Z (NF525)" if self.app_features.get("nf525_compliance", False) else "🧾 Clôture Z 🔒"
+        z_caisse_text = "🧾 Clôture Z" if self.app_features.get("nf525_compliance", False) else "🧾 Clôture Z 🔒"
         self.btn_z_caisse = ctk.CTkButton(bottom_nav, text=z_caisse_text, height=42,
                       font=ctk.CTkFont(FNT_BODY, 11, "bold"),
                       fg_color="#1E854A", hover_color="#176B3B", text_color="#FFFFFF", corner_radius=14,

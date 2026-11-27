@@ -420,7 +420,7 @@ def _cle_scellement_utilisable() -> bool:
 
 def _c_chaine_nf525(ctx: _Contexte):
     if not ctx.existe("Tickets"):
-        return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", INFO, "Table Tickets absente.")
+        return _constat("ventes.chaine_nf525", "Chaîne de signatures d'audit", INFO, "Table Tickets absente.")
     n = ctx.conn.execute("SELECT COUNT(*) FROM Tickets").fetchone()[0]
     from kodo_core.db import audit_trail
 
@@ -467,7 +467,7 @@ def _c_chaine_nf525(ctx: _Contexte):
         detail = "Rupture ou altération détectée sur : " + ", ".join(cassees) + "."
         if inverifiees:
             detail += " Non vérifié(s) : " + ", ".join(inverifiees) + "."
-        return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", CRITIQUE, detail, donnees,
+        return _constat("ventes.chaine_nf525", "Chaîne de signatures d'audit", CRITIQUE, detail, donnees,
                         "Ne rien modifier : transmettre ce rapport au support.")
     if inverifiees:
         morceaux = []
@@ -477,10 +477,10 @@ def _c_chaine_nf525(ctx: _Contexte):
         autres = [x for x in inverifiees if not (x == "tickets" and not cle_ok)]
         if autres:
             morceaux.append("vérification impossible pour : " + ", ".join(autres))
-        return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", ATTENTION,
+        return _constat("ventes.chaine_nf525", "Chaîne de signatures d'audit", ATTENTION,
                         " ; ".join(morceaux) + ".", donnees,
                         "Signaler au support : ne pas régénérer la clé à la main.")
-    return _constat("ventes.chaine_nf525", "Chaîne de signatures NF525", OK,
+    return _constat("ventes.chaine_nf525", "Chaîne de signatures d'audit", OK,
                     f"Chaînage intact sur les tables scellées ({n} ticket(s)).", donnees)
 
 
@@ -705,7 +705,7 @@ CONTROLES: List[tuple] = [
     ("shopify.file", "Synchronisation Shopify", NIVEAU_COMPLET, True, _c_shopify),
     # EN DERNIER : c'est le seul contrôle long (il relit tous les tickets). Placé en tête, il pouvait
     # consommer le budget et faire sauter tous les autres (mesuré : 118 s sur 300 000 tickets).
-    ("ventes.chaine_nf525", "Chaîne de signatures NF525", NIVEAU_COMPLET, True, _c_chaine_nf525),
+    ("ventes.chaine_nf525", "Chaîne de signatures d'audit", NIVEAU_COMPLET, True, _c_chaine_nf525),
 ]
 
 

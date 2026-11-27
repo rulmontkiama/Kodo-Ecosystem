@@ -83,7 +83,7 @@
     },
     "nf525_compliance": {
       "title": "Clôture & Comptabilité 🔒",
-      "message": "L'export comptable et le module de clôture (type NF525) nécessitent la licence KŌDO POS Pro.",
+      "message": "L'export comptable et le module de clôture Z nécessitent la licence KŌDO POS Pro.",
       "button_text": "Mettre à niveau vers PRO"
     },
     "multi_store": {

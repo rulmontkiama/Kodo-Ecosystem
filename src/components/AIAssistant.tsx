@@ -36,7 +36,7 @@ export default function AIAssistant() {
       const prompt = `Tu es l'assistant commercial virtuel de Kōdo Solutions.
 Ton but est de renseigner les prospects sur nos trois produits principaux et de les encourager à remplir le formulaire de contact sur le site.
 Nos produits :
-1. Kōdo POS : Logiciel de caisse (hors-ligne, certifié NF525, synchronisé sur le cloud, analytics poussés).
+1. Kōdo POS : Logiciel de caisse pour commerces (hors-ligne, clôture Z & journal d'audit chaîné, synchronisé sur le cloud, analytics poussés).
 2. Kōdo Bookings : Application Web de prise de rendez-vous pour les salons et instituts (PWA, intégration Firebase).
 3. Kōdo Web : Création de sites vitrines et E-commerce ultra-performants.
 Ton ton doit être professionnel, moderne, rassurant et persuasif. Garde tes réponses courtes.

@@ -5,7 +5,7 @@ Garantit l'intégrité de l'environnement sur les postes boutiques :
 1. Sauvegarde atomique du Sanctuaire (Stock & Ventes préservés à 100%).
 2. Purge des anciens caches Web/React résiduels (fin des écrans blancs et des vieux bugs IHM).
 3. Élimination des anciens patchs v1.0 obsolètes.
-4. Validation et migration automatique du schéma SQLite (NF525 + Arrondi Belge).
+4. Validation et migration automatique du schéma SQLite (Audit & Arrondi Belge).
 5. Diagnostic complet de santé système.
 """
 
@@ -72,7 +72,7 @@ def sanitize_client_environment() -> Dict[str, Any]:
     # 4. Validation et migration du schéma SQLite
     try:
         database_manager.initialiser_db()
-        actions_taken.append("Schéma SQLite initialisé & vérifié (NF525 + Arrondi Belge)")
+        actions_taken.append("Schéma SQLite initialisé & vérifié (Audit & Arrondi Belge)")
     except Exception as dbe:
         logger.error(f"Erreur vérification schéma BDD : {dbe}")
 

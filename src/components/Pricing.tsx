@@ -42,7 +42,7 @@ export default function Pricing() {
             49€ <span className="text-lg text-foreground/40 font-bold">/mois</span>
           </div>
           <ul className="space-y-4 mb-8 flex-1">
-            <li className="flex items-center gap-3 text-sm font-medium"><CheckCircle2 size={18} className="text-accent" /> Logiciel certifié NF525</li>
+            <li className="flex items-center gap-3 text-sm font-medium"><CheckCircle2 size={18} className="text-accent" /> Clôture Z & journal d'audit chaîné</li>
             <li className="flex items-center gap-3 text-sm font-medium"><CheckCircle2 size={18} className="text-accent" /> Mode hors-ligne intégré</li>
             <li className="flex items-center gap-3 text-sm font-medium"><CheckCircle2 size={18} className="text-accent" /> Gestion des stocks</li>
             <li className="flex items-center gap-3 text-sm font-medium"><CheckCircle2 size={18} className="text-accent" /> Analytics avancés</li>

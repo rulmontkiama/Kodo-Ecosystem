@@ -102,9 +102,9 @@ export default function KodoPOSPage() {
               className="glass p-8 rounded-[2rem] border border-white/5 hover:border-accent/30 transition-colors"
             >
               <ShieldCheck className="w-10 h-10 text-accent mb-6" />
-              <h3 className="text-xl font-bold mb-3 text-foreground tracking-tight">Conformité Fiscale</h3>
+              <h3 className="text-xl font-bold mb-3 text-foreground tracking-tight">Traçabilité & Comptabilité</h3>
               <p className="text-foreground/60 leading-relaxed text-sm">
-                Certification légale garantie (normes européennes et lois anti-fraude). Export simplifié pour votre comptable en un clic.
+                Clôture Z quotidienne, journal d'audit chaîné et arrondi belge aux 5 centimes. Export simplifié pour votre comptable en un clic.
               </p>
             </motion.div>
           </div>
