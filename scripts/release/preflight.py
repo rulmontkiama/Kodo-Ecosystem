@@ -113,7 +113,7 @@ def env_isole(tmp: str) -> dict:
     home = os.path.join(tmp, "home")
     os.makedirs(home, exist_ok=True)
     env = dict(os.environ)
-    env.update({"HOME": home, "PYTHONDONTWRITEBYTECODE": "1", "KODO_STARTUP_CHECK": "0",
+    env.update({"HOME": home, "USERPROFILE": home, "PYTHONDONTWRITEBYTECODE": "1", "KODO_STARTUP_CHECK": "0",
                 # sans cela, un HOME jetable ferait perdre les paquets installés « pour l'utilisateur » (pytest…)
                 "PYTHONUSERBASE": site.getuserbase()})
     env.pop("KODO_DB_PATH", None)
@@ -561,7 +561,8 @@ def g_front(ctx) -> Resultat:
     front = ctx.front
     if not front or not os.path.isdir(front):
         return Resultat(SKIP, f"dossier du front introuvable ({front}) — option --front")
-    if not shutil.which("npm"):
+    npm_bin = shutil.which("npm")
+    if not npm_bin:
         return Resultat(SKIP, "npm introuvable")
     if not os.path.isdir(os.path.join(front, "node_modules")):
         return Resultat(SKIP, f"node_modules absent dans {front} (npm install)")
@@ -569,8 +570,8 @@ def g_front(ctx) -> Resultat:
     # Le build va dans un dossier jetable : le dist/ du front (celui qu'on s'apprête peut-être à zipper)
     # n'est jamais écrasé par un simple contrôle.
     sortie_build = os.path.join(ctx.tmp, "front_dist")
-    etapes = (("npm run lint (tsc --noEmit)", ["npm", "run", "lint"]),
-              ("npm run build", ["npm", "run", "build", "--", "--outDir", sortie_build, "--emptyOutDir"]))
+    etapes = (("npm run lint (tsc --noEmit)", [npm_bin, "run", "lint"]),
+              ("npm run build", [npm_bin, "run", "build", "--", "--outDir", sortie_build, "--emptyOutDir"]))
     for etape, cmd in etapes:
         code, sortie = lancer(cmd, cwd=front, timeout=900)
         if code != 0:

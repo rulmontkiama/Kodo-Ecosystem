@@ -188,3 +188,49 @@ class TestV24Hardening(unittest.TestCase):
         summary = ShopifySync._resumer_exception(long_err)
         self.assertIn("Caused by", summary)
         self.assertIn("SSLCertVerificationError", summary)
+
+    def test_stats_routes_limit_and_portable_pdf_temp_cleanup(self):
+        from unittest import mock
+        from kodo_core.api.routes.stats_routes import handle_stats_request
+
+        st_limit, body_limit, _ = handle_stats_request(
+            "GET", "/api/stats/z-reports", {"limit": ["abc"]}, {}, {}
+        )
+        self.assertEqual(st_limit, 200)
+        self.assertIsInstance(body_limit, list)
+
+        captured_paths = []
+
+        def fake_pdf(_rep_type, _rep_date, out_path):
+            captured_paths.append(out_path)
+            with open(out_path, "wb") as f:
+                f.write(b"%PDF-1.4\n%%EOF")
+
+        with mock.patch("pdf_generator.generer_rapport_pdf", side_effect=fake_pdf):
+            st_pdf, pdf_bytes, headers = handle_stats_request(
+                "GET", "/api/export/pdf", {"type": ["jour"], "date": ["2026-11-27/../evil"]}, {}, {}
+            )
+
+        self.assertEqual(st_pdf, 200)
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-1.4"))
+        self.assertIn("2026-11-27evil", headers["Content-Disposition"])
+        self.assertEqual(len(captured_paths), 1)
+        self.assertFalse(os.path.exists(captured_paths[0]))
+
+    def test_server_http_security_headers_and_body_cap(self):
+        import server_pos
+
+        self.assertGreater(server_pos.MAX_REQUEST_BODY_BYTES, 0)
+        recorded = []
+
+        class _DummyHandler:
+            _set_security_headers = server_pos.POSRequestHandler._set_security_headers
+
+            def send_header(self, k, v):
+                recorded.append((k, v))
+
+        _DummyHandler()._set_security_headers()
+        hdrs = dict(recorded)
+        self.assertEqual(hdrs.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(hdrs.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertEqual(hdrs.get("Referrer-Policy"), "no-referrer")

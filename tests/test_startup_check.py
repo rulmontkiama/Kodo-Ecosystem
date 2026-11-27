@@ -37,8 +37,12 @@ class BaseControle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="kodo_startup_check_")
         self._home = os.environ.get("HOME")
-        os.environ["HOME"] = os.path.join(self.tmp, "home")
-        os.makedirs(os.environ["HOME"])
+        self._userprofile = os.environ.get("USERPROFILE")
+        fake_home = os.path.join(self.tmp, "home")
+        os.environ["HOME"] = fake_home
+        if os.name == "nt":
+            os.environ["USERPROFILE"] = fake_home
+        os.makedirs(fake_home)
         self.db = os.path.join(self.tmp, "kodo_pos.db")
         self.rapports = os.path.join(self.tmp, "diagnostics")
 
@@ -60,6 +64,10 @@ class BaseControle(unittest.TestCase):
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = self._home
+        if self._userprofile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = self._userprofile
         sc._ETAT["rapport"] = None
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -639,7 +647,8 @@ class TestRevueDuFiltre(BaseControle):
         self.assertFalse(os.path.exists(self.db + "-wal"))
 
     def test_chemin_avec_espaces_diacritiques_et_diese(self):
-        dossier = os.path.join(self.tmp, "Kōdo POS #1 ?x")
+        nom_dossier = "Kōdo POS #1 (x)" if os.name == "nt" else "Kōdo POS #1 ?x"
+        dossier = os.path.join(self.tmp, nom_dossier)
         os.makedirs(dossier)
         copie = os.path.join(dossier, "kodo pos.db")
         shutil.copy(self.db, copie)

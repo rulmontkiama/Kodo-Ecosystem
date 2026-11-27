@@ -198,16 +198,18 @@ def sceller_ticket(conn: sqlite3.Connection, numero_ticket: str):
         try:
             return seal_sale(conn, ticket_id, totals)
         except Exception as erreur:
+            logger.warning("Échec scellement fiscal ticket %s : %s", numero_ticket, erreur)
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except Exception as rb_err:
+                logger.warning("Rollback après échec scellement ticket %s : %s", numero_ticket, rb_err)
             try:
                 record_unsealed_sale(conn, ticket_id, totals, str(erreur))
-            except Exception:
-                pass
+            except Exception as rec_err:
+                logger.error("Impossible d'enregistrer l'échec de scellement pour %s : %s", numero_ticket, rec_err)
             return None
-    except Exception:
+    except Exception as exc:
+        logger.warning("Erreur scellement fiscal ticket %s : %s", numero_ticket, exc)
         return None
 
 

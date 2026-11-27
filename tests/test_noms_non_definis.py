@@ -176,11 +176,18 @@ def fichiers_production():
                 yield os.path.join(dossier, f)
 
 
+def _rel(chemin):
+    try:
+        return os.path.relpath(chemin, RACINE)
+    except ValueError:
+        return chemin
+
+
 def noms_non_definis(chemin):
     source = open(chemin, encoding="utf-8").read()
     arbre = ast.parse(source, chemin)
     etoile = any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(arbre))
-    a = Analyse(os.path.relpath(chemin, RACINE), etoile)
+    a = Analyse(_rel(chemin), etoile)
     a.analyser_module(arbre)
     return sorted(set(a.problemes))
 
@@ -193,7 +200,7 @@ class TestAucunNomNonDefini(unittest.TestCase):
         for chemin in sorted(fichiers_production()):
             nb += 1
             for ligne, nom in noms_non_definis(chemin):
-                trouves.append(f"{os.path.relpath(chemin, RACINE)}:{ligne}  {nom}")
+                trouves.append(f"{_rel(chemin)}:{ligne}  {nom}")
         self.assertGreater(nb, 50, "l'analyse n'a presque rien lu : la barrière serait muette")
         self.assertEqual(trouves, [], "noms utilisés sans être définis :\n" + "\n".join(trouves))
 

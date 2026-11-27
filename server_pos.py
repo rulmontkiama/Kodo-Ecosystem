@@ -49,6 +49,8 @@ initialiser_db()
 import re
 import shutil
 
+MAX_REQUEST_BODY_BYTES = 25 * 1024 * 1024  # 25 Mo max pour protéger la mémoire locale
+
 def is_dist_valid(dist_path: str) -> bool:
     """Vérifie qu'un dossier dist contient bien un index.html et son bundle JS existant."""
     if not dist_path or not os.path.exists(dist_path):
@@ -211,6 +213,11 @@ class POSRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length')
         self.send_header('Vary', 'Origin')
 
+    def _set_security_headers(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'SAMEORIGIN')
+        self.send_header('Referrer-Policy', 'no-referrer')
+
     def _requete_refusee(self, method: str) -> bool:
         """Répond 403 et retourne True si la requête ne vient pas d'une page servie par ce poste."""
         host = self.headers.get('Host')
@@ -234,6 +241,7 @@ class POSRequestHandler(BaseHTTPRequestHandler):
             body = json.dumps({"error": "Erreur sérialisation"}, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
         self._set_cors_headers()
+        self._set_security_headers()
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -242,6 +250,7 @@ class POSRequestHandler(BaseHTTPRequestHandler):
     def _send_bytes(self, content_bytes, code=200, headers=None):
         self.send_response(code)
         self._set_cors_headers()
+        self._set_security_headers()
         if headers:
             for k, v in headers.items():
                 self.send_header(k, v)
@@ -268,8 +277,19 @@ class POSRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        # Extraction du body JSON si présent
-        length = int(self.headers.get('Content-Length', 0))
+        # Extraction du body JSON si présent (borné pour éviter saturation mémoire)
+        raw_len = self.headers.get('Content-Length', '0')
+        try:
+            length = int(raw_len)
+        except (ValueError, TypeError):
+            self._send_error("En-tête Content-Length invalide.", 400, "BAD_REQUEST")
+            return True
+        if length < 0:
+            self._send_error("En-tête Content-Length invalide.", 400, "BAD_REQUEST")
+            return True
+        if length > MAX_REQUEST_BODY_BYTES:
+            self._send_error("Corps de requête trop volumineux.", 413, "PAYLOAD_TOO_LARGE")
+            return True
         body_bytes = self.rfile.read(length) if length > 0 else b'{}'
 
         data = {}

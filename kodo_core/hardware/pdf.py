@@ -753,7 +753,7 @@ def generer_rapport_pdf(type_rapport, date_val, save_path):
                 h_str = dh.strftime("%H:%M")
             elif len(dh_str) > 10:
                 try: h_str = datetime.datetime.strptime(dh_str.split(".")[0], "%Y-%m-%d %H:%M:%S").strftime("%H:%M")
-                except: h_str = dh_str
+                except (ValueError, TypeError): h_str = dh_str
             else: h_str = dh_str
 
             desig_str = f"{nom} (Taille: {taille})" if taille else nom

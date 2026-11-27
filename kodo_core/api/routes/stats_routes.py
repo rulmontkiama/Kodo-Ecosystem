@@ -4,6 +4,9 @@ Routes API Statistiques, Rapports et Exports (Comptabilité, PDF, CSV, Excel) - 
 """
 
 import os
+import re
+import logging
+import tempfile
 import datetime
 from typing import Dict, Any, Tuple, Optional, Union
 
@@ -11,6 +14,8 @@ from kodo_core.domain.accounting.z_report import ZReportEngine
 from kodo_core.api.session_manager import is_non_admin_session
 import pdf_generator
 import export_manager
+
+logger = logging.getLogger("kodo.api.stats")
 
 
 def handle_stats_request(method: str, path: str, query: Dict[str, Any], data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Any, Optional[Dict[str, str]]]]:
@@ -33,7 +38,12 @@ def handle_stats_request(method: str, path: str, query: Dict[str, Any], data: Di
 
     # 2. Historique des rapports Z
     elif method == "GET" and path == "/api/stats/z-reports":
-        limit = int(query.get("limit", [30])[0])
+        raw_limit = query.get("limit", [30])[0]
+        try:
+            limit = int(raw_limit)
+        except (ValueError, TypeError):
+            limit = 30
+        limit = max(1, min(365, limit))
         reports = ZReportEngine.get_past_z_reports(limit=limit)
         return 200, reports, None
 
@@ -41,21 +51,23 @@ def handle_stats_request(method: str, path: str, query: Dict[str, Any], data: Di
     elif method == "GET" and path == "/api/export/pdf":
         rep_type = query.get('type', ['jour'])[0]
         rep_date = query.get('date', [datetime.datetime.now().strftime("%Y-%m-%d")])[0]
-        tmp_pdf = f"/tmp/rapport_comptable_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-
-        pdf_generator.generer_rapport_pdf(rep_type, rep_date, tmp_pdf)
-
-        with open(tmp_pdf, 'rb') as f:
-            pdf_bytes = f.read()
-
+        safe_date = re.sub(r'[^0-9A-Za-z_-]', '', str(rep_date)) or 'export'
+        fd, tmp_pdf = tempfile.mkstemp(prefix="rapport_comptable_", suffix=".pdf")
+        os.close(fd)
         try:
-            os.remove(tmp_pdf)
-        except Exception:
-            pass
+            pdf_generator.generer_rapport_pdf(rep_type, rep_date, tmp_pdf)
+            with open(tmp_pdf, 'rb') as f:
+                pdf_bytes = f.read()
+        finally:
+            try:
+                if os.path.exists(tmp_pdf):
+                    os.remove(tmp_pdf)
+            except OSError as exc:
+                logger.warning("Impossible de supprimer le PDF temporaire %s : %s", tmp_pdf, exc)
 
         headers = {
             'Content-Type': 'application/pdf',
-            'Content-Disposition': f'attachment; filename="Rapport_Comptable_{rep_date}.pdf"',
+            'Content-Disposition': f'attachment; filename="Rapport_Comptable_{safe_date}.pdf"',
             'Content-Length': str(len(pdf_bytes))
         }
         return 200, pdf_bytes, headers

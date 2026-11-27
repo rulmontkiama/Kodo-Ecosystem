@@ -54,9 +54,9 @@ fi
 FRONT_DIR="$(ls -d /Users/kiamarulmont/Desktop/*k*do-pos-3* 2>/dev/null | head -1)"
 echo "🧪 Tests Python (pytest)..."
 (cd "$SRC_DIR" && python3.12 -m pytest -q tests) || { echo "❌ Tests Python en échec (ou pytest absent : python3.12 -m pip install pytest). Build annulé."; exit 1; }
-echo "🔎 Vérification TypeScript du frontend (npm run lint)..."
+echo "🔎 Vérification TypeScript & tests frontend..."
 [ -n "$FRONT_DIR" ] || { echo "❌ Frontend kōdo-pos-3 introuvable sur le Bureau. Build annulé."; exit 1; }
-(cd "$FRONT_DIR" && npm run lint) || { echo "❌ Erreurs TypeScript dans le frontend. Build annulé."; exit 1; }
+(cd "$FRONT_DIR" && npm run lint && npm run test) || { echo "❌ Erreurs TypeScript/tests dans le frontend. Build annulé."; exit 1; }
 
 # Le frontend est reconstruit ici, jamais à la main : sans cela, le script embarque le
 # contenu de dist/ tel quel et peut livrer un bundle antérieur aux dernières modifications
@@ -108,19 +108,19 @@ fi
 # muette par construction, elle aurait laissé passer un dist absent ou périmé en
 # annonçant un build réussi. Elle est remplacée par une vérification bloquante.
 echo "⚡ Vérification du frontend embarqué..."
-BUNDLE_JS=$(ls "$SRC_DIR/dist/assets/"*.js 2>/dev/null | head -1)
+BUNDLE_JS=$(ls "$SRC_DIR/dist/assets/"index-*.js "$SRC_DIR/dist/assets/"*.js 2>/dev/null | head -1)
 if [ ! -f "$SRC_DIR/dist/index.html" ] || [ -z "$BUNDLE_JS" ]; then
   echo "❌ dist/ incomplet : index.html ou bundle JS manquant. Build annulé."
   exit 1
 fi
 # -F obligatoire : sans lui, les points de "2.0.1" sont des jokers regex et
 # la garde est satisfaite par n'importe quel "2001" du bundle minifié.
-if ! grep -qF "$KODO_VERSION" "$BUNDLE_JS"; then
-  echo "❌ Le bundle embarqué ne contient pas la version $KODO_VERSION."
+if ! grep -rqF "$KODO_VERSION" "$SRC_DIR/dist/assets/"; then
+  echo "❌ Les bundles embarqués ne contiennent pas la version $KODO_VERSION."
   echo "   Le frontend livré serait antérieur aux dernières modifications. Build annulé."
   exit 1
 fi
-echo "✅ Frontend embarqué vérifié (version $KODO_VERSION présente dans $(basename "$BUNDLE_JS"))."
+echo "✅ Frontend embarqué vérifié (version $KODO_VERSION présente dans dist/assets/)."
 
 # 1.6 VERSION DE BASE DU DMG (référence des patchs backend signés : kodo_base.BASE_VERSION)
 echo "🔏 Alignement de la version de base des correctifs backend..."
@@ -167,10 +167,27 @@ PACK_DIR="$BUILD_DIR/Installation_Pack"
 cp -R "$DIST_DIR/$APP_NAME.app" "$PACK_DIR/"
 ln -s /Applications "$PACK_DIR/Applications"
 
-# Notice d'installation
+# Notice d'installation (adaptée selon présence d'une signature Apple Developer ID)
+if [ -n "${APPLE_SIGN_IDENTITY:-}" ] && [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
 cat <<INFO > "$PACK_DIR/IMPORTANT_LISEZ_MOI.txt"
 ===========================================================
-        NOTICE D'INSTALLATION - KŌDO POS v2.0
+        NOTICE D'INSTALLATION - KŌDO POS
+===========================================================
+
+Bienvenue dans votre système de caisse Kōdo POS.
+
+POUR INSTALLER :
+1. Faites glisser l'icône "Kodo_POS" vers le dossier "Applications".
+2. Double-cliquez sur Kodo_POS dans Applications pour démarrer.
+
+IDENTIFIANTS PAR DÉFAUT :
+Code PIN : 0000
+===========================================================
+INFO
+else
+cat <<INFO > "$PACK_DIR/IMPORTANT_LISEZ_MOI.txt"
+===========================================================
+        NOTICE D'INSTALLATION - KŌDO POS
 ===========================================================
 
 Bienvenue dans votre système de caisse Kōdo POS.
@@ -188,16 +205,37 @@ IDENTIFIANTS PAR DÉFAUT :
 Code PIN : 0000
 ===========================================================
 INFO
+fi
 
-# Signature ad-hoc & nettoyage des attributs étendus
-codesign --force --deep --sign - "$PACK_DIR/$APP_NAME.app" 2>/dev/null || true
+# Signature Apple Developer ID (si APPLE_SIGN_IDENTITY défini) ou fallback ad-hoc
+ENTITLEMENTS_FILE="$SRC_DIR/scripts/release/entitlements.plist"
+if [ -n "${APPLE_SIGN_IDENTITY:-}" ]; then
+    echo "🔏 Signature Apple Developer ID : $APPLE_SIGN_IDENTITY"
+    find "$PACK_DIR/$APP_NAME.app/Contents" -type f \( -name "*.dylib" -o -name "*.so" -o -perm -111 \) ! -path "*.framework/*" -print0 \
+        | while IFS= read -r -d '' bin; do
+            codesign --force --options runtime --timestamp \
+                --entitlements "$ENTITLEMENTS_FILE" \
+                --sign "$APPLE_SIGN_IDENTITY" "$bin"
+        done
+    codesign --force --deep --options runtime --timestamp \
+        --entitlements "$ENTITLEMENTS_FILE" \
+        --sign "$APPLE_SIGN_IDENTITY" "$PACK_DIR/$APP_NAME.app"
+    codesign --verify --deep --strict --verbose=2 "$PACK_DIR/$APP_NAME.app"
+else
+    echo "⚠️ APPLE_SIGN_IDENTITY non défini : signature ad-hoc locale (--sign -)."
+    codesign --force --deep --sign - "$PACK_DIR/$APP_NAME.app" 2>/dev/null || true
+fi
 xattr -cr "$PACK_DIR" || true
 
 # Installation directe dans /Applications
 echo "📲 Installation directe dans /Applications..."
 rm -rf "/Applications/$APP_NAME.app" 2>/dev/null || true
 cp -R "$PACK_DIR/$APP_NAME.app" /Applications/ 2>/dev/null || true
-codesign --force --deep --sign - "/Applications/$APP_NAME.app" 2>/dev/null || true
+if [ -n "${APPLE_SIGN_IDENTITY:-}" ]; then
+    codesign --verify --deep --strict "/Applications/$APP_NAME.app" 2>/dev/null || true
+else
+    codesign --force --deep --sign - "/Applications/$APP_NAME.app" 2>/dev/null || true
+fi
 xattr -cr "/Applications/$APP_NAME.app" 2>/dev/null || true
 
 # 5. GÉNÉRATION DE INSTALLATION_KODO_POS_MACOS.ZIP VIA DITTO
@@ -214,6 +252,15 @@ cp -R "$PACK_DIR/$APP_NAME.app" /tmp/dmg_build/
 cp "$PACK_DIR/IMPORTANT_LISEZ_MOI.txt" /tmp/dmg_build/ 2>/dev/null || true
 rm -f "$SRC_DIR/$DMG_NAME" "$SRC_DIR/public/$DMG_NAME"
 hdiutil create -volname "Kodo POS" -srcfolder /tmp/dmg_build -ov -format UDZO "$SRC_DIR/$DMG_NAME"
+if [ -n "${APPLE_SIGN_IDENTITY:-}" ]; then
+    codesign --force --timestamp --sign "$APPLE_SIGN_IDENTITY" "$SRC_DIR/$DMG_NAME"
+    if [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
+        echo "🍏 Notarisation Apple du DMG en cours..."
+        xcrun notarytool submit "$SRC_DIR/$DMG_NAME" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
+        xcrun stapler staple "$SRC_DIR/$DMG_NAME"
+        xcrun stapler validate "$SRC_DIR/$DMG_NAME"
+    fi
+fi
 cp "$SRC_DIR/$DMG_NAME" "$SRC_DIR/public/$DMG_NAME" 2>/dev/null || true
 cp "$SRC_DIR/$DMG_NAME" ~/Desktop/"$DMG_NAME" 2>/dev/null || true
 # Le volume de développement est exFAT : les métadonnées macOS deviennent de vrais fichiers
@@ -222,11 +269,22 @@ cp "$SRC_DIR/$DMG_NAME" ~/Desktop/"$DMG_NAME" 2>/dev/null || true
 (cd "$SRC_DIR/dist" && rm -f "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" && zip -r -X "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" . \
     -x '._*' -x '*/._*' -x '__MACOSX/*' -x '.DS_Store' -x '*/.DS_Store') 2>/dev/null || true
 
-# L'archive OTA ne doit contenir que l'IHM courante : un dist/ non purgé y empile les
-# anciens bundles, double la charge sur la connexion de la boutique et fait signer des
-# fichiers qui n'ont rien à y faire.
-NB=$(unzip -l "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" | grep -cE '\.(js|css|html)$')
-[ "$NB" -eq 3 ] || { echo "❌ Archive OTA : $NB fichiers au lieu de 3. dist/ n'était pas purgé."; exit 1; }
+# Vérification compatible code-splitting Vite (chunks lazy-loadés) : index.html + tous ses assets
+python3 - "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" << 'PYZIP'
+import re, sys, zipfile
+zf = zipfile.ZipFile(sys.argv[1])
+names = {i.filename for i in zf.infolist() if not i.is_dir()}
+assert "index.html" in names, "index.html absent de l'archive OTA"
+html = zf.read("index.html").decode("utf-8", "replace")
+refs = re.findall(r'(?:src|href)=["\']/?(assets/[^"\']+\.(?:js|css))["\']', html)
+assert refs, "aucun asset JS/CSS référence dans index.html"
+missing = [r for r in refs if r not in names]
+assert not missing, f"assets manquants dans dist zip : {missing}"
+js_count = sum(1 for n in names if n.endswith(".js"))
+css_count = sum(1 for n in names if n.endswith(".css"))
+assert js_count >= 1 and css_count >= 1, f"archive OTA incomplète (js={js_count}, css={css_count})"
+print(f"✅ Archive OTA vérifiée : {len(names)} fichier(s) ({js_count} JS, {css_count} CSS)")
+PYZIP
 python3 "$SRC_DIR/scripts/release/kodo_release.py" sign-dist "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" --version "$KODO_VERSION"
 python3 "$SRC_DIR/scripts/release/kodo_release.py" verify "$SRC_DIR/public/dist_v${KODO_VERSION}.zip" --kind dist --version "$KODO_VERSION" \
   || { echo "❌ Signature invalide : les clients refuseraient cette archive."; exit 1; }

@@ -7,10 +7,13 @@ import sqlite3
 import os
 import hashlib
 import hmac
+import logging
 from typing import Tuple, Optional
 from decimal import Decimal
 from contextlib import contextmanager
 from kodo_core.config import ShopConfig
+
+logger = logging.getLogger("kodo.db.connection")
 
 # -----------------------------------------------------------------------------
 # Convertisseurs et adaptateurs pour le type Decimal dans SQLite
@@ -103,8 +106,8 @@ class SafeConnection:
             cur.execute("PRAGMA synchronous=NORMAL")
             cur.execute("PRAGMA foreign_keys=ON")
             cur.execute("PRAGMA temp_store=MEMORY")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Échec application des PRAGMAs SQLite : %s", exc)
 
     def cursor(self) -> sqlite3.Cursor:
         return self._conn.cursor()
@@ -121,16 +124,16 @@ class SafeConnection:
     def rollback(self):
         try:
             self._conn.rollback()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Rollback SQLite ignoré : %s", exc)
 
     def close(self):
         if not self._closed:
             if not self._external_conn:
                 try:
                     self._conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Fermeture connexion SQLite ignorée : %s", exc)
             self._closed = True
 
     def __enter__(self):
