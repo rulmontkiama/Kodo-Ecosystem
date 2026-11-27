@@ -260,6 +260,10 @@ def copier_base_sqlite(source_path: str, target_path: str) -> str:
     target_conn = sqlite3.connect(tmp_path, timeout=10.0)
     try:
         source_conn.backup(target_conn)
+        # Snapshot autonome (mode journal DELETE) : ne pas laisser d'en-tête WAL
+        # ni de sidecars `.tmp-wal`/`.tmp-shm` dans le dossier des sauvegardes.
+        target_conn.execute("PRAGMA journal_mode=DELETE")
+        target_conn.commit()
     finally:
         target_conn.close()
         source_conn.close()
@@ -269,6 +273,12 @@ def copier_base_sqlite(source_path: str, target_path: str) -> str:
         row = verif.execute("PRAGMA integrity_check").fetchone()
     finally:
         verif.close()
+
+    for ext in ("-wal", "-shm"):
+        for base in (tmp_path, target_path):
+            sidecar = base + ext
+            if os.path.exists(sidecar):
+                os.remove(sidecar)
 
     if not row or row[0] != "ok":
         os.remove(tmp_path)

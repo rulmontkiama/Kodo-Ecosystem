@@ -718,17 +718,28 @@ def _ouvrir_lecture_seule(db_path: str) -> sqlite3.Connection:
     # `mode=ro` : lecture seule au niveau du FICHIER. `query_only` seul laissait passer le changement de
     # mode de journal (SafeConnection exécute `PRAGMA journal_mode=WAL`, qui réécrit l'en-tête d'une
     # base en mode DELETE) et le point de contrôle du WAL à la fermeture.
-    uri = pathlib.Path(os.path.abspath(db_path)).as_uri() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=5.0, detect_types=sqlite3.PARSE_DECLTYPES)
+    base_uri = pathlib.Path(os.path.realpath(db_path)).as_uri()
+
+    def _tenter(params: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(f"{base_uri}?{params}", uri=True, timeout=5.0, detect_types=sqlite3.PARSE_DECLTYPES)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            # `connect` et le pragma ne lisent pas le fichier : sans cette lecture, un fichier qui n'est
+            # pas une base ne serait découvert qu'au premier contrôle, puis répété sur tous les autres.
+            conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
     try:
-        conn.execute("PRAGMA query_only=ON")
-        # `connect` et le pragma ne lisent pas le fichier : sans cette lecture, un fichier qui n'est
-        # pas une base ne serait découvert qu'au premier contrôle, puis répété sur tous les autres.
-        conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
-    except Exception:
-        conn.close()
+        return _tenter("mode=ro")
+    except sqlite3.OperationalError:
+        # Sur macOS/SQLite, une copie de base WAL sans fichier `-shm` en lecture seule peut lever
+        # `unable to open database file` sur `?mode=ro` : repli strictement lecture seule `immutable=1`.
+        if os.path.isfile(db_path) and not os.path.exists(db_path + "-wal"):
+            return _tenter("mode=ro&immutable=1")
         raise
-    return conn
 
 
 # Mesures qui changent à chaque lancement sans que le PROBLÈME change (un message de file Shopify qui
