@@ -3,16 +3,14 @@
 # Kōdo POS — Signature Developer ID & Notarisation Apple (macOS)
 #
 # Prérequis (une seule fois sur le Mac de build) :
-#   1. Certificat "Developer ID Application: <Nom> (<TEAM_ID>)" dans Trousseau
+#   1. Certificat "Developer ID Application: <Nom> (8Q2G5M5C2B)" dans Trousseau
 #   2. Profil notarytool enregistré dans le Trousseau :
 #      xcrun notarytool store-credentials "kodo-notary" \
 #        --apple-id "<votre@apple.id>" \
-#        --team-id "<TEAM_ID>" \
+#        --team-id "8Q2G5M5C2B" \
 #        --password "<mot-de-passe-app-specifique>"
 #
-# Utilisation :
-#   APPLE_SIGN_IDENTITY="Developer ID Application: ..." \
-#   APPLE_NOTARY_PROFILE="kodo-notary" \
+# Utilisation (auto-détection du certificat 8Q2G5M5C2B dans le Trousseau) :
 #   ./scripts/release/notarize_macos.sh [chemin/Kodo_POS.app] [chemin/Installation_Kodo_POS.dmg]
 # ==============================================================================
 set -euo pipefail
@@ -20,14 +18,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENTITLEMENTS="${APPLE_ENTITLEMENTS:-$SCRIPT_DIR/entitlements.plist}"
+TEAM_ID="${APPLE_TEAM_ID:-8Q2G5M5C2B}"
 IDENTITY="${APPLE_SIGN_IDENTITY:-}"
-NOTARY_PROFILE="${APPLE_NOTARY_PROFILE:-}"
+NOTARY_PROFILE="${APPLE_NOTARY_PROFILE:-kodo-notary}"
 
 APP_PATH="${1:-$ROOT_DIR/Installation_Pack/Kodo_POS.app}"
 DMG_PATH="${2:-$ROOT_DIR/Installation_Kodo_POS.dmg}"
 
+if [ -z "$IDENTITY" ] && command -v security >/dev/null 2>&1; then
+    IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep "Developer ID Application" \
+        | grep "(${TEAM_ID})" \
+        | head -1 \
+        | sed -E 's/.*"([^"]+)".*/\1/' || true)
+fi
+
 if [ -z "$IDENTITY" ]; then
-    echo "❌ Définissez APPLE_SIGN_IDENTITY=\"Developer ID Application: ...\""
+    echo "❌ Aucun certificat 'Developer ID Application' trouvé pour l'équipe $TEAM_ID dans le Trousseau."
+    echo "   Installez votre certificat depuis developer.apple.com ou définissez APPLE_SIGN_IDENTITY."
     security find-identity -v -p codesigning 2>/dev/null || true
     exit 1
 fi

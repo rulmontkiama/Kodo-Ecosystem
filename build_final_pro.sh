@@ -6,6 +6,7 @@
 
 APP_NAME="Kodo_POS"
 DMG_NAME="Installation_Kodo_POS.dmg"
+APPLE_TEAM_ID="${APPLE_TEAM_ID:-8Q2G5M5C2B}"
 # WIN_ZIP porte le numero de version : il est derive de kodo_base.BASE_VERSION plus bas,
 # jamais ecrit en dur (il restait fige a une version precedente a chaque livraison).
 WIN_ZIP=""
@@ -166,6 +167,15 @@ PACK_DIR="$BUILD_DIR/Installation_Pack"
 
 cp -R "$DIST_DIR/$APP_NAME.app" "$PACK_DIR/"
 ln -s /Applications "$PACK_DIR/Applications"
+
+# Auto-détection du certificat Developer ID Application pour l'équipe Apple si non fourni
+if [ -z "${APPLE_SIGN_IDENTITY:-}" ] && command -v security >/dev/null 2>&1; then
+    APPLE_SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep "Developer ID Application" \
+        | grep "(${APPLE_TEAM_ID})" \
+        | head -1 \
+        | sed -E 's/.*"([^"]+)".*/\1/' || true)
+fi
 
 # Notice d'installation (adaptée selon présence d'une signature Apple Developer ID)
 if [ -n "${APPLE_SIGN_IDENTITY:-}" ] && [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
