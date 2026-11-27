@@ -1,0 +1,142 @@
+name: Build macOS DMG (.dmg)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  tests:
+    name: 🧪 Tests Python (bloquants)
+    runs-on: macos-latest
+
+    steps:
+      - name: 📥 Checkout Backend
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 📦 Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt certifi cryptography
+
+      - name: 🧪 Run pytest
+        run: python -m pytest -q tests
+
+  build-dmg:
+    needs: tests
+    runs-on: macos-latest
+
+    steps:
+      - name: 📥 Checkout Backend
+        uses: actions/checkout@v4
+
+      - name: 🌐 Checkout Frontend (Kodo-POS-Frontend)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: rulmontkiama/Kodo-POS-Frontend
+          ref: main
+          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
+          path: _frontend
+
+      - name: ⬢ Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 🏗️ Build Frontend React
+        run: |
+          if [ -f "_frontend/package.json" ]; then
+            cd _frontend
+            npm ci
+            npm run lint
+            npm run test
+            npm run build
+            cd ..
+            rm -rf dist
+            cp -R _frontend/dist dist
+          elif [ ! -f "dist/index.html" ]; then
+            echo "❌ Frontend introuvable : ajoutez le secret FRONTEND_REPO_TOKEN si Kodo-POS-Frontend est privé."
+            exit 1
+          fi
+
+      - name: 🐍 Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 📦 Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt certifi cryptography pywebview
+
+      - name: 🏭 Initialize Factory-Clean Database
+        run: |
+          rm -f kodo_pos.db kodo_pos.db-shm kodo_pos.db-wal
+          python -c "import database_manager, sqlite3; database_manager.DB_NAME='kodo_pos.db'; database_manager.initialiser_db(); c=sqlite3.connect('kodo_pos.db'); assert sum(c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ('Tickets','Produits','Stocks','Clients'))==0"
+
+      - name: 🔨 Compile Kodo_POS.app with PyInstaller
+        run: |
+          python scripts/release/kodo_release.py stamp-base
+          pyinstaller --clean --noconfirm Kodo_POS.spec
+
+      - name: 🔏 Sign, Create DMG & Notarize (Apple Team 8Q2G5M5C2B)
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: '8Q2G5M5C2B'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dmg_build
+          cp -R dist/Kodo_POS.app /tmp/dmg_build/
+          ln -s /Applications /tmp/dmg_build/Applications
+
+          SIGN_IDENTITY=""
+          if [ -n "${APPLE_CERT_P12_BASE64:-}" ] && [ -n "${APPLE_CERT_PASSWORD:-}" ]; then
+            KEYCHAIN_PATH="$RUNNER_TEMP/kodo_signing.keychain-db"
+            CERT_PATH="$RUNNER_TEMP/cert.p12"
+            echo "$APPLE_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+            security create-keychain -p "temp_kc_pass" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "temp_kc_pass" "$KEYCHAIN_PATH"
+            security import "$CERT_PATH" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            security list-keychain -d user -s "$KEYCHAIN_PATH"
+            SIGN_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | grep "(${APPLE_TEAM_ID})" | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          fi
+
+          if [ -n "$SIGN_IDENTITY" ]; then
+            echo "🔏 Signature Developer ID : $SIGN_IDENTITY"
+            find /tmp/dmg_build/Kodo_POS.app/Contents -type f \( -name "*.dylib" -o -name "*.so" -o -perm -111 \) ! -path "*.framework/*" -print0 \
+              | xargs -0 -I{} codesign --force --options runtime --timestamp --entitlements scripts/release/entitlements.plist --sign "$SIGN_IDENTITY" "{}"
+            codesign --force --deep --options runtime --timestamp --entitlements scripts/release/entitlements.plist --sign "$SIGN_IDENTITY" /tmp/dmg_build/Kodo_POS.app
+            codesign --verify --deep --strict /tmp/dmg_build/Kodo_POS.app
+          else
+            echo "⚠️ Secrets certificat Apple absents : signature ad-hoc locale (--sign -)."
+            codesign --force --deep --sign - /tmp/dmg_build/Kodo_POS.app || true
+          fi
+
+          hdiutil create -volname "Kodo POS" -srcfolder /tmp/dmg_build -ov -format UDZO Installation_Kodo_POS.dmg
+
+          if [ -n "$SIGN_IDENTITY" ]; then
+            codesign --force --timestamp --sign "$SIGN_IDENTITY" Installation_Kodo_POS.dmg
+            if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+              xcrun notarytool submit Installation_Kodo_POS.dmg --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+              xcrun stapler staple Installation_Kodo_POS.dmg
+              xcrun stapler validate Installation_Kodo_POS.dmg
+            fi
+          fi
+
+      - name: 🚀 Upload macOS DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kodo_POS_macOS_DMG
+          path: Installation_Kodo_POS.dmg
+          retention-days: 30

@@ -77,12 +77,23 @@ def open_native_window():
     except Exception as e:
         print(f"⚠️ [KODO POS] pywebview non disponible ou en erreur ({e}). Bascule vers le navigateur natif macOS...")
 
-    # 2. Sinon, ouvrir dans Safari ou le navigateur par défaut
-    print("🌐 [KODO POS] Ouverture de l'interface Caisse dans Safari...")
-    try:
-        subprocess.run(["open", "-a", "Safari", URL])
-    except Exception:
+    # 2. Sinon, ouvrir dans Safari (macOS) ou le navigateur par défaut (Windows/Linux)
+    if sys.platform == "darwin":
+        print("🌐 [KODO POS] Ouverture de l'interface Caisse dans Safari...")
+        try:
+            subprocess.run(["open", "-a", "Safari", URL], check=True)
+        except Exception:
+            webbrowser.open(URL)
+    else:
+        print("🌐 [KODO POS] Ouverture de l'interface Caisse dans le navigateur...")
         webbrowser.open(URL)
+
+    # Maintenir le processus principal actif tant que le serveur backend tourne en thread démon
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == '__main__':

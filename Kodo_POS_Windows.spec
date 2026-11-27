@@ -1,32 +1,64 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Script PyInstaller Spec pour Windows (Kōdo POS)
+import os
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_all
 
-from PyInstaller.utils.hooks import collect_data_files
-from PyInstaller.utils.hooks import collect_submodules
-from PyInstaller.utils.hooks import collect_all
-
-datas = [('logo.png', '.'), ('logo_ticket.png', '.'), ('instagram_block.png', '.'), ('kodo_pos.db', '.'), ('dist', 'dist'), ('plan_permissions.json', '.')]
+datas = [
+    ('logo.png', '.'),
+    ('logo_ticket.png', '.'),
+    ('instagram_block.png', '.'),
+    ('kodo_pos.db', '.'),
+    ('plan_permissions.json', '.'),
+    ('dist', 'dist'),
+]
 binaries = []
-hiddenimports = ['export_manager', 'database_manager', 'ticket_printer', 'pdf_generator', 'openpyxl.cell._writer', 'views.modals', 'views.stats_view', 'firebase_sync', 'shopify_sync', 'license_manager', 'backup_manager', 'core.rollback_manager', 'core.crash_watcher', 'core.updater', 'services.update_checker', 'server_pos']
-datas += collect_data_files('pandas')
+hiddenimports = [
+    *collect_submodules('kodo_core'),
+    'server_pos',
+    'patch_loader',
+    'kodo_base',
+    'kodo_ed25519',
+    'database_manager',
+    'audit_trail',
+    'backup_manager',
+    'ticket_printer',
+    'pdf_generator',
+    'license_manager',
+    'shopify_sync',
+    'firebase_sync',
+    'export_manager',
+    'openpyxl',
+    'openpyxl.cell._writer',
+    *collect_submodules('PIL'),
+    *collect_submodules('reportlab'),
+    *collect_submodules('cryptography'),
+]
+
 datas += collect_data_files('openpyxl')
 datas += collect_data_files('PIL')
-hiddenimports += collect_submodules('PIL')
-tmp_ret = collect_all('qrcode')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('barcode')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+for _pkg in ('qrcode', 'barcode', 'certifi'):
+    try:
+        _ret = collect_all(_pkg)
+        datas += _ret[0]
+        binaries += _ret[1]
+        hiddenimports += _ret[2]
+    except Exception:
+        pass
 
 a = Analysis(
     ['launch_app.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['pandas.tests', 'openpyxl.tests', 'PIL.tests', 'matplotlib', 'scipy', 'unittest', 'test'],
+    excludes=[
+        'numpy', 'pandas', 'scipy', 'matplotlib',
+        'pytest', 'unittest', 'test', 'tkinter.test', 'curses', 'IPython', 'jupyter',
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -42,7 +74,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
