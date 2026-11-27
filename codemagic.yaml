@@ -5,11 +5,11 @@ workflows:
     max_build_duration: 60
 
     environment:
-      groups:
-        # Groupe optionnel dans Codemagic UI (Teams -> Global variables & secrets) :
-        # FRONTEND_REPO_TOKEN (si Kodo-POS-Frontend est privé)
-        # APPLE_CERT_P12_BASE64, APPLE_CERT_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD
-        - kodo_release
+      # Optionnel : pour activer la signature Developer ID & notarisation Apple en cloud,
+      # créez des variables d'application dans un groupe (ex. `kodo_release`) puis décommentez :
+      # groups:
+      #   - kodo_release
+      # Variables supportées : FRONTEND_REPO_TOKEN, APPLE_CERT_P12_BASE64, APPLE_CERT_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD
       vars:
         APPLE_TEAM_ID: "8Q2G5M5C2B"
       node: 22
@@ -22,16 +22,12 @@ workflows:
           include: true
 
     scripts:
-      - name: Checkout et build Frontend (Kodo-POS-Frontend)
+      - name: Vérification ou build Frontend (Kodo-POS-Frontend)
         script: |
           set -euo pipefail
           rm -rf _frontend
           if [ -n "${FRONTEND_REPO_TOKEN:-}" ]; then
             git clone --branch main --depth 1 "https://x-access-token:${FRONTEND_REPO_TOKEN}@github.com/rulmontkiama/Kodo-POS-Frontend.git" _frontend
-          else
-            git clone --branch main --depth 1 "https://github.com/rulmontkiama/Kodo-POS-Frontend.git" _frontend || true
-          fi
-          if [ -f "_frontend/package.json" ]; then
             cd _frontend
             npm ci
             npm run lint
@@ -40,8 +36,11 @@ workflows:
             cd ..
             rm -rf dist
             cp -R _frontend/dist dist
-          elif [ ! -f "dist/index.html" ]; then
-            echo "❌ Frontend introuvable : ajoutez FRONTEND_REPO_TOKEN dans le groupe kodo_release si Kodo-POS-Frontend est privé."
+          else
+            echo "ℹ️ FRONTEND_REPO_TOKEN absent : utilisation du dossier dist/ embarqué dans le dépôt."
+          fi
+          if [ ! -f "dist/index.html" ]; then
+            echo "❌ dist/index.html introuvable."
             exit 1
           fi
 
@@ -53,7 +52,8 @@ workflows:
           fi
           PY312="$(command -v python3.12)"
           "$PY312" -m pip install --upgrade pip
-          "$PY312" -m pip install -r requirements.txt certifi cryptography pywebview
+          "$PY312" -m pip install -r requirements.txt certifi cryptography
+          "$PY312" -m pip install pywebview || true
           "$PY312" -m pytest -q tests
 
       - name: Base d'usine vierge et compilation PyInstaller (.app)
