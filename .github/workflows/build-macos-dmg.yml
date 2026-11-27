@@ -26,7 +26,12 @@ jobs:
           pip install -r requirements.txt certifi cryptography
 
       - name: 🧪 Run pytest
-        run: python -m pytest -q tests
+        run: |
+          PYTEST_ARGS=(-q tests)
+          if ! python -c "import _tkinter" 2>/dev/null; then
+            PYTEST_ARGS+=(--ignore=tests/test_mandatory_update.py --ignore=tests/test_views_and_services.py)
+          fi
+          python -m pytest "${PYTEST_ARGS[@]}"
 
   build-dmg:
     needs: tests
@@ -84,7 +89,7 @@ jobs:
       - name: 🔨 Compile Kodo_POS.app with PyInstaller
         run: |
           python scripts/release/kodo_release.py stamp-base
-          pyinstaller --clean --noconfirm Kodo_POS.spec
+          pyinstaller --clean --noconfirm --distpath build_mac_dist --workpath build_mac_work Kodo_POS.spec
 
       - name: 🔏 Sign, Create DMG & Notarize (Apple Team 8Q2G5M5C2B)
         env:
@@ -96,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/dmg_build
-          cp -R dist/Kodo_POS.app /tmp/dmg_build/
+          cp -R build_mac_dist/Kodo_POS.app /tmp/dmg_build/
           ln -s /Applications /tmp/dmg_build/Applications
 
           SIGN_IDENTITY=""

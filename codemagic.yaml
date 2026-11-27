@@ -54,7 +54,12 @@ workflows:
           "$PY312" -m pip install --upgrade pip
           "$PY312" -m pip install -r requirements.txt certifi cryptography
           "$PY312" -m pip install pywebview || true
-          "$PY312" -m pytest -q tests
+          PYTEST_ARGS=(-q tests)
+          if ! "$PY312" -c "import _tkinter" 2>/dev/null; then
+            echo "ℹ️ _tkinter absent dans ce runtime Python : tests UI Tkinter legacy ignorés."
+            PYTEST_ARGS+=(--ignore=tests/test_mandatory_update.py --ignore=tests/test_views_and_services.py)
+          fi
+          "$PY312" -m pytest "${PYTEST_ARGS[@]}"
 
       - name: Base d'usine vierge et compilation PyInstaller (.app)
         script: |
@@ -63,14 +68,14 @@ workflows:
           rm -f kodo_pos.db kodo_pos.db-shm kodo_pos.db-wal
           "$PY312" -c "import database_manager, sqlite3; database_manager.DB_NAME='kodo_pos.db'; database_manager.initialiser_db(); c=sqlite3.connect('kodo_pos.db'); assert sum(c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ('Tickets','Produits','Stocks','Clients'))==0"
           "$PY312" scripts/release/kodo_release.py stamp-base
-          "$PY312" -m PyInstaller --clean --noconfirm Kodo_POS.spec
+          "$PY312" -m PyInstaller --clean --noconfirm --distpath build_mac_dist --workpath build_mac_work Kodo_POS.spec
 
       - name: Signature Developer ID (8Q2G5M5C2B), DMG et notarisation Apple
         script: |
           set -euo pipefail
           rm -rf /tmp/dmg_build
           mkdir -p /tmp/dmg_build
-          cp -R dist/Kodo_POS.app /tmp/dmg_build/
+          cp -R build_mac_dist/Kodo_POS.app /tmp/dmg_build/
           ln -s /Applications /tmp/dmg_build/Applications
 
           SIGN_IDENTITY=""
